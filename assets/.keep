@@ -1,0 +1,3 @@
+PyInstaller needs this dir to exist so winsound asset_path resolves at runtime.
+Drop ready.wav, engage.wav, disengage.wav, denied.wav here when ready —
+audio.play() no-ops gracefully if the file is missing.

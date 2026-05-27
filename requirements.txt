@@ -1,0 +1,7 @@
+numpy>=1.26,<2.0
+opencv-python>=4.9
+onnxruntime-directml>=1.17
+dxcam>=0.0.5
+vgamepad>=0.1.0
+mss>=9.0
+customtkinter>=5.2,<6.0

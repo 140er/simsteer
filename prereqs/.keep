@@ -1,0 +1,2 @@
+Drop scs-telemetry.dll here (built from .scs-sdk-plugin/) before running build.bat
+so it gets bundled. Without it, the SCS install dialog falls back to a download link.

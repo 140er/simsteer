@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Models (large, fetch separately)
+models/*.onnx
+models/*.pkl
+models/*.thneed
+
+# Reference clones (sibling to repo, but if anyone puts it inside)
+openpilot/
+.scs-sdk-plugin/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Captured frames / logs (debug artifacts)
+captures/
+logs/
+*.mkv
+*.mp4
+
+# Per-user calibration + controller tuning
+calibration.json
+controller.json
+# Per-user live-fitted state (regenerated from telemetry on each session)
+liveparams.json
+liveparams_*.json
+livecalib_state_*.json
+# First-drive wizard completion flags (per game)
+first_drive_done_*.flag
+
+# PyInstaller build output
+build/
+dist/
+*.spec.bak
+
+# Release / share archives (produced by build + tools\make_source_zip.ps1)
+SimSteer-*.zip
+
+# Bundled SCS plugin DLL (built from .scs-sdk-plugin/ submodule before
+# build.bat; user-specific, not committed)
+prereqs/scs-telemetry.dll
+
+# Debug screenshots / one-shot artifacts
+debug_*.png
+debug_*.jpg
+*_smoke.png
+debug/*_smoke.png
+
+# Claude Code local config
+.claude/
+
+# Vendored openpilot reference files (kept locally for grepping)
+.openpilot_*.py

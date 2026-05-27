@@ -1,0 +1,20 @@
+{
+  "steer_max": 1.0,
+  "lookahead_s": 0.0572039953473296,
+  "default_speed": 22.0,
+  "min_speed": 1.0,
+  "wheelbase_m": 2.5,
+  "axis_bias": 0.0,
+  "steer_authority": 1.0,
+  "lane_change_steer_boost": 1.0,
+  "lane_change_desire_threshold": 0.55,
+  "lane_change_hold_s": 0.5,
+  "long_anticipation_s": 1.5,
+  "max_accel_mps2": 0.6000000000000001,
+  "max_decel_mps2": 4.0,
+  "speed_p_gain": 0.3,
+  "accel_deadband_mps2": 0.1,
+  "max_speed_mps": 31,
+  "max_lat_accel_mps2": 1.6,
+  "corner_scan_horizon_s": 6.0
+}
