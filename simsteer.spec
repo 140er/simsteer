@@ -38,6 +38,11 @@ ort_binaries = collect_dynamic_libs('onnxruntime')
 # `collect_data_files` walks the package and bundles non-Python files.
 vgamepad_data = collect_data_files('vgamepad')
 
+# customtkinter ships JSON themes + assets it loads at runtime by path.
+# The hooks-contrib hook usually covers this; collect explicitly so the
+# tuner window renders even if that hook is absent.
+ctk_data = collect_data_files('customtkinter')
+
 # Data files. Each tuple = (glob pattern relative to spec dir, dest dir
 # inside the bundle). PyInstaller filters non-matching paths.
 datas = [
@@ -69,11 +74,12 @@ for _doc in ('forza-data-out.png', 'ets2-deadzone.png',
 
 
 a = Analysis(
-    ['pilot/__main__.py'],
+    ['simsteer/__main__.py'],
     pathex=['.'],
     binaries=ort_binaries,
-    datas=datas + vgamepad_data,
+    datas=datas + vgamepad_data + ctk_data,
     hiddenimports=[
+        'dxcam',
         'vgamepad',
         'onnxruntime',
         'onnxruntime.capi._pybind_state',
@@ -81,6 +87,15 @@ a = Analysis(
         'tkinter', 'tkinter.messagebox',
         # winsound is a stdlib C module on Windows.
         'winsound',
+        # customtkinter — the tuner's slider GUI toolkit.
+        'customtkinter',
+        # Game profiles are imported DYNAMICALLY by the registry
+        # (simsteer.games.base.discover -> pkgutil.iter_modules +
+        # importlib). PyInstaller's static scan can't see them, so the
+        # frozen exe would find ZERO games and refuse to launch. List
+        # each game module explicitly so it's bundled; PyInstaller 6's
+        # pkgutil runtime hook then lets iter_modules enumerate it.
+        'simsteer.games.ets2',
     ],
     hookspath=[],
     runtime_hooks=[],
