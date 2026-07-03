@@ -25,6 +25,12 @@ ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = ROOT / "models"
 OPENPILOT_REPO = "https://github.com/commaai/openpilot.git"
 MODELS_SUBPATH = "selfdrive/modeld/models"
+# Pinned to the last openpilot revision that ships the two-stage split model.
+# On 2026-06-13 openpilot #38173 merged driving_vision + driving_policy into a
+# single driving_supercombo.onnx and deleted the split files, so master no
+# longer has what SimSteer loads. This commit's models are byte-for-byte the
+# ones bundled in the v0.11 release.
+OPENPILOT_REF = "4988a62b310b536fb5336c35151eb2df56e37d97"
 
 WANTED = [
     "driving_vision.onnx",
@@ -50,10 +56,15 @@ def main() -> int:
         shutil.rmtree(tmp)
 
     try:
-        run(["git", "clone", "--depth=1", "--filter=blob:none", "--sparse",
-             "--no-checkout", OPENPILOT_REPO, str(tmp)])
+        # A depth-1 clone only fetches master's tip, which no longer has the
+        # split models — so init + shallow-fetch the pinned commit directly.
+        tmp.mkdir(parents=True)
+        run(["git", "init", "-q"], cwd=tmp)
+        run(["git", "remote", "add", "origin", OPENPILOT_REPO], cwd=tmp)
+        run(["git", "fetch", "--depth=1", "--filter=blob:none",
+             "origin", OPENPILOT_REF], cwd=tmp)
         run(["git", "sparse-checkout", "set", MODELS_SUBPATH], cwd=tmp)
-        run(["git", "checkout"], cwd=tmp)
+        run(["git", "checkout", "-q", "FETCH_HEAD"], cwd=tmp)
 
         includes = ",".join(f"{MODELS_SUBPATH}/{n}" for n in WANTED)
         run(["git", "lfs", "pull", "--include", includes], cwd=tmp)
