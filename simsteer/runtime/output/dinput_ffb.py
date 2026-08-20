@@ -28,6 +28,7 @@ if sys.platform != "win32":
 
 # DirectInput constants
 DIRECTINPUT_VERSION = 0x0800
+FANATEC_VENDOR_ID = 0x0EB7  # Endor AG
 
 # Cooperative level flags
 DISCL_EXCLUSIVE = 0x00000001
@@ -243,8 +244,14 @@ class DirectInputFFB:
         def enum_callback(lpddi, pvRef):
             instance = lpddi.contents
             name = instance.tszProductName.lower()
-            # Match Fanatec by name heuristic
-            if any(x in name for x in ["fanatec", "csl", "clubsport", "podium"]):
+            
+            # Extract VID from guidProduct (VID is lower 16 bits of Data1)
+            # DirectInput product GUID format: {VID_PID-0000-0000-0000-504944564944}
+            vid = instance.guidProduct.Data1 & 0xFFFF
+            
+            # Match Fanatec by VID 0x0EB7 or name heuristic
+            if (vid == FANATEC_VENDOR_ID or 
+                any(x in name for x in ["fanatec", "csl", "clubsport", "podium"])):
                 # Store GUID
                 found_guid[0] = GUID()
                 memmove(byref(found_guid[0]), byref(instance.guidInstance), sizeof(GUID))
@@ -280,14 +287,35 @@ class DirectInputFFB:
         
         self.device = device_ptr
         
-        # Set data format (use a minimal joystick format)
-        # In production, use c_dfDIJoystick2 from dinput8.lib
+        # Get device vtable for remaining calls
         dev_vtable = cast(self.device, POINTER(c_void_p)).contents
         dev_vtable_ptr = cast(dev_vtable, POINTER(c_void_p))
         
+        # Set data format - define minimal c_dfDIJoystick structure
+        # GUID_XAxis for axis object type
+        guid_xaxis = GUID.from_uuid(GUID_XAxis)
+        
+        # Minimal data format for joystick (just need axis 0 for steering)
+        obj_fmt = DIOBJECTDATAFORMAT()
+        obj_fmt.pguid = cast(byref(guid_xaxis), POINTER(GUID))
+        obj_fmt.dwOfs = 0
+        obj_fmt.dwType = 0x80000000 | 0x00000001  # DIDFT_AXIS | DIDFT_ANYINSTANCE
+        obj_fmt.dwFlags = 0
+        
+        data_fmt = DIDATAFORMAT()
+        data_fmt.dwSize = sizeof(DIDATAFORMAT)
+        data_fmt.dwObjSize = sizeof(DIOBJECTDATAFORMAT)
+        data_fmt.dwFlags = 0x00000001  # DIDF_ABSAXIS
+        data_fmt.dwDataSize = 4  # sizeof(LONG) for one axis
+        data_fmt.dwNumObjs = 1
+        data_fmt.rgodf = cast(byref(obj_fmt), POINTER(DIOBJECTDATAFORMAT))
+        
         # SetDataFormat at index 11
-        # For now, skip SetDataFormat as it requires c_dfDIJoystick2 structure
-        # DirectInput will use a default format
+        set_fmt_func = cast(dev_vtable_ptr[11], IDirectInputDevice8_SetDataFormat)
+        hr = set_fmt_func(self.device, byref(data_fmt))
+        
+        if hr != S_OK:
+            return False
         
         # Create message-only window for cooperative level
         self.hwnd = windll.user32.CreateWindowExW(
@@ -346,10 +374,10 @@ class DirectInputFFB:
             effect.lpvTypeSpecificParams = cast(byref(cf), c_void_p)
             effect.dwStartDelay = 0
             
-            # CreateEffect at index 14
+            # CreateEffect at index 18 (not 14)
             dev_vtable = cast(self.device, POINTER(c_void_p)).contents
             dev_vtable_ptr = cast(dev_vtable, POINTER(c_void_p))
-            create_effect_func = cast(dev_vtable_ptr[14], IDirectInputDevice8_CreateEffect)
+            create_effect_func = cast(dev_vtable_ptr[18], IDirectInputDevice8_CreateEffect)
             
             effect_ptr = c_void_p()
             guid_cf = GUID.from_uuid(GUID_ConstantForce)
@@ -427,10 +455,10 @@ class DirectInputFFB:
             return False
         
         try:
-            # SendForceFeedbackCommand at index 33
+            # SendForceFeedbackCommand at index 22 (not 33)
             dev_vtable = cast(self.device, POINTER(c_void_p)).contents
             dev_vtable_ptr = cast(dev_vtable, POINTER(c_void_p))
-            send_cmd_func = cast(dev_vtable_ptr[33], IDirectInputDevice8_SendForceFeedbackCommand)
+            send_cmd_func = cast(dev_vtable_ptr[22], IDirectInputDevice8_SendForceFeedbackCommand)
             
             hr = send_cmd_func(self.device, DISFFC_STOPALL)
             return hr == S_OK

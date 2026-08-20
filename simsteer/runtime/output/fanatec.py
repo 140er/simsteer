@@ -137,16 +137,20 @@ class Fanatec:
         This attempts to acquire the Fanatec wheel in BACKGROUND | EXCLUSIVE mode
         and create a constant force effect for steering. If successful, we can
         physically drive the motor.
+        
+        DirectInput enumeration is the source of truth for device detection.
+        pygame detection is used only as a hint for logging.
         """
         if not _DINPUT_FFB_AVAILABLE:
             return False
         
-        # Detect Fanatec wheel as a hint (pygame)
+        # Try pygame detection as a hint (not required for FFB to work)
         wheel = self._detect_fanatec_wheel()
-        if wheel is None:
-            return False
+        if wheel:
+            print(f"pygame detected Fanatec: {wheel.get_name()}")
         
         # Initialize DirectInput FFB via ctypes
+        # DirectInput enumeration will match by VID 0x0EB7 or name heuristic
         try:
             ffb = get_dinput_ffb()
             
@@ -154,7 +158,7 @@ class Fanatec:
             if not ffb.init():
                 return False
             
-            # Find and acquire Fanatec device
+            # Find and acquire Fanatec device (via DirectInput enumeration)
             if not ffb.find_fanatec_device():
                 ffb.release()
                 return False
