@@ -1,12 +1,13 @@
 """Closed-loop driving entrypoint.
 
-    python -m pilot.main [--max-width 1600] [--device gamepad|wheel]
+    python -m pilot.main [--max-width 1600] [--device gamepad|wheel|fanatec]
 
 Default `--device gamepad` uses ViGEm Xbox 360 emulation (works in any
 game that accepts XInput). Use `--device wheel` to emulate a sim wheel
 via vJoy — this bypasses ETS2's speed-sensitive gamepad rack assist
 (the `b · v²` term in LiveParams) and produces a linear axis→wheel
-response. Requires the vJoy driver + `pip install pyvjoy`.
+response. Use `--device fanatec` for Fanatec DirectInput FFB motor control
+with vJoy fallback. Requires the vJoy driver + `pip install pyvjoy`.
 
 Controls. INSERT, ← / →, F1/F2/F3 fire GLOBALLY (game can stay focused).
 Everything else needs the overlay window focused:
@@ -31,16 +32,35 @@ keep up (FPS below MIN_HEALTHY_FPS).
 
 Calibration (pitch + height) and steering scale (curvature per gamepad
 axis) self-tune from telemetry; there are no Shift+ toggles for it.
+
+Windows cp1252 console safe: emoji/Unicode in output is replaced with ASCII.
 """
 
 from __future__ import annotations
 
 import argparse
 import math
+import sys
 import time
 
 import cv2
 import numpy as np
+
+# Windows console encoding safety
+def _safe_print(*args, **kwargs):
+    """Print with cp1252-safe encoding. Replaces emoji/Unicode with ASCII."""
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        # Fallback: encode to console encoding with replacement
+        msg = " ".join(str(a) for a in args)
+        # Replace common emoji with ASCII equivalents
+        msg = msg.replace("⚠️", "WARN").replace("✓", "OK")
+        msg = msg.replace("⚠", "!").replace("✔", "*")
+        # Encode-safe print
+        enc = sys.stdout.encoding or "utf-8"
+        safe_msg = msg.encode(enc, errors="replace").decode(enc, errors="replace")
+        print(safe_msg, **kwargs)
 
 from pilot import audio
 from pilot.calibration import Calibration, model_view_calib
@@ -201,10 +221,12 @@ def main() -> int:
                     default=settings.no_gamepad,
                     help="run the loop and overlay but don't open any input "
                          "device (useful when ViGEm/vJoy isn't installed)")
-    ap.add_argument("--device", choices=["gamepad", "wheel"],
+    ap.add_argument("--device", choices=["gamepad", "wheel", "fanatec"],
                     default=settings.device,
                     help="output device kind. 'gamepad' = ViGEm Xbox 360 "
                          "(speed-sensitive in ETS2). 'wheel' = vJoy "
+                         "wheel emulation (linear). 'fanatec' = DirectInput FFB "
+                         "motor control (physical wheel drive) with vJoy fallback")
                          "(linear; bypasses ETS2's gamepad rack assist). "
                          "Requires the vJoy driver + pyvjoy.")
     ap.add_argument("--vjoy-device", type=int, default=settings.vjoy_device,
@@ -304,12 +326,12 @@ def main() -> int:
         show_preflight_dialog(game_pre)
     preflight_warnings = warnings_for_hud(pre) + warnings_for_hud(game_pre)
     for w in preflight_warnings:
-        print(f"preflight: WARN — {w}")
+        _safe_print(f"preflight: WARN — {w}")
     tel_status = ("available" if tel.available
                   else "not detected — game not running, plugin missing, "
                        "or shared memory disabled. Using --default-speed.")
-    print(f"telemetry [{tel_label}]: {tel_status}")
-    print(f"per-game state: loading from *_{game}.json (legacy fallback if absent)")
+    _safe_print(f"telemetry [{tel_label}]: {tel_status}")
+    _safe_print(f"per-game state: loading from *_{game}.json (legacy fallback if absent)")
     calib = Calibration.load(game=game)
     ctrl_cfg = ControllerConfig.load(game=game)
     manual = ManualInputs()

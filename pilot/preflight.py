@@ -105,7 +105,11 @@ def _check_models() -> list[Check]:
                 severity="fatal",
                 title=f"Model file missing: {name}",
                 detail=(f"Expected at {p}.\n\n"
-                        "For dev installs: run `python tools\\fetch_model.py`.\n"
+                        "ACTION REQUIRED:\n"
+                        "  1. Open a terminal in the SimSteer directory\n"
+                        "  2. Run: python tools\\fetch_model.py\n"
+                        "  3. Wait for the models to download (~60 MB total)\n"
+                        "  4. Relaunch SimSteer\n\n"
                         "For shipped bundles: the bundle is incomplete — "
                         "redownload and reinstall."),
             ))
