@@ -227,8 +227,6 @@ def main() -> int:
                          "(speed-sensitive in ETS2). 'wheel' = vJoy "
                          "wheel emulation (linear). 'fanatec' = DirectInput FFB "
                          "motor control (physical wheel drive) with vJoy fallback")
-                         "(linear; bypasses ETS2's gamepad rack assist). "
-                         "Requires the vJoy driver + pyvjoy.")
     ap.add_argument("--vjoy-device", type=int, default=settings.vjoy_device,
                     help="vJoy device index when --device=wheel (default 1).")
     ap.add_argument("--no-tuner", action="store_true",
