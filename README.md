@@ -38,6 +38,19 @@ There are two ways to run SimSteer:
    - **Wheel** (`--device wheel`) → vJoy (emulates a DirectInput wheel;
      ETS2 skips its gamepad rack assist for a linear response):
      https://github.com/njz3/vJoy/releases — run the installer.
+   - **Fanatec** (`--device fanatec`) → **DirectInput Force Feedback motor control**
+     - Fanatec driver: https://fanatec.com/en-us/technology/firmware-update
+     - Wheel in PC mode (check Fanatec Control Panel)
+     - vJoy driver (as fallback if FFB unavailable)
+     - When engaged, SimSteer attempts to use **DirectInput Force Feedback** to
+       physically turn your steering wheel rim to match AI commands via constant
+       force effects
+     - When disengaged, motor releases so you can take over
+     - Game still reads your wheel position for vehicle control
+     - **Implementation Status**: FFB motor control is implemented via DirectInput8
+       COM interfaces using ctypes. Hardware validation is pending. If FFB
+       acquisition fails (no wheel detected, game holds exclusive lock, or driver
+       issue), SimSteer falls back to vJoy virtual output mode automatically.
 
    You only need the one matching how you'll steer. Gamepad is the
    default.
@@ -86,24 +99,33 @@ There are two ways to run SimSteer:
 
 5. **Run** `SimSteer.exe`. The launcher tells you what's missing.
 
-6. **Set the camera FOV** (once, by hand — there is no auto-FOV). In the
-   tuner's **Camera & Calibration** section, set **Capture VFOV** to match
-   your in-game field of view (ETS2: Options → Gameplay → Camera; AC:
-   Options → Video → Camera FOV; Forza: Settings → Difficulty → Camera
-   FOV). Then drive a straight road at speed and check the HUD **FOV**
-   line: `ratio vx_model/v_ego` should sit near `1.00`. `>1.05` = FOV too
-   high (narrow it); `<0.95` = too low (widen it). **Wrong FOV is the #1
-   cause of the plan veering off the road** — pitch/yaw/height
-   auto-calibrate, FOV does not. See [docs/TUNING.md](docs/TUNING.md).
+6. **Set the camera FOV** — SimSteer now includes **AUTOMATIC FOV detection**!
+   
+   During your first drive, SimSteer will automatically measure and correct
+   your FOV after ~30-60 seconds of straight highway driving. Watch the HUD
+   for the "auto-FOV" progress indicator.
+   
+   **Manual FOV setup (optional)**: If you prefer to set FOV manually or want
+   to verify the auto-detection:
+   - In the tuner's **Camera & Calibration** section, set **Capture VFOV** to
+     match your in-game field of view (ETS2: Options → Gameplay → Camera; AC:
+     Options → Video → Camera FOV; Forza: Settings → Difficulty → Camera FOV)
+   - Drive a straight road at speed and check the HUD **FOV** line:
+     `ratio vx_model/v_ego` should sit near `1.00`
+   - `>1.05` = FOV too high (narrow it); `<0.95` = too low (widen it)
+   
+   **Note**: Wrong FOV used to be the #1 cause of the plan veering off the road.
+   Auto-FOV fixes this automatically for most users!
 
 7. **Calibrate** (first launch per game):
-   - Drive normally on highway for ~10-15 minutes.
-   - A progress bar at the top of the overlay tracks calibration.
-   - Don't yank the wheel — the calibration auto-pauses when it detects
-     human steering input.
-   - When you hear the READY chime (if you've dropped audio files into
-     `assets/` — see [Audio](#audio)) and the banner turns green, press
-     **INSERT** to engage.
+   - Drive normally on highway for ~10-15 minutes
+   - The setup wizard shows clear progress and tells you exactly what to do
+   - Progress bar at the top tracks both camera and steering calibration
+   - **Speed requirement**: 15+ mph for calibration to work
+   - **Steering requirement**: Drive straight with gentle inputs (no hard turns)
+   - Calibration auto-pauses when it detects human steering input
+   - When you hear the READY chime and see the green "✓ READY" banner,
+     press **INSERT** to engage
 
 8. **Drive.** Press **INSERT** to engage/disengage at any time.
 
@@ -114,10 +136,13 @@ tab — **Setup** — has everything a new user needs to pick:
 
 - **Game**: Auto-detect / ETS2 / AC / Forza. *Game change requires
   restart* (click **Save & Restart**; SimSteer re-launches itself).
-- **Output device**: Gamepad (ViGEm) or Wheel (vJoy). Applies on next
-  launch; live device-swap is on the Manual tab.
+- **Output device**: Gamepad (ViGEm), Wheel (vJoy), or Fanatec (Fanatec
+  wheel + vJoy coexistence). Applies on next launch; live device-swap is
+  on the Manual tab.
 - **Active steering probing** (default on): the small ±0.03 axis wiggle
   the wizard uses during Phase B.
+- **Automatic FOV detection** (default on): measures and corrects FOV
+  automatically during first drive (60 samples, ~30-60s highway).
 - **Passive LiveParams fit on ETS2 while disengaged** (default off):
   risky — pollutes the gamepad fit if you drive with a wheel.
 - **Force-engage** (dev only): bypass the calibration / FPS /
@@ -185,18 +210,31 @@ the reason so you know the bar jumping back to 0% wasn't a glitch.
 ## Troubleshooting
 
 - **Truck doesn't steer (ETS2)**: deadzone isn't 0. SimSteer warns on
-  startup if it can detect this.
+  startup with clear fix instructions in the preflight dialog.
 - **"Cannot engage — frame rate too low"**: DirectML failed to load and
   vision is on CPU. Install onnxruntime-directml:
   `pip install onnxruntime-directml` (dev install) or reinstall the
-  bundle (release install).
+  bundle (release install). SimSteer now shows a prominent warning at
+  startup if DirectML is missing.
 - **"Game telemetry not detected"**: SCS plugin missing (ETS2), Data Out
-  off (Forza), or AC not in a session.
+  off (Forza), or AC not in a session. Check the preflight warnings for
+  detailed fix instructions.
+- **Plan veers off the road**: Auto-FOV should fix this automatically
+  during your first drive. If it persists, manually verify FOV in the
+  tuner (see step 6 above).
 - **AC / ETS2 launched as admin**: launch SimSteer as admin too —
   shared-memory mappings live in per-session namespaces.
 - **AV quarantines the .exe mid-extraction**: unsigned PyInstaller
   bundles are a common false-positive. Whitelist `SimSteer\` and
   re-extract.
+- **Fanatec wheel not detected**: Ensure Fanatec driver installed, wheel
+  in PC mode, powered on and connected. Check preflight messages for
+  detailed troubleshooting. SimSteer will fall back to vJoy mode if FFB
+  motor control fails.
+- **Fanatec wheel doesn't move physically**: FFB motor control requires
+  DirectInput access. If the game holds exclusive foreground FFB lock,
+  SimSteer can't drive the motor. vJoy fallback mode will activate
+  automatically. See docs for details on FFB vs vJoy modes.
 
 ## Audio
 

@@ -6,7 +6,7 @@ to override their saved setting), but anything the user picks in the
 tuner's Setup tab lands here and applies on the next launch.
 
 Lives at `%LOCALAPPDATA%\\SimSteer\\settings.json` when bundled, or at
-the repo root in dev mode (via `simsteer.paths.data_dir()`).
+the repo root in dev mode (via `pilot.paths.data_dir()`).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, fields
 
-from simsteer.paths import data_dir
+from pilot.paths import data_dir
 
 
 _SETTINGS_FILE = "settings.json"
@@ -22,8 +22,8 @@ _SETTINGS_FILE = "settings.json"
 
 @dataclass
 class Settings:
-    # Which game's telemetry to read. "auto" means the GameDetector
-    # picks the running game live. Naming a specific game pins it.
+    # Which game's telemetry to read. "auto" means try ETS2, then AC,
+    # then Forza UDP. Picking a specific game skips the autodetect.
     game: str = "auto"
     # Output device kind. "gamepad" = ViGEm Xbox 360. "wheel" = vJoy.
     device: str = "gamepad"
@@ -31,9 +31,9 @@ class Settings:
     # — ETS2's gamepad rack assist makes wheel/keyboard-sourced
     # disengaged samples bias the gamepad fit).
     passive_fit_ets2: bool = False
-    # Disable active steering probing during onboarding calibration.
-    # Default ON because probes dramatically accelerate LP convergence;
-    # only turn it OFF if the small steering wobble during setup is
+    # Disable active steering probing during wizard Phase B. Default
+    # ON because probes dramatically accelerate LP convergence; only
+    # turn it OFF if the small steering wobble during the wizard is
     # unwanted.
     no_probe: bool = False
     # Bypass the engagement gate (camera-calibrated + telemetry + FPS).
@@ -54,10 +54,23 @@ class Settings:
     # HUD mode: "user" (clean panels) or "dev" (stack-of-text dump).
     # Toggle live with the H hotkey; this value is the persisted default.
     hud_mode: str = "user"
-    # List of simsteer.app.hotkeys ids that are disabled. Managed via
+    # List of pilot.hotkeys.HOTKEYS ids that are disabled. Managed via
     # the Hotkeys tab. Stored as a list for JSON friendliness; lookup
-    # treats it as a set.
+    # is via `pilot.hotkeys.hk_enabled` which treats it as a set.
     disabled_hotkeys: list = None  # type: ignore[assignment]
+    # Wheel button bind for engage/disengage. Format: "device_name:button_index"
+    # e.g. "Fanatec CSL Elite:12" or empty string for INSERT-only.
+    wheel_button_bind: str = ""
+    # Torque override disengage threshold (radians). When engaged, if physical
+    # wheel angle differs from AI command by more than this threshold for
+    # sustained period, auto-disengage (user fighting the wheel).
+    torque_override_threshold_rad: float = 0.5  # ~28.6 degrees
+    # Enable torque override disengage (openpilot-style manual takeover).
+    torque_override_enabled: bool = True
+    # Auto-FOV calibration: measures true FOV from vx_model/v_ego on straight
+    # highway driving (60 samples, ~30-60s) and applies the correction once.
+    # One-shot solve is safe; it cannot run away. Disable for manual FOV.
+    auto_fov: bool = True
 
     def __post_init__(self) -> None:
         # Dataclass defaults for mutable types (list/dict) can't be

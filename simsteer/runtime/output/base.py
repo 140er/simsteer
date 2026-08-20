@@ -27,22 +27,23 @@ from __future__ import annotations
 
 from typing import Literal
 
-from simsteer.runtime.output.gamepad import Gamepad, GamepadError
-from simsteer.runtime.output.wheel import Wheel, WheelError
+from pilot.gamepad import Gamepad, GamepadError
+from pilot.wheel import Wheel, WheelError
+from pilot.fanatec import Fanatec, FanatecError
 
-DeviceKind = Literal["gamepad", "wheel"]
+DeviceKind = Literal["gamepad", "wheel", "fanatec"]
 
 
 class DeviceManager:
     """Single point of contact for whichever virtual controller is
-    active. Public interface mirrors `Gamepad` / `Wheel` so callers
-    can use a `DeviceManager` anywhere either was previously used."""
+    active. Public interface mirrors `Gamepad` / `Wheel` / `Fanatec` so
+    callers can use a `DeviceManager` anywhere any device was previously used."""
 
     def __init__(self, initial_kind: DeviceKind = "gamepad",
                  vjoy_device_id: int = 1) -> None:
         self._vjoy_id = vjoy_device_id
         self._kind: DeviceKind | None = None
-        self._device: Gamepad | Wheel | None = None
+        self._device: Gamepad | Wheel | Fanatec | None = None
         self.last_error: str | None = None
         # Best effort — if initial_kind fails (e.g. no vJoy driver), the
         # caller can see `self.kind is None` and react.
@@ -62,6 +63,10 @@ class DeviceManager:
     @property
     def is_wheel(self) -> bool:
         return self._kind == "wheel"
+
+    @property
+    def is_fanatec(self) -> bool:
+        return self._kind == "fanatec"
 
     def set_kind(self, kind: DeviceKind) -> bool:
         """Switch to a different output device. Disengages and releases
@@ -87,10 +92,13 @@ class DeviceManager:
                 self._device = Gamepad()
             elif kind == "wheel":
                 self._device = Wheel(device_id=self._vjoy_id)
+            elif kind == "fanatec":
+                # Try FFB motor control first, fall back to vJoy if FFB unavailable
+                self._device = Fanatec(device_id=self._vjoy_id, prefer_vjoy_fallback=True)
             else:
                 self.last_error = f"unknown device kind: {kind}"
                 return False
-        except (GamepadError, WheelError) as e:
+        except (GamepadError, WheelError, FanatecError) as e:
             self.last_error = str(e)
             return False
         self._kind = kind
@@ -139,6 +147,6 @@ class DeviceManager:
         return self._device.raw if self._device is not None else None
 
     @property
-    def device(self) -> Gamepad | Wheel | None:
+    def device(self) -> Gamepad | Wheel | Fanatec | None:
         """The actual underlying object — useful for `isinstance` checks."""
         return self._device

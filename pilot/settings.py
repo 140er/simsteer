@@ -58,6 +58,19 @@ class Settings:
     # the Hotkeys tab. Stored as a list for JSON friendliness; lookup
     # is via `pilot.hotkeys.hk_enabled` which treats it as a set.
     disabled_hotkeys: list = None  # type: ignore[assignment]
+    # Wheel button bind for engage/disengage. Format: "device_name:button_index"
+    # e.g. "Fanatec CSL Elite:12" or empty string for INSERT-only.
+    wheel_button_bind: str = ""
+    # Torque override disengage threshold (radians). When engaged, if physical
+    # wheel angle differs from AI command by more than this threshold for
+    # sustained period, auto-disengage (user fighting the wheel).
+    torque_override_threshold_rad: float = 0.5  # ~28.6 degrees
+    # Enable torque override disengage (openpilot-style manual takeover).
+    torque_override_enabled: bool = True
+    # Auto-FOV calibration: measures true FOV from vx_model/v_ego on straight
+    # highway driving (60 samples, ~30-60s) and applies the correction once.
+    # One-shot solve is safe; it cannot run away. Disable for manual FOV.
+    auto_fov: bool = True
 
     def __post_init__(self) -> None:
         # Dataclass defaults for mutable types (list/dict) can't be

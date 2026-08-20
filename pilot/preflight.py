@@ -69,7 +69,8 @@ def run_global_preflight(device: str = "gamepad") -> PreflightReport:
     rpt = PreflightReport()
     rpt.extend(_check_models())
     rpt.extend(_check_vigem(required=(device == "gamepad")))
-    rpt.extend(_check_vjoy(required=(device == "wheel")))
+    rpt.extend(_check_vjoy(required=(device in ("wheel", "fanatec"))))
+    rpt.extend(_check_fanatec(required=(device == "fanatec")))
     rpt.extend(_check_directml())
     return rpt
 
@@ -87,6 +88,8 @@ def run_game_preflight(game: str | None) -> PreflightReport:
         # works — no warning needed here. Reserved for future per-game
         # tips (e.g. recommended HFOV).
         pass
+    # Add a universal FOV reminder for all games
+    rpt.extend(_check_fov_reminder(game))
     return rpt
 
 
@@ -102,7 +105,11 @@ def _check_models() -> list[Check]:
                 severity="fatal",
                 title=f"Model file missing: {name}",
                 detail=(f"Expected at {p}.\n\n"
-                        "For dev installs: run `python tools\\fetch_model.py`.\n"
+                        "ACTION REQUIRED:\n"
+                        "  1. Open a terminal in the SimSteer directory\n"
+                        "  2. Run: python tools\\fetch_model.py\n"
+                        "  3. Wait for the models to download (~60 MB total)\n"
+                        "  4. Relaunch SimSteer\n\n"
                         "For shipped bundles: the bundle is incomplete — "
                         "redownload and reinstall."),
             ))
@@ -141,11 +148,74 @@ def _check_vjoy(required: bool) -> list[Check]:
             id="vjoy",
             severity="fatal",
             title="vJoy driver / pyvjoy not detected",
-            detail=("--device=wheel requires the vJoy driver and pyvjoy.\n"
+            detail=("--device=wheel or --device=fanatec requires the vJoy driver and pyvjoy.\n"
                     "Install vJoy: https://github.com/njz3/vJoy/releases\n"
-                    "Then: pip install pyvjoy"),
+                    "Then: pip install pyvjoy\n\n"
+                    "IMPORTANT: After installing vJoy, run 'Configure vJoy' from the Start menu\n"
+                    "and enable device #1 with at least 3 axes (X, Y, Z)."),
             fix_url="https://github.com/njz3/vJoy/releases",
         )]
+
+
+def _check_fanatec(required: bool) -> list[Check]:
+    """Check for Fanatec wheel and provide setup guidance."""
+    if not required:
+        return []
+    out: list[Check] = []
+    # Try to detect Fanatec wheels
+    try:
+        import pygame
+        pygame.init()
+        count = pygame.joystick.get_count()
+        found = False
+        for i in range(count):
+            joy = pygame.joystick.Joystick(i)
+            name = joy.get_name().lower()
+            if "fanatec" in name or "csl" in name or "clubsport" in name or "podium" in name:
+                found = True
+                out.append(Check(
+                    id="fanatec_detected",
+                    severity="info",
+                    title=f"Fanatec wheel detected: {joy.get_name()}",
+                    detail=(f"Found Fanatec wheel: {joy.get_name()}\n\n"
+                            "SimSteer will use vJoy as a second virtual wheel alongside your "
+                            "Fanatec. In your game, bind SimSteer's vJoy axes for AI steering "
+                            "and keep your Fanatec bound for manual control.\n\n"
+                            "Make sure:\n"
+                            "  - Fanatec driver installed from https://fanatec.com/en-us/technology/firmware-update\n"
+                            "  - Wheel is in PC mode (check Fanatec Control Panel)\n"
+                            "  - vJoy driver installed and device #1 enabled\n"
+                            "  - Game supports multiple steering wheels"),
+                ))
+                break
+        pygame.quit()
+        if not found:
+            out.append(Check(
+                id="fanatec_not_detected",
+                severity="warn",
+                title="No Fanatec wheel detected",
+                detail=("SimSteer is set to Fanatec mode but no Fanatec wheel was detected.\n\n"
+                        "Check that:\n"
+                        "  - Fanatec wheel is powered on and connected via USB\n"
+                        "  - Fanatec driver is installed: https://fanatec.com/en-us/technology/firmware-update\n"
+                        "  - Wheel is in PC mode (not compatibility mode)\n"
+                        "  - Check Fanatec Control Panel to verify the wheel is recognized\n\n"
+                        "SimSteer will fall back to vJoy output, which will work but won't "
+                        "coexist with your real wheel."),
+                fix_url="https://fanatec.com/en-us/technology/firmware-update",
+            ))
+    except ImportError:
+        out.append(Check(
+            id="fanatec_no_pygame",
+            severity="info",
+            title="pygame not available for Fanatec detection",
+            detail=("Could not detect Fanatec wheels (pygame not installed).\n"
+                    "SimSteer will use vJoy fallback mode.\n\n"
+                    "To enable detection: pip install pygame"),
+        ))
+    except Exception:
+        pass
+    return out
 
 
 def _check_directml() -> list[Check]:
@@ -156,11 +226,16 @@ def _check_directml() -> list[Check]:
             return [Check(
                 id="dml",
                 severity="warn",
-                title="DirectML unavailable — vision will run on CPU (slow)",
-                detail=("Expect 4-8 FPS instead of 20+. The engagement gate "
-                        "will refuse to engage below ~8 FPS.\n\n"
-                        "Install onnxruntime-directml:\n"
-                        "  pip install onnxruntime-directml\n"
+                title="DirectML unavailable — vision will run on CPU (VERY SLOW)",
+                detail=("⚠️ PERFORMANCE WARNING ⚠️\n\n"
+                        "Vision model will run on CPU at ~4-8 FPS instead of 20+ FPS.\n"
+                        "The engagement gate will REFUSE to engage below ~8 FPS.\n\n"
+                        "FIX THIS NOW:\n"
+                        "1. Install onnxruntime-directml:\n"
+                        "   pip install onnxruntime-directml\n\n"
+                        "2. Restart SimSteer after installation\n\n"
+                        "DirectML works with AMD, NVIDIA, and Intel GPUs on Windows 10+.\n"
+                        "If you have a GPU but DirectML still fails, update your GPU drivers.\n\n"
                         f"Available providers: {avail}"),
             )]
         return []
@@ -169,7 +244,9 @@ def _check_directml() -> list[Check]:
             id="dml",
             severity="warn",
             title=f"DirectML probe failed: {e.__class__.__name__}",
-            detail=f"Vision will fall back to CPU.\n\n{e}",
+            detail=(f"Vision will fall back to CPU (very slow).\n\n"
+                    f"Error: {e}\n\n"
+                    "Try: pip install --upgrade onnxruntime-directml"),
         )]
 
 
@@ -254,16 +331,18 @@ def _check_ets2() -> list[Check]:
             id="ets2_scs_plugin",
             severity="warn",
             title="ETS2: SCS Telemetry plugin not installed",
-            detail=(f"ETS2 is installed at {ets2_dir}\n"
-                    f"but the SCS plugin is missing from\n"
-                    f"  {plugin_path.parent}\\\n\n"
-                    + ("We bundled the plugin — click [Install] to copy "
-                       "it into your ETS2 plugins folder.\n"
-                       f"(Bundled at {bundled})"
+            detail=(f"⚠️ ETS2 WILL NOT WORK without the telemetry plugin ⚠️\n\n"
+                    f"ETS2 is installed at {ets2_dir}\n"
+                    f"but the SCS plugin is missing from:\n"
+                    f"  {plugin_path.parent}\n\n"
+                    + ("CLICK [Install] to copy the bundled plugin into ETS2,\n"
+                       "or copy it manually:\n"
+                       f"  FROM: {bundled}\n"
+                       f"  TO:   {plugin_path}"
                        if has_bundle else
-                       "Download the plugin manually from:\n"
+                       "Download from:\n"
                        "  https://github.com/RenCloud/scs-sdk-plugin/releases\n"
-                       "and drop scs-telemetry.dll into:\n"
+                       "Extract scs-telemetry.dll and copy to:\n"
                        f"  {plugin_path.parent}\\")),
             fix_url="https://github.com/RenCloud/scs-sdk-plugin/releases",
             can_install=has_bundle,
@@ -277,10 +356,10 @@ def _check_ets2() -> list[Check]:
             id="ets2_config",
             severity="info",
             title="ETS2: config.cfg not yet generated",
-            detail=("Couldn't find ETS2 user config at\n"
-                    "  %USERPROFILE%\\Documents\\Euro Truck Simulator 2\\config.cfg\n"
-                    "Launch ETS2 once (to the main menu) to generate it. "
-                    "Then the deadzone check can run."),
+            detail=("Couldn't find ETS2 user config at:\n"
+                    "  %USERPROFILE%\\Documents\\Euro Truck Simulator 2\\config.cfg\n\n"
+                    "Launch ETS2 once (to the main menu) to generate it.\n"
+                    "Then SimSteer can check the steering deadzone setting."),
         ))
     else:
         dz = _parse_ets2_deadzone(cfg)
@@ -288,13 +367,16 @@ def _check_ets2() -> list[Check]:
             out.append(Check(
                 id="ets2_deadzone",
                 severity="warn",
-                title=f"ETS2: steering deadzone is {dz * 100:.0f}% — must be 0",
-                detail=(f"ETS2's `g_steer_dead_zone` is {dz:.3f}. With any "
-                        "deadzone, the AI's small steering inputs are "
-                        "silenced and the truck won't track lanes.\n\n"
-                        "Fix it manually in-game:\n"
-                        "  ETS2 -> Options -> Controls\n"
-                        "  Find the Steering deadzone slider; drag to 0%.\n\n"
+                title=f"ETS2: steering deadzone is {dz * 100:.0f}% — MUST BE 0",
+                detail=(f"⚠️ TRUCK WILL NOT STEER with deadzone > 0 ⚠️\n\n"
+                        f"ETS2's steering deadzone is currently {dz * 100:.0f}%.\n"
+                        "Any deadzone silences the AI's small steering inputs.\n\n"
+                        "FIX IN GAME:\n"
+                        "1. Launch ETS2\n"
+                        "2. Options → Controls\n"
+                        "3. Find 'Steering deadzone' slider\n"
+                        "4. Drag to 0%\n"
+                        "5. Apply and restart SimSteer\n\n"
                         f"Config file: {cfg}"),
             ))
     return out
@@ -313,12 +395,17 @@ def _check_ac() -> list[Check]:
             id="ac_no_shmem",
             severity="warn",
             title="AC: shared memory not available",
-            detail=("Couldn't open `Local\\acpmf_physics`. Either AC isn't "
-                    "running yet, or shared memory output is disabled.\n\n"
-                    "Launching AC through Content Manager is the most "
-                    "reliable way to expose telemetry:\n"
+            detail=("⚠️ ASSETTO CORSA TELEMETRY NOT DETECTED ⚠️\n\n"
+                    "Couldn't open shared memory `Local\\acpmf_physics`.\n\n"
+                    "POSSIBLE CAUSES:\n"
+                    "1. AC isn't running yet — launch AC and load a track\n"
+                    "2. AC launched as Administrator but SimSteer did not\n"
+                    "   → Relaunch SimSteer as Administrator\n"
+                    "3. Shared memory disabled in AC settings\n\n"
+                    "RECOMMENDED:\n"
+                    "Launch AC through Content Manager for reliable telemetry:\n"
                     "  https://acstuff.ru/app/\n\n"
-                    "If AC is in a session and you still see this, check\n"
+                    "If AC is running and you still see this, check:\n"
                     "  Documents\\Assetto Corsa\\cfg\\acos.ini\n"
                     "for shared-memory options."),
             fix_url="https://acstuff.ru/app/",
@@ -333,12 +420,45 @@ def _check_ac() -> list[Check]:
         return [Check(
             id="ac_inactive",
             severity="info",
-            title="AC: shared memory open but no data",
-            detail=("AC's shared memory is mapped but `packet_id` is 0 — "
-                    "either you're at the main menu, or AC is paused.\n"
-                    "Load a track and start driving."),
+            title="AC: shared memory open but no data yet",
+            detail=("AC's shared memory is mapped but `packet_id` is 0.\n\n"
+                    "This means you're at the main menu or AC is paused.\n"
+                    "Load a track and start driving to begin telemetry."),
         )]
     return []
+
+
+# ----- FOV reminder -----
+
+def _check_fov_reminder(game: str | None) -> list[Check]:
+    """Prominent FOV setup reminder. Wrong FOV is the #1 cause of the
+    plan veering off the road. This surfaces every time until the user
+    has verified FOV at least once."""
+    if game is None:
+        return []
+    return [Check(
+        id="fov_reminder",
+        severity="warn",
+        title="⚠️ CRITICAL: Set camera FOV to match your in-game setting",
+        detail=(
+            "Wrong FOV is the #1 cause of the AI veering off the road.\n\n"
+            "STEPS TO SET FOV:\n"
+            "1. Find your in-game FOV:\n"
+            "   - ETS2: Options → Gameplay → Camera → Field of view\n"
+            "   - AC: Options → Video → Camera FOV\n"
+            "   - Forza: Settings → Difficulty → Camera FOV\n\n"
+            "2. In SimSteer tuner → Camera & Calibration → set Capture VFOV to match\n\n"
+            "3. Verify while driving:\n"
+            "   - Look at HUD 'FOV' line: 'ratio vx_model/v_ego'\n"
+            "   - Drive straight at highway speed\n"
+            "   - Ratio should be ~1.00 (±0.05)\n"
+            "   - If >1.05: FOV too high, narrow it\n"
+            "   - If <0.95: FOV too low, widen it\n\n"
+            "SimSteer now includes AUTOMATIC FOV detection — it will measure and\n"
+            "correct FOV after 60 straight+fast samples (~30-60 seconds of highway).\n"
+            "Watch the HUD 'auto-FOV' line for progress."
+        ),
+    )]
 
 
 # ----- preflight UI -----

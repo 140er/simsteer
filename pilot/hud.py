@@ -27,13 +27,14 @@ Color = tuple[int, int, int]    # BGR
 
 # Palette. Keep the count small and intentional — the overlay reads
 # best when only a couple of accent colors compete for attention.
-COL_BG_DARK = (28, 30, 36)            # chip background, dark slate
+# Updated to comma/openpilot style: darker glass, cyan engaged, amber disengaged
+COL_BG_DARK = (18, 20, 24)            # chip background, darker slate
 COL_FG_LIGHT = (240, 240, 245)        # default light text
-COL_FG_MUTED = (170, 175, 185)        # secondary text
-COL_ACCENT_GREEN = (96, 220, 110)     # engaged, ready, healthy
-COL_ACCENT_YELLOW = (95, 220, 240)    # warming, warnings
-COL_ACCENT_RED = (95, 95, 245)        # blocked, fatal, emergency
-COL_ACCENT_BLUE = (245, 195, 95)      # disengaged, info
+COL_FG_MUTED = (150, 155, 165)        # secondary text (slightly darker)
+COL_ACCENT_GREEN = (120, 255, 130)    # engaged path (cyan-green)
+COL_ACCENT_YELLOW = (80, 200, 240)    # warming, warnings (amber)
+COL_ACCENT_RED = (80, 80, 240)        # blocked, fatal, emergency
+COL_ACCENT_BLUE = (220, 180, 80)      # disengaged path (amber-blue)
 COL_ACCENT_VIOLET = (210, 130, 230)   # wizard
 
 

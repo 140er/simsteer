@@ -1,12 +1,13 @@
 """Closed-loop driving entrypoint.
 
-    python -m pilot.main [--max-width 1600] [--device gamepad|wheel]
+    python -m pilot.main [--max-width 1600] [--device gamepad|wheel|fanatec]
 
 Default `--device gamepad` uses ViGEm Xbox 360 emulation (works in any
 game that accepts XInput). Use `--device wheel` to emulate a sim wheel
 via vJoy — this bypasses ETS2's speed-sensitive gamepad rack assist
 (the `b · v²` term in LiveParams) and produces a linear axis→wheel
-response. Requires the vJoy driver + `pip install pyvjoy`.
+response. Use `--device fanatec` for Fanatec DirectInput FFB motor control
+with vJoy fallback. Requires the vJoy driver + `pip install pyvjoy`.
 
 Controls. INSERT, ← / →, F1/F2/F3 fire GLOBALLY (game can stay focused).
 Everything else needs the overlay window focused:
@@ -31,16 +32,35 @@ keep up (FPS below MIN_HEALTHY_FPS).
 
 Calibration (pitch + height) and steering scale (curvature per gamepad
 axis) self-tune from telemetry; there are no Shift+ toggles for it.
+
+Windows cp1252 console safe: emoji/Unicode in output is replaced with ASCII.
 """
 
 from __future__ import annotations
 
 import argparse
 import math
+import sys
 import time
 
 import cv2
 import numpy as np
+
+# Windows console encoding safety
+def _safe_print(*args, **kwargs):
+    """Print with cp1252-safe encoding. Replaces emoji/Unicode with ASCII."""
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        # Fallback: encode to console encoding with replacement
+        msg = " ".join(str(a) for a in args)
+        # Replace common emoji with ASCII equivalents
+        msg = msg.replace("⚠️", "WARN").replace("✓", "OK")
+        msg = msg.replace("⚠", "!").replace("✔", "*")
+        # Encode-safe print
+        enc = sys.stdout.encoding or "utf-8"
+        safe_msg = msg.encode(enc, errors="replace").decode(enc, errors="replace")
+        print(safe_msg, **kwargs)
 
 from pilot import audio
 from pilot.calibration import Calibration, model_view_calib
@@ -54,6 +74,9 @@ from pilot.wheel import Wheel
 from pilot.global_keys import (
     GlobalKeys, KEY_END, KEY_INSERT, KEY_NUMPAD4, KEY_NUMPAD6,
     KEY_PAGEDOWN, KEY_PAGEUP,
+)
+from pilot.input.wheel_buttons import (
+    WheelButtonListener, parse_button_bind, format_button_bind
 )
 from pilot.hotkeys import hk_enabled as _hk_enabled
 from pilot.hud import (
@@ -198,12 +221,12 @@ def main() -> int:
                     default=settings.no_gamepad,
                     help="run the loop and overlay but don't open any input "
                          "device (useful when ViGEm/vJoy isn't installed)")
-    ap.add_argument("--device", choices=["gamepad", "wheel"],
+    ap.add_argument("--device", choices=["gamepad", "wheel", "fanatec"],
                     default=settings.device,
                     help="output device kind. 'gamepad' = ViGEm Xbox 360 "
                          "(speed-sensitive in ETS2). 'wheel' = vJoy "
-                         "(linear; bypasses ETS2's gamepad rack assist). "
-                         "Requires the vJoy driver + pyvjoy.")
+                         "wheel emulation (linear). 'fanatec' = DirectInput FFB "
+                         "motor control (physical wheel drive) with vJoy fallback")
     ap.add_argument("--vjoy-device", type=int, default=settings.vjoy_device,
                     help="vJoy device index when --device=wheel (default 1).")
     ap.add_argument("--no-tuner", action="store_true",
@@ -301,12 +324,12 @@ def main() -> int:
         show_preflight_dialog(game_pre)
     preflight_warnings = warnings_for_hud(pre) + warnings_for_hud(game_pre)
     for w in preflight_warnings:
-        print(f"preflight: WARN — {w}")
+        _safe_print(f"preflight: WARN — {w}")
     tel_status = ("available" if tel.available
                   else "not detected — game not running, plugin missing, "
                        "or shared memory disabled. Using --default-speed.")
-    print(f"telemetry [{tel_label}]: {tel_status}")
-    print(f"per-game state: loading from *_{game}.json (legacy fallback if absent)")
+    _safe_print(f"telemetry [{tel_label}]: {tel_status}")
+    _safe_print(f"per-game state: loading from *_{game}.json (legacy fallback if absent)")
     calib = Calibration.load(game=game)
     ctrl_cfg = ControllerConfig.load(game=game)
     manual = ManualInputs()
@@ -450,6 +473,14 @@ def main() -> int:
             KEY_PAGEUP, KEY_PAGEDOWN, KEY_END,       # NAV: queue L / R / clear
         }
         global_keys = GlobalKeys(watched_keys)
+        
+        # Wheel button listener for engage/disengage bind (Fanatec, etc.)
+        wheel_buttons = WheelButtonListener()
+        bound_device, bound_button = parse_button_bind(settings.wheel_button_bind)
+        if wheel_buttons.is_available() and bound_device and bound_button is not None:
+            print(f"wheel button bind: {bound_device} button {bound_button} -> engage/disengage")
+        elif settings.wheel_button_bind:
+            print(f"wheel button bind configured but device not found: {settings.wheel_button_bind}")
 
         last = time.perf_counter()
         show_input = True
@@ -476,6 +507,10 @@ def main() -> int:
         # Auto-disengage tracking — when pad.disengage() fires from FPS
         # drop, surface the reason in the banner (the user didn't ask).
         was_engaged_last_frame = False
+        # Torque override tracking - detect manual takeover
+        engage_time = 0.0
+        torque_override_count = 0
+        TORQUE_OVERRIDE_FRAMES = 5  # Sustained frames before triggering
 
         def _engage_check() -> tuple[bool, str]:
             """Returns (allowed, reason). reason='' if allowed."""
@@ -676,6 +711,42 @@ def main() -> int:
                         # `throttle_out` / `brake_out` above).
                         pad.set_steering(steer)
                         pad.set_throttle_brake(throttle_out, brake_out)
+                        
+                        # Torque override detection - auto-disengage on hard yank
+                        if (settings.torque_override_enabled 
+                            and time.time() - engage_time > 0.2  # Skip first 200ms
+                            and tel.available):
+                            # Get physical wheel angle from telemetry
+                            phys_angle = tel.wheel_angle_rad(wheelbase_m=ctrl_cfg.wheelbase)
+                            # Convert physical angle to equivalent axis for comparison
+                            if phys_angle is not None and live_params.trusted():
+                                # What axis would produce this physical wheel angle?
+                                phys_axis = live_params.axis_for_wheel_angle(
+                                    phys_angle, v_ego=v_ego, steer_max=1.0)
+                                # Compare with AI commanded axis
+                                axis_error = abs(phys_axis - steer)
+                                
+                                # Convert threshold from radians to axis units
+                                # Typical max wheel angle ~900deg = ~15.7 rad, axis range [-1, 1]
+                                # So threshold_rad / (max_angle_rad / 2) gives axis threshold
+                                max_angle_rad = math.radians(450)  # Half rotation
+                                axis_threshold = settings.torque_override_threshold_rad / max_angle_rad
+                                
+                                if axis_error > axis_threshold:
+                                    torque_override_count += 1
+                                    if torque_override_count >= TORQUE_OVERRIDE_FRAMES:
+                                        # Manual takeover detected - auto-disengage
+                                        pad.disengage()
+                                        ctrl.reset()
+                                        audio.play("disengage")
+                                        banner_text = "DISENGAGED — manual takeover detected"
+                                        banner_color = (255, 160, 60)
+                                        banner_until = time.time() + 3.0
+                                        banner_persistent = False
+                                        torque_override_count = 0
+                                        print(f"-> TORQUE OVERRIDE DISENGAGE (error: {axis_error:.3f} axis)")
+                                else:
+                                    torque_override_count = 0
                     else:
                         # Disengaged: periodic re-center keeps any
                         # ViGEm drift (driver glitches, lost updates,
@@ -763,7 +834,7 @@ def main() -> int:
                         view_w=mv_w_disp, view_h=mv_h_disp,
                         model_height_m=model_h,
                     )
-                    overlay = draw_overlay(mv_bgr, decoded, mv_calib)
+                    overlay = draw_overlay(mv_bgr, decoded, mv_calib, engaged=pad.engaged if pad else False)
                     if show_input:
                         small_full = cv2.resize(frame, (mv_w_disp // 3,
                                                         mv_h_disp // 3),
@@ -772,7 +843,7 @@ def main() -> int:
                         sh, sw = small_full.shape[:2]
                         overlay[10:10 + sh, W - 10 - sw:W - 10] = small_full
                 else:
-                    overlay = draw_overlay(frame, decoded, calib)
+                    overlay = draw_overlay(frame, decoded, calib, engaged=pad.engaged if pad else False)
                     if show_input:
                         draw_model_input_inset(overlay, fq.last_yuv_narrow,
                                                fq.last_yuv_wide)
@@ -1096,6 +1167,15 @@ def main() -> int:
                 if cv_key != 0xFF:
                     pressed.append(cv_key)
                 pressed.extend(global_keys.poll())
+                
+                # Check for wheel button press (engage/disengage bind)
+                wheel_button_pressed = False
+                if wheel_buttons.is_available() and bound_device and bound_button is not None:
+                    button_events = wheel_buttons.poll()
+                    for device_name, button_idx in button_events:
+                        if device_name == bound_device and button_idx == bound_button:
+                            wheel_button_pressed = True
+                            break
 
                 quit_loop = False
                 def hk(hk_id: str) -> bool:
@@ -1136,7 +1216,7 @@ def main() -> int:
                         banner_persistent = False
                         print("-> CALIBRATION RESET (LiveCalib + LiveParams "
                               "+ wizard flag + probe wiped)")
-                    elif key == KEY_INSERT and pad is not None and hk("engage"):
+                    elif (key == KEY_INSERT or wheel_button_pressed) and pad is not None and hk("engage"):
                         if pad.engaged:
                             # User-initiated disengage — always allowed.
                             pad.disengage()
@@ -1160,6 +1240,8 @@ def main() -> int:
                                 pad.engage()
                                 ctrl.reset()
                                 audio.play("engage")
+                                engage_time = time.time()
+                                torque_override_count = 0
                                 if not live_params.trusted():
                                     banner_text = ("ENGAGED — steering fit "
                                                    "warming up, drive gently")

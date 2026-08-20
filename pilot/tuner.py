@@ -61,6 +61,9 @@ COLOR_DANGER_KEY = "#e74c3c"
 COLOR_SAVE_FLASH = "#27ae60"
 COLOR_SAVE_ERR = "#e74c3c"
 COLOR_DIVIDER = "#262e36"
+COLOR_ERROR = COLOR_BAD
+COLOR_SUCCESS = COLOR_OK
+COLOR_ACCENT_YELLOW = COLOR_WARN
 
 
 @dataclass
@@ -665,6 +668,37 @@ class Tuner:
                 font=ctk.CTkFont(size=11))
             self._bind_status_label.pack(fill="x", pady=(0, 4))
             self._rebuild_bind_buttons()
+            
+            # Wheel button bind for engage/disengage
+            self._divider(sec.body)
+            ctk.CTkLabel(sec.body, text="Wheel button bind (engage/disengage)",
+                         anchor="w", text_color=COLOR_HEADER_TEXT,
+                         font=ctk.CTkFont(size=12, weight="bold")
+                         ).pack(anchor="w", pady=(0, 2))
+            self._hint(sec.body,
+                       "Bind a wheel button to toggle engage/disengage. "
+                       "INSERT key always works as fallback. Press 'Capture' "
+                       "then press any button on your wheel.")
+            
+            # Current bind display
+            self._wheel_bind_label = ctk.CTkLabel(
+                sec.body, text=self._format_wheel_bind(), 
+                text_color=COLOR_HINT, anchor="w",
+                font=ctk.CTkFont(size=11))
+            self._wheel_bind_label.pack(fill="x", pady=(0, 4))
+            
+            # Capture and clear buttons
+            btn_frame = ctk.CTkFrame(sec.body, fg_color="transparent")
+            btn_frame.pack(fill="x", pady=(0, 4))
+            ctk.CTkButton(btn_frame, text="Capture wheel button",
+                          command=self._start_wheel_button_capture, width=160
+                          ).pack(side="left", padx=(0, 6))
+            ctk.CTkButton(btn_frame, text="Clear bind",
+                          command=self._clear_wheel_button_bind, width=100
+                          ).pack(side="left")
+            
+            self._wheel_button_capture_active = False
+            self._wheel_button_listener = None
 
     def _build_hotkeys_section(self, parent) -> None:
         sec = _Section(parent, "Hotkeys", expanded=False)
@@ -910,8 +944,9 @@ class Tuner:
                 self._paint_dash("steering", "warn", "—")
 
         # FOV.
+        fov_mode = "auto" if (self.settings and self.settings.auto_fov) else "static — match in-game"
         self._paint_dash("fov", "ok",
-                         f"{self.calib.fov_h_deg:.1f}° (static — match in-game)")
+                         f"{self.calib.fov_h_deg:.1f}° ({fov_mode})")
 
     def _refresh_cal_routine(self) -> None:
         """Mirror the guided-calibration routine's state into its label.
@@ -1082,6 +1117,88 @@ class Tuner:
             sw = self._switches.get(sid)
             if sw is not None:
                 sw.deselect()
+    
+    def _format_wheel_bind(self) -> str:
+        """Format current wheel button bind for display."""
+        if not self.settings or not self.settings.wheel_button_bind:
+            return "No wheel button bound (INSERT key only)"
+        from pilot.input.wheel_buttons import parse_button_bind
+        device, button = parse_button_bind(self.settings.wheel_button_bind)
+        if device and button is not None:
+            return f"Bound: {device} button #{button}"
+        return "Invalid bind (INSERT key only)"
+    
+    def _start_wheel_button_capture(self) -> None:
+        """Start capturing wheel button press for binding."""
+        from pilot.input.wheel_buttons import WheelButtonListener
+        
+        if self._wheel_button_capture_active:
+            return
+        
+        # Initialize listener if needed
+        if self._wheel_button_listener is None:
+            self._wheel_button_listener = WheelButtonListener()
+        
+        if not self._wheel_button_listener.is_available():
+            self._wheel_bind_label.configure(
+                text="No wheel/joystick detected (pygame required)",
+                text_color=COLOR_ERROR)
+            return
+        
+        self._wheel_button_capture_active = True
+        self._wheel_bind_label.configure(
+            text="Press any button on your wheel...",
+            text_color=COLOR_ACCENT_YELLOW)
+        
+        # Poll for button press in background
+        def _poll_button():
+            import time
+            timeout = time.time() + 10.0  # 10 second timeout
+            while self._wheel_button_capture_active and time.time() < timeout:
+                events = self._wheel_button_listener.poll()
+                if events:
+                    device_name, button_idx = events[0]
+                    self._save_wheel_button_bind(device_name, button_idx)
+                    self._wheel_button_capture_active = False
+                    return
+                time.sleep(0.05)  # 50ms poll
+            
+            # Timeout
+            if self._wheel_button_capture_active:
+                self._wheel_button_capture_active = False
+                self._wheel_bind_label.configure(
+                    text=self._format_wheel_bind(),
+                    text_color=COLOR_HINT)
+        
+        import threading
+        threading.Thread(target=_poll_button, daemon=True).start()
+    
+    def _save_wheel_button_bind(self, device_name: str, button_idx: int) -> None:
+        """Save wheel button bind to settings."""
+        from pilot.input.wheel_buttons import format_button_bind
+        
+        if not self.settings:
+            return
+        
+        self.settings.wheel_button_bind = format_button_bind(device_name, button_idx)
+        self.settings.save()
+        
+        self._wheel_bind_label.configure(
+            text=self._format_wheel_bind(),
+            text_color=COLOR_SUCCESS)
+        print(f"wheel button bound: {device_name} button #{button_idx}")
+    
+    def _clear_wheel_button_bind(self) -> None:
+        """Clear wheel button bind from settings."""
+        if not self.settings:
+            return
+        
+        self.settings.wheel_button_bind = ""
+        self.settings.save()
+        self._wheel_bind_label.configure(
+            text=self._format_wheel_bind(),
+            text_color=COLOR_HINT)
+        print("wheel button bind cleared (INSERT only)")
 
     # ----- setup-section callbacks -----
 
