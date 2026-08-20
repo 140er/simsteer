@@ -104,18 +104,50 @@ axis→wheel response (often nicer to tune).
 - Also `pip install pyvjoy` (see step 1).
 
 ### Fanatec (`--device fanatec`)
-**For Fanatec wheel owners** — uses your real Fanatec wheel alongside
-vJoy for AI output (coexistence mode).
-- Requirements:
+**For Fanatec wheel owners** — **physically drives your wheel motor via FFB!**
+
+SimSteer uses **DirectInput Force Feedback** to send constant force effects to
+your Fanatec wheel motor, actually turning the physical rim when engaged.
+
+- **Requirements**:
   - **Fanatec driver**: https://fanatec.com/en-us/technology/firmware-update
   - Wheel in **PC mode** (check Fanatec Control Panel)
-  - **vJoy driver** (see above Wheel section)
+  - **vJoy driver** (fallback if FFB unavailable - see Wheel section above)
   - `pip install pygame` (for wheel detection)
-  - `pip install pyvjoy`
-- SimSteer detects your Fanatec wheel (CSL / ClubSport / Podium) and uses
-  vJoy as a second virtual wheel for AI commands
-- In-game, bind your Fanatec for manual control and vJoy for AI steering
-- Check preflight messages for detection status
+  - `pip install pyvjoy` (for vJoy fallback)
+
+- **How it works**:
+  - When **engaged**: SimSteer acquires DirectInput in BACKGROUND|EXCLUSIVE mode
+    and sends constant force effects to physically turn the wheel rim toward
+    the AI's target steering angle
+  - When **disengaged**: Motor releases (all effects stopped) so you can take
+    manual control
+  - Game continues to read your wheel position, so ETS2/AC/Forza follow the
+    physical rim whether AI or human is steering
+  
+- **FFB Mode vs vJoy Fallback**:
+  - **FFB motor mode** (preferred): Physical wheel actually moves
+  - **vJoy fallback**: If FFB acquisition fails (no wheel detected, game has
+    exclusive foreground lock, or FFB initialization error), SimSteer
+    automatically falls back to vJoy virtual output (coexistence mode)
+  - Check console output or tuner status to see which mode is active
+
+- **Limitations**:
+  - DirectInput FFB requires BACKGROUND|EXCLUSIVE access. Most modern games
+    read wheel position via shared DirectInput and use FFB separately, so
+    this usually works. If game holds FOREGROUND|EXCLUSIVE FFB, SimSteer
+    can't acquire and falls back to vJoy.
+  - FFB motor control is **experimental** and cannot be tested without real
+    hardware. Report issues if wheel doesn't respond as expected.
+  - Full DirectInput FFB implementation via ctypes is a work-in-progress.
+    Current code includes architecture and will gracefully fall back to vJoy
+    until Win32 DirectInput calls are complete.
+
+- **Future: Fanatec SDK**:
+  - Fanatec provides proprietary FullForce SDK (`EndorFanatecSdk64.dll`) that
+    may allow simultaneous game + SimSteer control without DirectInput conflicts
+  - Requires game developer SDK access (gamedev@fanatec.com)
+  - Current implementation uses standard DirectInput as portable solution
 
 > You only need the one matching your `--device`. Gamepad is the default
 > and the simplest to get going.
@@ -343,3 +375,11 @@ just press `R` in the overlay.
   running; close it first.
 - **Fanatec wheel not detected** → Check preflight messages for detailed
   troubleshooting. Ensure driver installed, wheel in PC mode, powered on.
+  SimSteer will automatically fall back to vJoy mode if FFB control fails.
+- **Fanatec wheel detected but doesn't move physically** → FFB motor control
+  failed, running in vJoy fallback mode. Check console for "FFB motor control"
+  vs "vJoy fallback" status. Common causes: game holding exclusive foreground
+  FFB, DirectInput ctypes bindings incomplete (work in progress).
+- **Fanatec FFB too weak / too strong** → Adjust Fanatec tuning menu FOR
+  (Force) setting. SimSteer sends proportional constant force based on angle
+  error. Your base's FOR/FFB settings scale the output torque.

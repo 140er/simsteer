@@ -28,20 +28,80 @@ This test plan covers the reliability, usability, and Fanatec support improvemen
 
 ## 1. Fanatec Support Tests
 
-### 1.1 Fanatec Detection (Ideal: Real Hardware)
+### 1.1 Fanatec FFB Motor Detection (Ideal: Real Hardware)
 **Prerequisites**: Fanatec wheel connected, driver installed, wheel in PC mode
 
 **Steps**:
 1. Launch SimSteer with `--device fanatec`
-2. Check preflight dialog
+2. Check console output for mode
+3. Check preflight dialog
 
 **Expected**:
-- ✓ Preflight shows "Fanatec wheel detected: [model name]"
-- ✓ Info message confirms vJoy coexistence mode
-- ✓ Instructions for Fanatec + vJoy setup shown
+- ✓ Console shows: "Fanatec FFB motor control (physical wheel drive)" OR
+- ⚠️ Console shows: "Fanatec mode (vJoy fallback - FFB unavailable)"
+- ✓ Preflight info confirms detection
 - ✓ Application launches successfully
+- ✓ If FFB mode: Check console for background exclusive acquisition status
 
-### 1.2 Fanatec Detection (Without Hardware)
+### 1.2 Fanatec FFB Motor Control (REQUIRES HARDWARE)
+**Prerequisites**: Fanatec wheel in FFB motor mode (console confirms)
+
+**Steps**:
+1. Complete calibration with `--device fanatec`
+2. Engage on highway with hands OFF wheel
+3. Observe physical wheel rim
+
+**Expected**:
+- ✓ **Physical wheel rim TURNS by itself** to match AI steering
+- ✓ Wheel moves smoothly left/right during lane keeping
+- ✓ Motor force proportional to steering angle
+- ✓ Game vehicle follows the physical wheel position
+- ✓ No "wheel fighting" or oscillation
+
+### 1.3 Fanatec Motor Release on Disengage
+**Prerequisites**: Fanatec in FFB motor mode, currently engaged
+
+**Steps**:
+1. While engaged with AI steering, press INSERT to disengage
+2. Immediately try to turn wheel manually
+
+**Expected**:
+- ✓ Motor releases immediately (wheel becomes easy to turn)
+- ✓ No resistance from AI control
+- ✓ Manual steering works normally
+- ✓ Game responds to manual input
+
+### 1.4 Fanatec FFB Fallback Behavior
+**Prerequisites**: Fanatec wheel, but game has exclusive FFB lock OR FFB init fails
+
+**Steps**:
+1. Launch game first (some games take exclusive FFB)
+2. Launch SimSteer with `--device fanatec`
+3. Check console/preflight messages
+
+**Expected**:
+- ⚠️ Console: "Fanatec mode (vJoy fallback - FFB unavailable)"
+- ✓ Preflight explains why FFB unavailable
+- ✓ vJoy fallback works (virtual output)
+- ✓ Application doesn't crash
+- ✓ Can still use Fanatec for manual input, vJoy for AI output
+
+### 1.5 Fanatec FFB Re-Acquisition After Conflict
+**Prerequisites**: Fanatec in FFB mode, game takes/releases exclusive access
+
+**Steps**:
+1. Engage with Fanatec FFB mode
+2. Alt-tab to game menu (game may reclaim exclusive FFB)
+3. Return to driving
+4. Check if motor control recovers
+
+**Expected**:
+- ✓ SimSteer detects DIERR_NOTACQUIRED gracefully
+- ✓ Attempts re-acquisition after loss
+- ✓ Either recovers FFB or falls back to vJoy smoothly
+- ✓ No crashes or hangs
+
+### 1.6 Fanatec Detection (Without Hardware)
 **Prerequisites**: No Fanatec wheel connected
 
 **Steps**:
@@ -51,24 +111,25 @@ This test plan covers the reliability, usability, and Fanatec support improvemen
 **Expected**:
 - ⚠️ Warning: "No Fanatec wheel detected"
 - ✓ Clear troubleshooting steps (driver, PC mode, USB)
-- ✓ Fallback to vJoy confirmed
+- ✓ Console: "vJoy fallback" mode active
 - ✓ Application launches with vJoy output
 
-### 1.3 Fanatec Output Functionality
-**Prerequisites**: vJoy driver installed, device #1 enabled
+### 1.7 Fanatec vJoy Fallback Functionality
+**Prerequisites**: vJoy driver installed, device #1 enabled, FFB unavailable
 
 **Steps**:
-1. Launch with `--device fanatec`
+1. Launch with `--device fanatec` (FFB fails to init)
 2. Complete calibration
 3. Engage on highway
 
 **Expected**:
 - ✓ Steering commands sent to vJoy device
 - ✓ In-game vehicle responds to AI steering
-- ✓ No crashes or device errors
-- ✓ Engage/disengage works correctly
+- ✓ Physical Fanatec wheel stays neutral (no motor drive)
+- ✓ User can manually steer with Fanatec
+- ✓ Game sees both wheels (bind accordingly)
 
-### 1.4 Fanatec in Setup Tab
+### 1.8 Fanatec in Setup Tab
 **Steps**:
 1. Launch SimSteer (any device mode)
 2. Open tuner → Setup tab
@@ -79,6 +140,7 @@ This test plan covers the reliability, usability, and Fanatec support improvemen
 - ✓ Fanatec appears in device dropdown
 - ✓ Application restarts with Fanatec mode
 - ✓ Setting persists across restarts
+- ✓ Console shows FFB motor or vJoy fallback status
 
 ---
 
@@ -448,12 +510,15 @@ This test plan covers the reliability, usability, and Fanatec support improvemen
 ## 10. Known Limitations
 
 ### Cannot Test Without Hardware
-- **Real Fanatec wheel behavior**: Can only verify detection + vJoy fallback
-- **FFB/DirectInput exclusive access**: Cannot test force feedback output
-- **Multiple wheel coexistence**: Need actual Fanatec + game to verify
+- **Real Fanatec FFB motor behavior**: Can only verify architecture + fallback
+- **Motor torque / force calibration**: Cannot tune without hardware feedback
+- **FFB conflict resolution**: Game/SimSteer exclusive access race conditions
+- **DirectInput ctypes implementation**: Full Win32 API calls need testing
 
 ### Acceptable Behavior
-- Fanatec mode uses vJoy for output (not direct FFB control)
+- Fanatec FFB mode falls back to vJoy if DirectInput acquisition fails
+- Current implementation documents FFB architecture but may return False from
+  `_init_fanatec_ffb()` until Win32 DirectInput ctypes bindings are complete
 - Auto-FOV requires ~60 seconds straight driving (not instant)
 - Preflight warnings always show FOV reminder (by design)
 

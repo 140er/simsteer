@@ -38,12 +38,16 @@ There are two ways to run SimSteer:
    - **Wheel** (`--device wheel`) → vJoy (emulates a DirectInput wheel;
      ETS2 skips its gamepad rack assist for a linear response):
      https://github.com/njz3/vJoy/releases — run the installer.
-   - **Fanatec** (`--device fanatec`) → For Fanatec wheel owners. Requires:
+   - **Fanatec** (`--device fanatec`) → **Physically drives your Fanatec wheel motor!**
      - Fanatec driver: https://fanatec.com/en-us/technology/firmware-update
      - Wheel in PC mode (check Fanatec Control Panel)
-     - vJoy driver (as backup/coexistence mode)
-     - SimSteer detects your Fanatec and uses vJoy for AI output
-       alongside your real wheel input
+     - vJoy driver (as fallback if FFB unavailable)
+     - When engaged, SimSteer uses **Force Feedback** to physically turn your
+       steering wheel rim to match AI commands
+     - When disengaged, motor releases so you can take over
+     - Game still reads your wheel position for vehicle control
+     - **Note**: FFB motor control is experimental. If it fails, SimSteer
+       falls back to vJoy virtual output mode.
 
    You only need the one matching how you'll steer. Gamepad is the
    default.
@@ -222,7 +226,12 @@ the reason so you know the bar jumping back to 0% wasn't a glitch.
   re-extract.
 - **Fanatec wheel not detected**: Ensure Fanatec driver installed, wheel
   in PC mode, powered on and connected. Check preflight messages for
-  detailed troubleshooting.
+  detailed troubleshooting. SimSteer will fall back to vJoy mode if FFB
+  motor control fails.
+- **Fanatec wheel doesn't move physically**: FFB motor control requires
+  DirectInput access. If the game holds exclusive foreground FFB lock,
+  SimSteer can't drive the motor. vJoy fallback mode will activate
+  automatically. See docs for details on FFB vs vJoy modes.
 
 ## Audio
 
