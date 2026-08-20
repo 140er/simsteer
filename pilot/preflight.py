@@ -69,7 +69,8 @@ def run_global_preflight(device: str = "gamepad") -> PreflightReport:
     rpt = PreflightReport()
     rpt.extend(_check_models())
     rpt.extend(_check_vigem(required=(device == "gamepad")))
-    rpt.extend(_check_vjoy(required=(device == "wheel")))
+    rpt.extend(_check_vjoy(required=(device in ("wheel", "fanatec"))))
+    rpt.extend(_check_fanatec(required=(device == "fanatec")))
     rpt.extend(_check_directml())
     return rpt
 
@@ -87,6 +88,8 @@ def run_game_preflight(game: str | None) -> PreflightReport:
         # works — no warning needed here. Reserved for future per-game
         # tips (e.g. recommended HFOV).
         pass
+    # Add a universal FOV reminder for all games
+    rpt.extend(_check_fov_reminder(game))
     return rpt
 
 
@@ -141,11 +144,74 @@ def _check_vjoy(required: bool) -> list[Check]:
             id="vjoy",
             severity="fatal",
             title="vJoy driver / pyvjoy not detected",
-            detail=("--device=wheel requires the vJoy driver and pyvjoy.\n"
+            detail=("--device=wheel or --device=fanatec requires the vJoy driver and pyvjoy.\n"
                     "Install vJoy: https://github.com/njz3/vJoy/releases\n"
-                    "Then: pip install pyvjoy"),
+                    "Then: pip install pyvjoy\n\n"
+                    "IMPORTANT: After installing vJoy, run 'Configure vJoy' from the Start menu\n"
+                    "and enable device #1 with at least 3 axes (X, Y, Z)."),
             fix_url="https://github.com/njz3/vJoy/releases",
         )]
+
+
+def _check_fanatec(required: bool) -> list[Check]:
+    """Check for Fanatec wheel and provide setup guidance."""
+    if not required:
+        return []
+    out: list[Check] = []
+    # Try to detect Fanatec wheels
+    try:
+        import pygame
+        pygame.init()
+        count = pygame.joystick.get_count()
+        found = False
+        for i in range(count):
+            joy = pygame.joystick.Joystick(i)
+            name = joy.get_name().lower()
+            if "fanatec" in name or "csl" in name or "clubsport" in name or "podium" in name:
+                found = True
+                out.append(Check(
+                    id="fanatec_detected",
+                    severity="info",
+                    title=f"Fanatec wheel detected: {joy.get_name()}",
+                    detail=(f"Found Fanatec wheel: {joy.get_name()}\n\n"
+                            "SimSteer will use vJoy as a second virtual wheel alongside your "
+                            "Fanatec. In your game, bind SimSteer's vJoy axes for AI steering "
+                            "and keep your Fanatec bound for manual control.\n\n"
+                            "Make sure:\n"
+                            "  - Fanatec driver installed from https://fanatec.com/en-us/technology/firmware-update\n"
+                            "  - Wheel is in PC mode (check Fanatec Control Panel)\n"
+                            "  - vJoy driver installed and device #1 enabled\n"
+                            "  - Game supports multiple steering wheels"),
+                ))
+                break
+        pygame.quit()
+        if not found:
+            out.append(Check(
+                id="fanatec_not_detected",
+                severity="warn",
+                title="No Fanatec wheel detected",
+                detail=("SimSteer is set to Fanatec mode but no Fanatec wheel was detected.\n\n"
+                        "Check that:\n"
+                        "  - Fanatec wheel is powered on and connected via USB\n"
+                        "  - Fanatec driver is installed: https://fanatec.com/en-us/technology/firmware-update\n"
+                        "  - Wheel is in PC mode (not compatibility mode)\n"
+                        "  - Check Fanatec Control Panel to verify the wheel is recognized\n\n"
+                        "SimSteer will fall back to vJoy output, which will work but won't "
+                        "coexist with your real wheel."),
+                fix_url="https://fanatec.com/en-us/technology/firmware-update",
+            ))
+    except ImportError:
+        out.append(Check(
+            id="fanatec_no_pygame",
+            severity="info",
+            title="pygame not available for Fanatec detection",
+            detail=("Could not detect Fanatec wheels (pygame not installed).\n"
+                    "SimSteer will use vJoy fallback mode.\n\n"
+                    "To enable detection: pip install pygame"),
+        ))
+    except Exception:
+        pass
+    return out
 
 
 def _check_directml() -> list[Check]:
@@ -339,6 +405,39 @@ def _check_ac() -> list[Check]:
                     "Load a track and start driving."),
         )]
     return []
+
+
+# ----- FOV reminder -----
+
+def _check_fov_reminder(game: str | None) -> list[Check]:
+    """Prominent FOV setup reminder. Wrong FOV is the #1 cause of the
+    plan veering off the road. This surfaces every time until the user
+    has verified FOV at least once."""
+    if game is None:
+        return []
+    return [Check(
+        id="fov_reminder",
+        severity="warn",
+        title="⚠️ CRITICAL: Set camera FOV to match your in-game setting",
+        detail=(
+            "Wrong FOV is the #1 cause of the AI veering off the road.\n\n"
+            "STEPS TO SET FOV:\n"
+            "1. Find your in-game FOV:\n"
+            "   - ETS2: Options → Gameplay → Camera → Field of view\n"
+            "   - AC: Options → Video → Camera FOV\n"
+            "   - Forza: Settings → Difficulty → Camera FOV\n\n"
+            "2. In SimSteer tuner → Camera & Calibration → set Capture VFOV to match\n\n"
+            "3. Verify while driving:\n"
+            "   - Look at HUD 'FOV' line: 'ratio vx_model/v_ego'\n"
+            "   - Drive straight at highway speed\n"
+            "   - Ratio should be ~1.00 (±0.05)\n"
+            "   - If >1.05: FOV too high, narrow it\n"
+            "   - If <0.95: FOV too low, widen it\n\n"
+            "SimSteer now includes AUTOMATIC FOV detection — it will measure and\n"
+            "correct FOV after 60 straight+fast samples (~30-60 seconds of highway).\n"
+            "Watch the HUD 'auto-FOV' line for progress."
+        ),
+    )]
 
 
 # ----- preflight UI -----

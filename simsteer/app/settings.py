@@ -26,6 +26,7 @@ class Settings:
     # picks the running game live. Naming a specific game pins it.
     game: str = "auto"
     # Output device kind. "gamepad" = ViGEm Xbox 360. "wheel" = vJoy.
+    # "fanatec" = Fanatec wheel with vJoy fallback.
     device: str = "gamepad"
     # Allow LiveParams to fit while disengaged on ETS2 (off by default
     # — ETS2's gamepad rack assist makes wheel/keyboard-sourced
