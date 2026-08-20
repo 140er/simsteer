@@ -1,23 +1,35 @@
-"""Overlay renderer: lane lines, plan path, leads, and tuning HUD.
+"""Capture (or load) a frame, run the model, draw lane lines + plan on top.
 
-Pure drawing surface — given a captured frame, the model's `decoded`
-output, and a `Calibration`, it projects the model's road-frame
-predictions back onto the image and draws them. It holds no state and
-runs no model; `runtime/loop.py` owns the capture/inference loop and
-calls these functions each frame.
+    python -m debug.overlay                       # screen capture
+    python -m debug.overlay --image path.png      # one-shot file
+    python -m debug.overlay --image path.png -o out.png  # save instead of show
 
-The projections are exact ports of v1's tuned geometry (horizon-row
-fix, device-Z sign flip, lag markers); do not adjust the math here —
-calibration is what makes them correct, not the renderer.
+The lane-line and plan polylines are drawn in the captured frame's
+coordinates by inverting our (very rough) warp matrix and projecting the
+model's road-frame predictions onto the ground plane. Both projections
+are placeholder — they let us see *something* drawn so we can sanity-check
+that the model is receiving frames; they will not be geometrically
+correct until calibration is done.
 """
 
 from __future__ import annotations
 
+import argparse
+import time
+from pathlib import Path
+
 import cv2
 import numpy as np
 
-from simsteer.core.calibration import Calibration, polyline_to_image
-from simsteer.core.preprocess import yuv6_to_bgr
+from pilot.calibration import Calibration, polyline_to_image
+from pilot.capture import Capture, CaptureConfig
+from pilot.constants import T_IDXS
+from pilot.livecalib import LiveCalib
+from pilot.model import DrivingModel
+from pilot.postprocess import decode
+from pilot.preprocess import FrameQueue, yuv6_to_bgr
+from pilot.telemetry import Telemetry
+
 
 LANE_COLORS = [
     (180, 220, 255),  # outer left  (light blue/white — adjacent lane)
@@ -38,7 +50,7 @@ INNER_LANE_DRAW_DIST_M = 90.0     # current-lane yellow lines
 OUTER_LANE_DRAW_DIST_M = 60.0     # adjacent-lane light-blue lines
 ROAD_EDGE_DRAW_DIST_M = 60.0      # red road edges
 
-PATH_HALF_WIDTH_M = 1.8   # half-width of the green path wedge; full lane ~3.6 m
+PATH_HALF_WIDTH_M = 0.9   # half-width of the green path wedge (~lane width)
 PATH_FILL_BGR = (40, 200, 40)
 PATH_ALPHA = 0.35
 
@@ -132,7 +144,8 @@ def _device_z_to_road_z(z_device: np.ndarray) -> np.ndarray:
 
 def _draw_path_wedge(out: np.ndarray, calib: Calibration,
                      plan_xyz: np.ndarray,
-                     plan_accel: np.ndarray | None = None) -> None:
+                     plan_accel: np.ndarray | None = None,
+                     base_color: tuple[int, int, int] | None = None) -> None:
     """Fill the path wedge between (center ± half_width), with each
     longitudinal segment colored by the plan's commanded acceleration
     at that distance. Braking sections turn red, accelerating sections
@@ -146,8 +159,13 @@ def _draw_path_wedge(out: np.ndarray, calib: Calibration,
     rendering — they always project with per-frame Z).
 
     `plan_accel` is the (33,) longitudinal accel column from the plan.
-    If None, falls back to a single flat green wedge.
+    If None, falls back to a single flat wedge with base_color.
+    
+    `base_color` is the BGR color to use for the path. If None, uses PATH_FILL_BGR.
     """
+    if base_color is None:
+        base_color = PATH_FILL_BGR
+    
     xs = plan_xyz[:, 0]
     ys = plan_xyz[:, 1]
     zs = _device_z_to_road_z(plan_xyz[:, 2]) if plan_xyz.shape[1] >= 3 else None
@@ -170,10 +188,10 @@ def _draw_path_wedge(out: np.ndarray, calib: Calibration,
     left = left_img[valid].astype(np.int32)
     right = right_img[valid].astype(np.int32)
     if plan_accel is None:
-        # Legacy flat-green path — single fillPoly.
+        # Legacy flat path — single fillPoly with base_color.
         poly = np.vstack([left, right[::-1]])
         overlay = out.copy()
-        cv2.fillPoly(overlay, [poly], PATH_FILL_BGR, lineType=cv2.LINE_AA)
+        cv2.fillPoly(overlay, [poly], base_color, lineType=cv2.LINE_AA)
         cv2.addWeighted(overlay, PATH_ALPHA, out, 1.0 - PATH_ALPHA, 0, dst=out)
         return
 
@@ -201,8 +219,8 @@ def _draw_timestep_markers(out: np.ndarray, calib: Calibration,
                            plan: np.ndarray) -> None:
     """Drop a small filled circle + label at fixed future times along
     the plan path so you can see 'where the model thinks we'll be in 1s,
-    2s, 3s, 5s, 7s, 10s.'"""
-    from simsteer.core.constants import T_IDXS
+    2s, 3s, 5s, 8s.'"""
+    from pilot.constants import T_IDXS
     t_idxs = np.asarray(T_IDXS, dtype=np.float32)
     xs = plan[:, 0]
     ys = plan[:, 1]
@@ -237,7 +255,7 @@ def _draw_plan_charts(out: np.ndarray, decoded) -> None:
 
     Shares the same x-axis (plan time, 0..10 s).
     """
-    from simsteer.core.constants import T_IDXS
+    from pilot.constants import T_IDXS
     H, W = out.shape[:2]
     chart_w, chart_h = 240, 80
     pad = 6
@@ -421,44 +439,7 @@ def _draw_desire_indicator(out: np.ndarray, decoded) -> None:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
 
 
-def _draw_lanes_and_edges(out: np.ndarray, calib: Calibration, decoded) -> None:
-    """Draw the model's 4 lane lines + 2 road edges as polylines that
-    ride the road surface the model sees.
-
-    Each line is 33 points at the fixed `X_IDXS`; column 0 is the
-    lateral offset (y). Column 1 is NOT usable as height (noisy, ranges
-    to ~-14 m), so for elevation we sample the PLAN's clean Z profile
-    (decoded.plan[:, 2], the road height the model sees) at each lane
-    x-position via interpolation. That puts the lanes on the SAME
-    surface as the green path (which follows plan Z) — including over
-    hills/dips — instead of a flat plane. Inner lane lines (1, 2) bound
-    the current lane and draw further out than the outer adjacent pair
-    (0, 3); low-confidence lines are skipped."""
-    from simsteer.core.constants import X_IDXS
-    xs = np.asarray(X_IDXS, dtype=np.float64)
-    # Road elevation (device Z, +down) at each lane x, taken from the
-    # plan's clean Z so lanes/edges follow the same surface as the path.
-    plan_x = decoded.plan[:, 0].astype(np.float64)
-    plan_z = decoded.plan[:, 2].astype(np.float64)
-    surf_z = np.interp(xs, plan_x, plan_z)
-    probs = decoded.lane_lines_prob
-    for i in range(decoded.lane_lines.shape[0]):
-        if i < len(probs) and float(probs[i]) < 0.2:
-            continue
-        ys = decoded.lane_lines[i, :, 0].astype(np.float64)
-        max_x = INNER_LANE_DRAW_DIST_M if i in (1, 2) else OUTER_LANE_DRAW_DIST_M
-        pts = _polyline_pts(calib, xs, ys, zs_device=surf_z, max_x=max_x)
-        if pts is not None:
-            cv2.polylines(out, [pts], False, LANE_COLORS[i], 2, cv2.LINE_AA)
-    for i in range(decoded.road_edges.shape[0]):
-        ys = decoded.road_edges[i, :, 0].astype(np.float64)
-        pts = _polyline_pts(calib, xs, ys, zs_device=surf_z,
-                            max_x=ROAD_EDGE_DRAW_DIST_M)
-        if pts is not None:
-            cv2.polylines(out, [pts], False, ROAD_EDGE_COLOR, 2, cv2.LINE_AA)
-
-
-def draw_overlay(frame_bgr: np.ndarray, decoded, calib: Calibration) -> np.ndarray:
+def draw_overlay(frame_bgr: np.ndarray, decoded, calib: Calibration, engaged: bool = False) -> np.ndarray:
     out = frame_bgr.copy()
     calib.update_for_frame(out.shape)
 
@@ -468,20 +449,25 @@ def draw_overlay(frame_bgr: np.ndarray, decoded, calib: Calibration) -> np.ndarr
 
     # Path wedge (translucent, drawn under the plan center + lanes).
     # Colored by planned longitudinal accel — braking segments turn red,
-    # accelerating segments blue.
+    # accelerating segments blue. When engaged: cyan/green path. When disengaged: amber.
+    path_color = (160, 255, 140) if engaged else (140, 180, 220)  # cyan engaged, amber disengaged
     plan_xyz = decoded.plan[:, :3].astype(np.float64)
     plan_a = decoded.plan[:, 6].astype(np.float64)
-    _draw_path_wedge(out, calib, plan_xyz, plan_accel=plan_a)
+    _draw_path_wedge(out, calib, plan_xyz, plan_accel=plan_a, base_color=path_color)
 
     # Plan center line — pass Z so it follows hills/dips.
+    # Cyan when engaged, amber when disengaged
+    center_color = (200, 255, 120) if engaged else (100, 160, 240)
     plan_pts = _polyline_pts(calib, plan_xyz[:, 0], plan_xyz[:, 1],
                              zs_device=plan_xyz[:, 2])
     if plan_pts is not None:
-        cv2.polylines(out, [plan_pts], False, (0, 255, 0), 2, cv2.LINE_AA)
+        cv2.polylines(out, [plan_pts], False, center_color, 2, cv2.LINE_AA)
 
-    # Lane lines (4) + road edges (2) — the model's other outputs,
-    # drawn over the green path wedge.
-    _draw_lanes_and_edges(out, calib, decoded)
+    # Lane lines + road edges intentionally not drawn — overlay reads
+    # cleaner without the yellow/beige/red polylines layered on top of
+    # the green path wedge. The model still uses them internally; this
+    # only removes the visualization. Re-add via a flag if you ever
+    # need them back for debugging.
 
     # Timestep markers along the plan path — small dots at 1, 2, 3, 5,
     # 8 seconds into the future. Helps eyeball where the plan thinks
@@ -597,3 +583,145 @@ def handle_calibration_key(calib: Calibration, key: int) -> str | None:
                 setattr(calib, f, getattr(defaults, f))
         return "reset to defaults"
     return None
+
+
+def run_one_shot(image_path: Path, output: Path | None, max_width: int) -> int:
+    bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if bgr is None:
+        print(f"could not read {image_path}")
+        return 1
+
+    fq = FrameQueue()
+    model = DrivingModel()
+    calib = Calibration.load()
+    print(f"using {model.active_provider}")
+    print(f"calibration: FOV={calib.fov_h_deg} pitch={calib.pitch_deg} h={calib.height_m}")
+
+    img_narrow, img_wide = fq.push(bgr, calib)
+    t0 = time.perf_counter()
+    vision_out, policy_out = model.step(img_narrow, img_wide)
+    dt = (time.perf_counter() - t0) * 1000
+    decoded = decode(vision_out, policy_out)
+    print(f"inference: {dt:.1f} ms")
+    print(f"plan[0:3] (pos x,y,z): {decoded.plan[0, :3]}")
+    print(f"lane_lines_prob: {decoded.lane_lines_prob}")
+
+    overlay = draw_overlay(bgr, decoded, calib)
+    draw_model_input_inset(overlay, fq.last_yuv_narrow, fq.last_yuv_wide)
+    draw_calibration_hud(overlay, calib)
+    if output:
+        cv2.imwrite(str(output), overlay)
+        print(f"wrote {output}")
+    else:
+        h, w = overlay.shape[:2]
+        win_w = min(w, max_width)
+        win_h = int(round(h * (win_w / w)))
+        setup_window(win_w, win_h)
+        show_scaled(overlay, max_width)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+    return 0
+
+
+def run_live(max_width: int) -> int:
+    fq = FrameQueue()
+    model = DrivingModel()
+    calib = Calibration.load()
+    tel = Telemetry()
+    live_calib = LiveCalib()
+    print(f"using {model.active_provider}")
+    print(f"calibration: FOV={calib.fov_h_deg} pitch={calib.pitch_deg} h={calib.height_m}")
+    print(f"telemetry: {'available' if tel.available else 'not detected'}")
+    print("press q to quit. tune calibration with [ ] , . ; ' , then C to save.")
+
+    with Capture(CaptureConfig(target_fps=20)) as cap:
+        for _ in range(50):
+            if cap.grab() is not None:
+                break
+            time.sleep(0.05)
+
+        first_frame = cap.grab()
+        if first_frame is not None:
+            h, w = first_frame.shape[:2]
+            win_w = min(w, max_width)
+            win_h = int(round(h * (win_w / w)))
+            setup_window(win_w, win_h)
+        else:
+            setup_window(max_width, max_width * 9 // 16)
+
+        last = time.perf_counter()
+        status = ""
+        status_until = 0.0
+        show_input = True
+        try:
+            while True:
+                frame = cap.grab()
+                if frame is None:
+                    continue
+                v_real = tel.speed_mps()
+                actual_yaw = tel.yaw_rate_rad_s()
+                img_narrow, img_wide = fq.push(frame, calib)
+                vision_out, policy_out = model.step(img_narrow, img_wide)
+                decoded = decode(vision_out, policy_out)
+                live_calib.update(calib, decoded.pose, decoded.road_transform,
+                                  actual_yaw, v_real)
+
+                overlay = draw_overlay(frame, decoded, calib)
+                if show_input:
+                    draw_model_input_inset(overlay, fq.last_yuv_narrow,
+                                           fq.last_yuv_wide)
+                badge = (f"LIVECALIB pitch={live_calib.pitch_estimate or 0:+.2f}deg "
+                         f"h={live_calib.height_estimate or 0:.2f}m "
+                         f"n={live_calib.samples} rej={live_calib.rejected}")
+                cv2.putText(overlay, badge, (10, overlay.shape[0] - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
+                cv2.putText(overlay, badge, (10, overlay.shape[0] - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (80, 255, 255), 1, cv2.LINE_AA)
+                now = time.perf_counter()
+                fps = 1.0 / max(now - last, 1e-3)
+                last = now
+                cv2.putText(overlay, f"{fps:5.1f} fps", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
+                cv2.putText(overlay, f"{fps:5.1f} fps", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+                draw_calibration_hud(overlay, calib)
+                if status and now < status_until:
+                    cv2.putText(overlay, status, (10, 90), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6, (0, 0, 0), 4, cv2.LINE_AA)
+                    cv2.putText(overlay, status, (10, 90), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6, (80, 255, 80), 1, cv2.LINE_AA)
+
+                show_scaled(overlay, max_width)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
+                if key == ord("i"):
+                    show_input = not show_input
+                    continue
+                msg = handle_calibration_key(calib, key)
+                if msg is not None:
+                    status = msg
+                    status_until = now + 1.5
+                    print(msg)
+        finally:
+            tel.close()
+    cv2.destroyAllWindows()
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--image", type=Path, help="run on a single still image")
+    ap.add_argument("-o", "--output", type=Path, help="write annotated image here")
+    ap.add_argument("--max-width", type=int, default=1600,
+                    help="cap displayed width in pixels (default 1600). "
+                         "The window itself is resizable.")
+    args = ap.parse_args()
+
+    if args.image is not None:
+        return run_one_shot(args.image, args.output, args.max_width)
+    return run_live(args.max_width)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

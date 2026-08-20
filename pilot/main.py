@@ -814,7 +814,7 @@ def main() -> int:
                         view_w=mv_w_disp, view_h=mv_h_disp,
                         model_height_m=model_h,
                     )
-                    overlay = draw_overlay(mv_bgr, decoded, mv_calib)
+                    overlay = draw_overlay(mv_bgr, decoded, mv_calib, engaged=pad.engaged if pad else False)
                     if show_input:
                         small_full = cv2.resize(frame, (mv_w_disp // 3,
                                                         mv_h_disp // 3),
@@ -823,7 +823,7 @@ def main() -> int:
                         sh, sw = small_full.shape[:2]
                         overlay[10:10 + sh, W - 10 - sw:W - 10] = small_full
                 else:
-                    overlay = draw_overlay(frame, decoded, calib)
+                    overlay = draw_overlay(frame, decoded, calib, engaged=pad.engaged if pad else False)
                     if show_input:
                         draw_model_input_inset(overlay, fq.last_yuv_narrow,
                                                fq.last_yuv_wide)

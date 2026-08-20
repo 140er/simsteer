@@ -144,7 +144,8 @@ def _device_z_to_road_z(z_device: np.ndarray) -> np.ndarray:
 
 def _draw_path_wedge(out: np.ndarray, calib: Calibration,
                      plan_xyz: np.ndarray,
-                     plan_accel: np.ndarray | None = None) -> None:
+                     plan_accel: np.ndarray | None = None,
+                     base_color: tuple[int, int, int] | None = None) -> None:
     """Fill the path wedge between (center ± half_width), with each
     longitudinal segment colored by the plan's commanded acceleration
     at that distance. Braking sections turn red, accelerating sections
@@ -158,8 +159,13 @@ def _draw_path_wedge(out: np.ndarray, calib: Calibration,
     rendering — they always project with per-frame Z).
 
     `plan_accel` is the (33,) longitudinal accel column from the plan.
-    If None, falls back to a single flat green wedge.
+    If None, falls back to a single flat wedge with base_color.
+    
+    `base_color` is the BGR color to use for the path. If None, uses PATH_FILL_BGR.
     """
+    if base_color is None:
+        base_color = PATH_FILL_BGR
+    
     xs = plan_xyz[:, 0]
     ys = plan_xyz[:, 1]
     zs = _device_z_to_road_z(plan_xyz[:, 2]) if plan_xyz.shape[1] >= 3 else None
@@ -182,10 +188,10 @@ def _draw_path_wedge(out: np.ndarray, calib: Calibration,
     left = left_img[valid].astype(np.int32)
     right = right_img[valid].astype(np.int32)
     if plan_accel is None:
-        # Legacy flat-green path — single fillPoly.
+        # Legacy flat path — single fillPoly with base_color.
         poly = np.vstack([left, right[::-1]])
         overlay = out.copy()
-        cv2.fillPoly(overlay, [poly], PATH_FILL_BGR, lineType=cv2.LINE_AA)
+        cv2.fillPoly(overlay, [poly], base_color, lineType=cv2.LINE_AA)
         cv2.addWeighted(overlay, PATH_ALPHA, out, 1.0 - PATH_ALPHA, 0, dst=out)
         return
 
@@ -433,7 +439,7 @@ def _draw_desire_indicator(out: np.ndarray, decoded) -> None:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
 
 
-def draw_overlay(frame_bgr: np.ndarray, decoded, calib: Calibration) -> np.ndarray:
+def draw_overlay(frame_bgr: np.ndarray, decoded, calib: Calibration, engaged: bool = False) -> np.ndarray:
     out = frame_bgr.copy()
     calib.update_for_frame(out.shape)
 
@@ -443,16 +449,19 @@ def draw_overlay(frame_bgr: np.ndarray, decoded, calib: Calibration) -> np.ndarr
 
     # Path wedge (translucent, drawn under the plan center + lanes).
     # Colored by planned longitudinal accel — braking segments turn red,
-    # accelerating segments blue.
+    # accelerating segments blue. When engaged: cyan/green path. When disengaged: amber.
+    path_color = (160, 255, 140) if engaged else (140, 180, 220)  # cyan engaged, amber disengaged
     plan_xyz = decoded.plan[:, :3].astype(np.float64)
     plan_a = decoded.plan[:, 6].astype(np.float64)
-    _draw_path_wedge(out, calib, plan_xyz, plan_accel=plan_a)
+    _draw_path_wedge(out, calib, plan_xyz, plan_accel=plan_a, base_color=path_color)
 
     # Plan center line — pass Z so it follows hills/dips.
+    # Cyan when engaged, amber when disengaged
+    center_color = (200, 255, 120) if engaged else (100, 160, 240)
     plan_pts = _polyline_pts(calib, plan_xyz[:, 0], plan_xyz[:, 1],
                              zs_device=plan_xyz[:, 2])
     if plan_pts is not None:
-        cv2.polylines(out, [plan_pts], False, (0, 255, 0), 2, cv2.LINE_AA)
+        cv2.polylines(out, [plan_pts], False, center_color, 2, cv2.LINE_AA)
 
     # Lane lines + road edges intentionally not drawn — overlay reads
     # cleaner without the yellow/beige/red polylines layered on top of
