@@ -487,6 +487,10 @@ def main() -> int:
         # Auto-disengage tracking — when pad.disengage() fires from FPS
         # drop, surface the reason in the banner (the user didn't ask).
         was_engaged_last_frame = False
+        # Torque override tracking - detect manual takeover
+        engage_time = 0.0
+        torque_override_count = 0
+        TORQUE_OVERRIDE_FRAMES = 5  # Sustained frames before triggering
 
         def _engage_check() -> tuple[bool, str]:
             """Returns (allowed, reason). reason='' if allowed."""
@@ -687,6 +691,42 @@ def main() -> int:
                         # `throttle_out` / `brake_out` above).
                         pad.set_steering(steer)
                         pad.set_throttle_brake(throttle_out, brake_out)
+                        
+                        # Torque override detection - auto-disengage on hard yank
+                        if (settings.torque_override_enabled 
+                            and time.time() - engage_time > 0.2  # Skip first 200ms
+                            and tel.available):
+                            # Get physical wheel angle from telemetry
+                            phys_angle = tel.wheel_angle_rad(wheelbase_m=ctrl_cfg.wheelbase)
+                            # Convert physical angle to equivalent axis for comparison
+                            if phys_angle is not None and live_params.trusted():
+                                # What axis would produce this physical wheel angle?
+                                phys_axis = live_params.axis_for_wheel_angle(
+                                    phys_angle, v_ego=v_ego, steer_max=1.0)
+                                # Compare with AI commanded axis
+                                axis_error = abs(phys_axis - steer)
+                                
+                                # Convert threshold from radians to axis units
+                                # Typical max wheel angle ~900deg = ~15.7 rad, axis range [-1, 1]
+                                # So threshold_rad / (max_angle_rad / 2) gives axis threshold
+                                max_angle_rad = math.radians(450)  # Half rotation
+                                axis_threshold = settings.torque_override_threshold_rad / max_angle_rad
+                                
+                                if axis_error > axis_threshold:
+                                    torque_override_count += 1
+                                    if torque_override_count >= TORQUE_OVERRIDE_FRAMES:
+                                        # Manual takeover detected - auto-disengage
+                                        pad.disengage()
+                                        ctrl.reset()
+                                        audio.play("disengage")
+                                        banner_text = "DISENGAGED — manual takeover detected"
+                                        banner_color = (255, 160, 60)
+                                        banner_until = time.time() + 3.0
+                                        banner_persistent = False
+                                        torque_override_count = 0
+                                        print(f"-> TORQUE OVERRIDE DISENGAGE (error: {axis_error:.3f} axis)")
+                                else:
+                                    torque_override_count = 0
                     else:
                         # Disengaged: periodic re-center keeps any
                         # ViGEm drift (driver glitches, lost updates,
@@ -1180,6 +1220,8 @@ def main() -> int:
                                 pad.engage()
                                 ctrl.reset()
                                 audio.play("engage")
+                                engage_time = time.time()
+                                torque_override_count = 0
                                 if not live_params.trusted():
                                     banner_text = ("ENGAGED — steering fit "
                                                    "warming up, drive gently")
