@@ -93,6 +93,7 @@ class DeviceManager:
             elif kind == "wheel":
                 self._device = Wheel(device_id=self._vjoy_id)
             elif kind == "fanatec":
+                # Try FFB motor control first, fall back to vJoy if FFB unavailable
                 self._device = Fanatec(device_id=self._vjoy_id, prefer_vjoy_fallback=True)
             else:
                 self.last_error = f"unknown device kind: {kind}"

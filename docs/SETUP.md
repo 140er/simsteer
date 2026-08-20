@@ -104,10 +104,10 @@ axis→wheel response (often nicer to tune).
 - Also `pip install pyvjoy` (see step 1).
 
 ### Fanatec (`--device fanatec`)
-**For Fanatec wheel owners** — **physically drives your wheel motor via FFB!**
+**For Fanatec wheel owners** — **DirectInput Force Feedback motor control**
 
 SimSteer uses **DirectInput Force Feedback** to send constant force effects to
-your Fanatec wheel motor, actually turning the physical rim when engaged.
+your Fanatec wheel motor, attempting to physically turn the rim when engaged.
 
 - **Requirements**:
   - **Fanatec driver**: https://fanatec.com/en-us/technology/firmware-update
@@ -132,16 +132,22 @@ your Fanatec wheel motor, actually turning the physical rim when engaged.
     automatically falls back to vJoy virtual output (coexistence mode)
   - Check console output or tuner status to see which mode is active
 
+- **Implementation Status**:
+  - DirectInput FFB motor control is implemented via DirectInput8 COM interfaces
+    using Python ctypes
+  - Actual hardware validation with Fanatec wheels is pending
+  - If you have a Fanatec wheel, please test and report results
+  - Code includes proper HRESULT checking, device enumeration, acquisition,
+    effect creation, and force updates
+  - Fallback to vJoy is automatic and seamless if FFB cannot be acquired
+
 - **Limitations**:
   - DirectInput FFB requires BACKGROUND|EXCLUSIVE access. Most modern games
     read wheel position via shared DirectInput and use FFB separately, so
     this usually works. If game holds FOREGROUND|EXCLUSIVE FFB, SimSteer
     can't acquire and falls back to vJoy.
-  - FFB motor control is **experimental** and cannot be tested without real
-    hardware. Report issues if wheel doesn't respond as expected.
-  - Full DirectInput FFB implementation via ctypes is a work-in-progress.
-    Current code includes architecture and will gracefully fall back to vJoy
-    until Win32 DirectInput calls are complete.
+  - DIERR_NOTACQUIRED / DIERR_INPUTLOST errors trigger automatic re-acquisition
+    attempts. Persistent failures fall back to vJoy.
 
 - **Future: Fanatec SDK**:
   - Fanatec provides proprietary FullForce SDK (`EndorFanatecSdk64.dll`) that

@@ -28,6 +28,13 @@ This test plan covers the reliability, usability, and Fanatec support improvemen
 
 ## 1. Fanatec Support Tests
 
+### Implementation Status Note
+DirectInput FFB motor control is **implemented** via DirectInput8 COM interfaces using ctypes.
+All DirectInput8 API calls (DirectInput8Create, EnumDevices, CreateDevice, SetCooperativeLevel,
+Acquire, CreateEffect, SetParameters, Start, Stop, SendForceFeedbackCommand) are present with
+HRESULT checking. Hardware validation with actual Fanatec wheels is **pending**. If you have
+Fanatec hardware, please test and report results!
+
 ### 1.1 Fanatec FFB Motor Detection (Ideal: Real Hardware)
 **Prerequisites**: Fanatec wheel connected, driver installed, wheel in PC mode
 
@@ -42,9 +49,16 @@ This test plan covers the reliability, usability, and Fanatec support improvemen
 - ✓ Preflight info confirms detection
 - ✓ Application launches successfully
 - ✓ If FFB mode: Check console for background exclusive acquisition status
+- ✓ FFB init attempts real DirectInput8Create, EnumDevices, CreateDevice calls
+- ✓ On failure: graceful fallback to vJoy with clear error message
 
-### 1.2 Fanatec FFB Motor Control (REQUIRES HARDWARE)
+### 1.2 Fanatec FFB Motor Control (REQUIRES HARDWARE - VALIDATION PENDING)
 **Prerequisites**: Fanatec wheel in FFB motor mode (console confirms)
+
+**Implementation**: DirectInput constant force effect via ctypes COM interfaces.
+- Effect creation: GUID_ConstantForce, DIEFF_CARTESIAN, infinite duration
+- Force updates: SetParameters + Start per frame, magnitude [-10000, +10000]
+- Release: SendForceFeedbackCommand(DISFFC_STOPALL)
 
 **Steps**:
 1. Complete calibration with `--device fanatec`
@@ -54,12 +68,18 @@ This test plan covers the reliability, usability, and Fanatec support improvemen
 **Expected**:
 - ✓ **Physical wheel rim TURNS by itself** to match AI steering
 - ✓ Wheel moves smoothly left/right during lane keeping
-- ✓ Motor force proportional to steering angle
+- ✓ Motor force proportional to steering angle (constant force effect)
 - ✓ Game vehicle follows the physical wheel position
 - ✓ No "wheel fighting" or oscillation
+- ✓ DirectInput FFB effect active (check via Fanatec driver tools if available)
+
+**If test fails**: Report actual behavior (motor doesn't move, oscillates, wrong
+direction, etc.) and any console errors. This will help debug the ctypes implementation.
 
 ### 1.3 Fanatec Motor Release on Disengage
 **Prerequisites**: Fanatec in FFB motor mode, currently engaged
+
+**Implementation**: Calls `stop_all_effects()` → `SendForceFeedbackCommand(DISFFC_STOPALL)`
 
 **Steps**:
 1. While engaged with AI steering, press INSERT to disengage
@@ -70,9 +90,12 @@ This test plan covers the reliability, usability, and Fanatec support improvemen
 - ✓ No resistance from AI control
 - ✓ Manual steering works normally
 - ✓ Game responds to manual input
+- ✓ DirectInput effect stopped cleanly
 
 ### 1.4 Fanatec FFB Fallback Behavior
 **Prerequisites**: Fanatec wheel, but game has exclusive FFB lock OR FFB init fails
+
+**Implementation**: Handles FFB init failure gracefully, falls back to vJoy automatically
 
 **Steps**:
 1. Launch game first (some games take exclusive FFB)
@@ -81,13 +104,16 @@ This test plan covers the reliability, usability, and Fanatec support improvemen
 
 **Expected**:
 - ⚠️ Console: "Fanatec mode (vJoy fallback - FFB unavailable)"
-- ✓ Preflight explains why FFB unavailable
+- ✓ Preflight explains why FFB unavailable (HRESULT error, no device, etc.)
 - ✓ vJoy fallback works (virtual output)
 - ✓ Application doesn't crash
 - ✓ Can still use Fanatec for manual input, vJoy for AI output
 
 ### 1.5 Fanatec FFB Re-Acquisition After Conflict
 **Prerequisites**: Fanatec in FFB mode, game takes/releases exclusive access
+
+**Implementation**: Handles DIERR_NOTACQUIRED/DIERR_INPUTLOST, retries Acquire,
+falls back to vJoy after 10 consecutive failures.
 
 **Steps**:
 1. Engage with Fanatec FFB mode
@@ -96,10 +122,11 @@ This test plan covers the reliability, usability, and Fanatec support improvemen
 4. Check if motor control recovers
 
 **Expected**:
-- ✓ SimSteer detects DIERR_NOTACQUIRED gracefully
-- ✓ Attempts re-acquisition after loss
-- ✓ Either recovers FFB or falls back to vJoy smoothly
+- ✓ SimSteer detects DIERR_NOTACQUIRED gracefully (set_force returns False)
+- ✓ Attempts re-acquisition via reacquire() after loss
+- ✓ Either recovers FFB or falls back to vJoy smoothly (after 10 failures)
 - ✓ No crashes or hangs
+- ✓ info_string() updates to "vJoy fallback - FFB lost during operation"
 
 ### 1.6 Fanatec Detection (Without Hardware)
 **Prerequisites**: No Fanatec wheel connected

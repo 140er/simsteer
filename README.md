@@ -38,16 +38,19 @@ There are two ways to run SimSteer:
    - **Wheel** (`--device wheel`) → vJoy (emulates a DirectInput wheel;
      ETS2 skips its gamepad rack assist for a linear response):
      https://github.com/njz3/vJoy/releases — run the installer.
-   - **Fanatec** (`--device fanatec`) → **Physically drives your Fanatec wheel motor!**
+   - **Fanatec** (`--device fanatec`) → **DirectInput Force Feedback motor control**
      - Fanatec driver: https://fanatec.com/en-us/technology/firmware-update
      - Wheel in PC mode (check Fanatec Control Panel)
      - vJoy driver (as fallback if FFB unavailable)
-     - When engaged, SimSteer uses **Force Feedback** to physically turn your
-       steering wheel rim to match AI commands
+     - When engaged, SimSteer attempts to use **DirectInput Force Feedback** to
+       physically turn your steering wheel rim to match AI commands via constant
+       force effects
      - When disengaged, motor releases so you can take over
      - Game still reads your wheel position for vehicle control
-     - **Note**: FFB motor control is experimental. If it fails, SimSteer
-       falls back to vJoy virtual output mode.
+     - **Implementation Status**: FFB motor control is implemented via DirectInput8
+       COM interfaces using ctypes. Hardware validation is pending. If FFB
+       acquisition fails (no wheel detected, game holds exclusive lock, or driver
+       issue), SimSteer falls back to vJoy virtual output mode automatically.
 
    You only need the one matching how you'll steer. Gamepad is the
    default.

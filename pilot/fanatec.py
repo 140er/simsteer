@@ -52,6 +52,16 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from typing import Optional
 
+# Import DirectInput FFB module (Windows only)
+if sys.platform == "win32":
+    try:
+        from .dinput_ffb import get_dinput_ffb
+        _DINPUT_FFB_AVAILABLE = True
+    except ImportError:
+        _DINPUT_FFB_AVAILABLE = False
+else:
+    _DINPUT_FFB_AVAILABLE = False
+
 FANATEC_VENDOR_ID = 0x0EB7  # Endor AG
 
 

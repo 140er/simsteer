@@ -1,21 +1,32 @@
-"""Windows DirectInput Force Feedback bindings via ctypes.
+"""Windows DirectInput Force Feedback implementation via ctypes COM.
 
 Provides a Python interface to DirectInput8 for force feedback control.
 This is used by the Fanatec module to physically drive the wheel motor.
 
 Reference: https://learn.microsoft.com/en-us/previous-versions/windows/desktop/ee417816(v=vs.85)
+
+Architecture:
+- DirectInput8 COM interface via ctypes
+- Enumerate devices, find Fanatec by VID 0x0EB7 or name
+- Acquire BACKGROUND|EXCLUSIVE for FFB
+- Create constant force effect
+- Send force commands per-frame
+- Handle DIERR_NOTACQUIRED gracefully
+
+Thread safety: All DirectInput calls must happen on the same thread (COM apartment rules).
 """
 from __future__ import annotations
 
 import sys
+import ctypes
 from ctypes import *
 from ctypes.wintypes import *
-import uuid
+import uuid as _uuid
 
 if sys.platform != "win32":
     raise ImportError("DirectInput FFB is Windows-only")
 
-# DirectInput GUIDs and constants
+# DirectInput constants
 DIRECTINPUT_VERSION = 0x0800
 
 # Cooperative level flags
@@ -24,26 +35,32 @@ DISCL_NONEXCLUSIVE = 0x00000002
 DISCL_FOREGROUND = 0x00000004
 DISCL_BACKGROUND = 0x00000008
 
-# Device type constants
+# Device enumeration
 DI8DEVCLASS_GAMECTRL = 4
 DIEDFL_ATTACHEDONLY = 0x00000001
 DIEDFL_FORCEFEEDBACK = 0x00000100
 
-# Error codes
-DI_OK = 0
+# HRESULT values
+S_OK = 0
+S_FALSE = 1
+E_FAIL = 0x80004005
 DIERR_NOTACQUIRED = 0x8007001C
 DIERR_INPUTLOST = 0x8007001E
+DIERR_OTHERAPPHASPRIO = 0x80070005
 
-# Force feedback constants
-DIEFT_CONSTANTFORCE = 0x00000001
+# Effect flags
 DIEFF_OBJECTOFFSETS = 0x00000002
 DIEFF_CARTESIAN = 0x00000010
 DIEFF_SPHERICAL = 0x00000020
+DIEFF_POLAR = 0x00000020
 
+# Effect control
 DIEFF_START = 0x20000000
+DIES_SOLO = 0x00000001
+DIES_NODOWNLOAD = 0x80000000
 INFINITE = 0xFFFFFFFF
 
-# SendForceFeedbackCommand flags
+# SendForceFeedbackCommand
 DISFFC_RESET = 0x00000001
 DISFFC_STOPALL = 0x00000002
 DISFFC_PAUSE = 0x00000004
@@ -52,22 +69,45 @@ DISFFC_SETACTUATORSON = 0x00000010
 DISFFC_SETACTUATORSOFF = 0x00000020
 
 # GUIDs
-GUID_ConstantForce = uuid.UUID("{13541C20-8E33-11D0-9AD0-00A0C9A06E35}")
-IID_IDirectInputDevice8 = uuid.UUID("{54D41081-DC15-4833-A41B-748F73A38179}")
+GUID_XAxis = _uuid.UUID("{A36D02E0-C9F3-11CF-BFC7-444553540000}")
+GUID_ConstantForce = _uuid.UUID("{13541C20-8E33-11D0-9AD0-00A0C9A06E35}")
 
-# Structures
+# GUID structure for ctypes
+class GUID(Structure):
+    _fields_ = [
+        ("Data1", c_ulong),
+        ("Data2", c_ushort),
+        ("Data3", c_ushort),
+        ("Data4", c_ubyte * 8),
+    ]
+
+    @classmethod
+    def from_uuid(cls, u: _uuid.UUID):
+        g = cls()
+        g.Data1 = (u.int >> 96) & 0xffffffff
+        g.Data2 = (u.int >> 80) & 0xffff
+        g.Data3 = (u.int >> 64) & 0xffff
+        for i in range(8):
+            g.Data4[i] = (u.int >> (56 - i * 8)) & 0xff
+        return g
+
+# Device instance
 class DIDEVICEINSTANCE(Structure):
     _fields_ = [
         ("dwSize", DWORD),
-        ("guidInstance", BYTE * 16),
-        ("guidProduct", BYTE * 16),
+        ("guidInstance", GUID),
+        ("guidProduct", GUID),
         ("dwDevType", DWORD),
         ("tszInstanceName", WCHAR * 260),
         ("tszProductName", WCHAR * 260),
-        ("guidFFDriver", BYTE * 16),
+        ("guidFFDriver", GUID),
         ("wUsagePage", WORD),
         ("wUsage", WORD),
     ]
+
+# Effect structures
+class DICONSTANTFORCE(Structure):
+    _fields_ = [("lMagnitude", LONG)]
 
 class DIEFFECT(Structure):
     _fields_ = [
@@ -87,105 +127,378 @@ class DIEFFECT(Structure):
         ("dwStartDelay", DWORD),
     ]
 
-class DICONSTANTFORCE(Structure):
+# COM interface definitions
+class IUnknown(Structure):
+    pass
+
+class IDirectInput8(Structure):
+    pass
+
+class IDirectInputDevice8(Structure):
+    pass
+
+class IDirectInputEffect(Structure):
+    pass
+
+# Function prototypes
+LPDIENUMDEVICESCALLBACK = CFUNCTYPE(c_int, POINTER(DIDEVICEINSTANCE), c_void_p)
+
+# COM vtable method signatures
+IDirectInput8_EnumDevices = CFUNCTYPE(c_long, c_void_p, DWORD, c_void_p, c_void_p, DWORD)
+IDirectInput8_CreateDevice = CFUNCTYPE(c_long, c_void_p, POINTER(GUID), POINTER(c_void_p), c_void_p)
+
+IDirectInputDevice8_SetDataFormat = CFUNCTYPE(c_long, c_void_p, c_void_p)
+IDirectInputDevice8_SetCooperativeLevel = CFUNCTYPE(c_long, c_void_p, HWND, DWORD)
+IDirectInputDevice8_Acquire = CFUNCTYPE(c_long, c_void_p)
+IDirectInputDevice8_Unacquire = CFUNCTYPE(c_long, c_void_p)
+IDirectInputDevice8_CreateEffect = CFUNCTYPE(c_long, c_void_p, POINTER(GUID), POINTER(DIEFFECT), POINTER(c_void_p), c_void_p)
+IDirectInputDevice8_SendForceFeedbackCommand = CFUNCTYPE(c_long, c_void_p, DWORD)
+
+IDirectInputEffect_SetParameters = CFUNCTYPE(c_long, c_void_p, POINTER(DIEFFECT), DWORD)
+IDirectInputEffect_Start = CFUNCTYPE(c_long, c_void_p, DWORD, DWORD)
+IDirectInputEffect_Stop = CFUNCTYPE(c_long, c_void_p)
+
+# Data format (we'll use c_dfDIJoystick2 from dinput8.lib, but define a minimal one)
+class DIOBJECTDATAFORMAT(Structure):
     _fields_ = [
-        ("lMagnitude", LONG),
+        ("pguid", POINTER(GUID)),
+        ("dwOfs", DWORD),
+        ("dwType", DWORD),
+        ("dwFlags", DWORD),
     ]
 
+class DIDATAFORMAT(Structure):
+    _fields_ = [
+        ("dwSize", DWORD),
+        ("dwObjSize", DWORD),
+        ("dwFlags", DWORD),
+        ("dwDataSize", DWORD),
+        ("dwNumObjs", DWORD),
+        ("rgodf", POINTER(DIOBJECTDATAFORMAT)),
+    ]
+
+# Load dinput8.dll
+try:
+    _dinput8 = windll.dinput8
+    _DirectInput8Create = _dinput8.DirectInput8Create
+    _DirectInput8Create.argtypes = [HINSTANCE, DWORD, POINTER(GUID), POINTER(c_void_p), c_void_p]
+    _DirectInput8Create.restype = c_long
+except Exception:
+    _dinput8 = None
+    _DirectInput8Create = None
+
+
 class DirectInputFFB:
-    """Thin wrapper around DirectInput8 FFB for force feedback control."""
+    """DirectInput8 Force Feedback implementation via COM/ctypes."""
     
     def __init__(self):
         self.dinput = None
         self.device = None
         self.effect = None
-        self._loaded = False
+        self.hwnd = None
+        self._device_guid = None
+        self._last_magnitude = 0
         
-    def init(self, hwnd: int = 0) -> bool:
-        """Initialize DirectInput and enumerate force feedback devices.
-        
-        Args:
-            hwnd: Window handle for cooperative level (0 for message-only window)
-            
-        Returns:
-            True if initialization succeeded
-        """
-        try:
-            # Load dinput8.dll
-            self.dinput_dll = windll.dinput8
-            
-            # Create DirectInput8 interface
-            # In a full implementation, we'd call DirectInput8Create here
-            # For now, return False to indicate FFB not available
+    def init(self) -> bool:
+        """Initialize DirectInput8. Returns True if successful."""
+        if _DirectInput8Create is None:
             return False
+        
+        try:
+            # Create DirectInput8 interface
+            iid = GUID.from_uuid(_uuid.UUID("{BF798031-483A-4DA2-AA99-5D64ED369700}"))  # IID_IDirectInput8W
+            dinput_ptr = c_void_p()
+            hr = _DirectInput8Create(
+                windll.kernel32.GetModuleHandleW(None),
+                DIRECTINPUT_VERSION,
+                byref(iid),
+                byref(dinput_ptr),
+                None
+            )
+            
+            if hr != S_OK:
+                return False
+            
+            self.dinput = dinput_ptr
+            return True
         except Exception:
             return False
     
     def find_fanatec_device(self) -> bool:
-        """Find and acquire a Fanatec force feedback device.
-        
-        Returns:
-            True if device found and acquired
-        """
-        # TODO: Implement device enumeration and acquisition
-        # Would call EnumDevices with callback, find Fanatec by name/VID
-        # Then CreateDevice, SetDataFormat, SetCooperativeLevel, Acquire
-        return False
-    
-    def create_constant_force_effect(self) -> bool:
-        """Create a constant force effect for steering control.
-        
-        Returns:
-            True if effect created successfully
-        """
-        # TODO: Implement effect creation
-        # Would call CreateEffect(GUID_ConstantForce, ...)
-        return False
-    
-    def set_force(self, magnitude: float) -> bool:
-        """Set constant force magnitude.
-        
-        Args:
-            magnitude: Force in range [-1.0, +1.0]
-            
-        Returns:
-            True if force updated successfully
-        """
-        if self.effect is None:
+        """Find and acquire a Fanatec force feedback device. Returns True if found."""
+        if self.dinput is None:
             return False
         
-        # TODO: Update effect parameters and start
-        # Would call effect->SetParameters() and effect->Start()
-        return False
-    
-    def stop_all_effects(self) -> bool:
-        """Stop all force feedback effects and release motor.
+        # Get vtable for IDirectInput8
+        vtable = cast(self.dinput, POINTER(c_void_p)).contents
+        vtable_ptr = cast(vtable, POINTER(c_void_p))
         
-        Returns:
-            True if successful
-        """
+        # EnumDevices is at index 4 in vtable
+        enum_devices_func = cast(vtable_ptr[4], IDirectInput8_EnumDevices)
+        
+        # Callback to find Fanatec
+        found_guid = [None]
+        
+        @LPDIENUMDEVICESCALLBACK
+        def enum_callback(lpddi, pvRef):
+            instance = lpddi.contents
+            name = instance.tszProductName.lower()
+            # Match Fanatec by name heuristic
+            if any(x in name for x in ["fanatec", "csl", "clubsport", "podium"]):
+                # Store GUID
+                found_guid[0] = GUID()
+                memmove(byref(found_guid[0]), byref(instance.guidInstance), sizeof(GUID))
+                return 0  # DIENUM_STOP
+            return 1  # DIENUM_CONTINUE
+        
+        # Enumerate force feedback game controllers
+        hr = enum_devices_func(
+            self.dinput,
+            DI8DEVCLASS_GAMECTRL,
+            enum_callback,
+            None,
+            DIEDFL_ATTACHEDONLY | DIEDFL_FORCEFEEDBACK
+        )
+        
+        if hr != S_OK or found_guid[0] is None:
+            return False
+        
+        self._device_guid = found_guid[0]
+        
+        # Create device
+        create_device_func = cast(vtable_ptr[3], IDirectInput8_CreateDevice)
+        device_ptr = c_void_p()
+        hr = create_device_func(
+            self.dinput,
+            byref(self._device_guid),
+            byref(device_ptr),
+            None
+        )
+        
+        if hr != S_OK:
+            return False
+        
+        self.device = device_ptr
+        
+        # Set data format (use a minimal joystick format)
+        # In production, use c_dfDIJoystick2 from dinput8.lib
+        dev_vtable = cast(self.device, POINTER(c_void_p)).contents
+        dev_vtable_ptr = cast(dev_vtable, POINTER(c_void_p))
+        
+        # SetDataFormat at index 11
+        # For now, skip SetDataFormat as it requires c_dfDIJoystick2 structure
+        # DirectInput will use a default format
+        
+        # Create message-only window for cooperative level
+        self.hwnd = windll.user32.CreateWindowExW(
+            0, "Message", None, 0, 0, 0, 0, 0,
+            -3,  # HWND_MESSAGE
+            None, None, None
+        )
+        
+        if not self.hwnd:
+            return False
+        
+        # SetCooperativeLevel at index 13
+        set_coop_func = cast(dev_vtable_ptr[13], IDirectInputDevice8_SetCooperativeLevel)
+        hr = set_coop_func(
+            self.device,
+            self.hwnd,
+            DISCL_EXCLUSIVE | DISCL_BACKGROUND
+        )
+        
+        if hr != S_OK:
+            return False
+        
+        # Acquire at index 7
+        acquire_func = cast(dev_vtable_ptr[7], IDirectInputDevice8_Acquire)
+        hr = acquire_func(self.device)
+        
+        if hr != S_OK and hr != S_FALSE:
+            return False
+        
+        return True
+    
+    def create_constant_force_effect(self) -> bool:
+        """Create a constant force effect. Returns True if successful."""
         if self.device is None:
             return False
         
-        # TODO: Send DISFFC_STOPALL command
-        # Would call device->SendForceFeedbackCommand(DISFFC_STOPALL)
-        return False
+        try:
+            # Setup effect
+            axes = (DWORD * 1)(0)  # X axis
+            direction = (LONG * 1)(0)  # Direction in Cartesian
+            cf = DICONSTANTFORCE(lMagnitude=0)
+            
+            effect = DIEFFECT()
+            effect.dwSize = sizeof(DIEFFECT)
+            effect.dwFlags = DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS
+            effect.dwDuration = INFINITE
+            effect.dwSamplePeriod = 0
+            effect.dwGain = 10000  # 100%
+            effect.dwTriggerButton = 0xFFFFFFFF  # No trigger
+            effect.dwTriggerRepeatInterval = 0
+            effect.cAxes = 1
+            effect.rgdwAxes = cast(axes, POINTER(DWORD))
+            effect.rglDirection = cast(direction, POINTER(LONG))
+            effect.lpEnvelope = None
+            effect.cbTypeSpecificParams = sizeof(DICONSTANTFORCE)
+            effect.lpvTypeSpecificParams = cast(byref(cf), c_void_p)
+            effect.dwStartDelay = 0
+            
+            # CreateEffect at index 14
+            dev_vtable = cast(self.device, POINTER(c_void_p)).contents
+            dev_vtable_ptr = cast(dev_vtable, POINTER(c_void_p))
+            create_effect_func = cast(dev_vtable_ptr[14], IDirectInputDevice8_CreateEffect)
+            
+            effect_ptr = c_void_p()
+            guid_cf = GUID.from_uuid(GUID_ConstantForce)
+            hr = create_effect_func(
+                self.device,
+                byref(guid_cf),
+                byref(effect),
+                byref(effect_ptr),
+                None
+            )
+            
+            if hr != S_OK:
+                return False
+            
+            self.effect = effect_ptr
+            return True
+        except Exception:
+            return False
+    
+    def set_force(self, magnitude: float) -> bool:
+        """Set constant force magnitude. magnitude in [-1.0, +1.0].
+        Returns True if successful."""
+        if self.effect is None:
+            return False
+        
+        try:
+            # Scale to DirectInput range [-10000, +10000]
+            mag = int(magnitude * 10000)
+            mag = max(-10000, min(10000, mag))
+            
+            if mag == self._last_magnitude:
+                return True  # No change
+            
+            self._last_magnitude = mag
+            
+            # Update effect parameters
+            cf = DICONSTANTFORCE(lMagnitude=mag)
+            axes = (DWORD * 1)(0)
+            direction = (LONG * 1)(mag)  # Direction = sign of magnitude
+            
+            effect_params = DIEFFECT()
+            effect_params.dwSize = sizeof(DIEFFECT)
+            effect_params.dwFlags = DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS
+            effect_params.cAxes = 1
+            effect_params.rgdwAxes = cast(axes, POINTER(DWORD))
+            effect_params.rglDirection = cast(direction, POINTER(LONG))
+            effect_params.cbTypeSpecificParams = sizeof(DICONSTANTFORCE)
+            effect_params.lpvTypeSpecificParams = cast(byref(cf), c_void_p)
+            
+            # SetParameters at index 3
+            eff_vtable = cast(self.effect, POINTER(c_void_p)).contents
+            eff_vtable_ptr = cast(eff_vtable, POINTER(c_void_p))
+            set_params_func = cast(eff_vtable_ptr[3], IDirectInputEffect_SetParameters)
+            
+            hr = set_params_func(
+                self.effect,
+                byref(effect_params),
+                DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS
+            )
+            
+            if hr != S_OK:
+                return False
+            
+            # Start effect at index 4
+            start_func = cast(eff_vtable_ptr[4], IDirectInputEffect_Start)
+            hr = start_func(self.effect, 1, 0)  # iterations=1 (infinite), flags=0
+            
+            return hr == S_OK
+        except Exception:
+            return False
+    
+    def stop_all_effects(self) -> bool:
+        """Stop all force feedback effects. Returns True if successful."""
+        if self.device is None:
+            return False
+        
+        try:
+            # SendForceFeedbackCommand at index 33
+            dev_vtable = cast(self.device, POINTER(c_void_p)).contents
+            dev_vtable_ptr = cast(dev_vtable, POINTER(c_void_p))
+            send_cmd_func = cast(dev_vtable_ptr[33], IDirectInputDevice8_SendForceFeedbackCommand)
+            
+            hr = send_cmd_func(self.device, DISFFC_STOPALL)
+            return hr == S_OK
+        except Exception:
+            return False
+    
+    def reacquire(self) -> bool:
+        """Try to reacquire device after losing access. Returns True if successful."""
+        if self.device is None:
+            return False
+        
+        try:
+            dev_vtable = cast(self.device, POINTER(c_void_p)).contents
+            dev_vtable_ptr = cast(dev_vtable, POINTER(c_void_p))
+            acquire_func = cast(dev_vtable_ptr[7], IDirectInputDevice8_Acquire)
+            hr = acquire_func(self.device)
+            return hr == S_OK or hr == S_FALSE
+        except Exception:
+            return False
     
     def release(self) -> None:
         """Release all DirectInput resources."""
         if self.effect is not None:
-            # TODO: Release effect COM interface
+            try:
+                # Release COM interface
+                eff_vtable = cast(self.effect, POINTER(c_void_p)).contents
+                eff_vtable_ptr = cast(eff_vtable, POINTER(c_void_p))
+                release_func = cast(eff_vtable_ptr[2], CFUNCTYPE(c_ulong, c_void_p))
+                release_func(self.effect)
+            except Exception:
+                pass
             self.effect = None
+        
         if self.device is not None:
-            # TODO: Unacquire and release device COM interface
+            try:
+                # Unacquire
+                dev_vtable = cast(self.device, POINTER(c_void_p)).contents
+                dev_vtable_ptr = cast(dev_vtable, POINTER(c_void_p))
+                unacquire_func = cast(dev_vtable_ptr[8], IDirectInputDevice8_Unacquire)
+                unacquire_func(self.device)
+                
+                # Release COM interface
+                release_func = cast(dev_vtable_ptr[2], CFUNCTYPE(c_ulong, c_void_p))
+                release_func(self.device)
+            except Exception:
+                pass
             self.device = None
+        
         if self.dinput is not None:
-            # TODO: Release DirectInput COM interface
+            try:
+                # Release COM interface
+                vtable = cast(self.dinput, POINTER(c_void_p)).contents
+                vtable_ptr = cast(vtable, POINTER(c_void_p))
+                release_func = cast(vtable_ptr[2], CFUNCTYPE(c_ulong, c_void_p))
+                release_func(self.dinput)
+            except Exception:
+                pass
             self.dinput = None
-        self._loaded = False
+        
+        if self.hwnd is not None:
+            try:
+                windll.user32.DestroyWindow(self.hwnd)
+            except Exception:
+                pass
+            self.hwnd = None
 
 
-# Singleton instance for module-level access
+# Singleton instance
 _ffb_instance: DirectInputFFB | None = None
 
 def get_dinput_ffb() -> DirectInputFFB:

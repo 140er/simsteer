@@ -27,9 +27,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from simsteer.runtime.output.gamepad import Gamepad, GamepadError
-from simsteer.runtime.output.wheel import Wheel, WheelError
-from simsteer.runtime.output.fanatec import Fanatec, FanatecError
+from pilot.gamepad import Gamepad, GamepadError
+from pilot.wheel import Wheel, WheelError
+from pilot.fanatec import Fanatec, FanatecError
 
 DeviceKind = Literal["gamepad", "wheel", "fanatec"]
 
@@ -93,6 +93,7 @@ class DeviceManager:
             elif kind == "wheel":
                 self._device = Wheel(device_id=self._vjoy_id)
             elif kind == "fanatec":
+                # Try FFB motor control first, fall back to vJoy if FFB unavailable
                 self._device = Fanatec(device_id=self._vjoy_id, prefer_vjoy_fallback=True)
             else:
                 self.last_error = f"unknown device kind: {kind}"
