@@ -177,26 +177,27 @@ class Wizard:
         if self._lc.last_reset_reason:
             msg = self._lc.last_reset_reason
             self._lc.last_reset_reason = None
-            return f"calibration reset: {msg}"
+            return f"⚠️ CALIBRATION RESET: {msg}"
         # Camera phase guidance dominates until LiveCalib is done.
         if self.phase == WizardPhase.CAMERA:
             if v_ego is not None and v_ego < MIN_SPEED_FILTER_MPS:
                 mph = v_ego * 2.23694
-                return (f"DRIVE FASTER — currently {mph:.0f} mph, "
-                        f"need 15+ for calibration")
+                return (f"⚠️ TOO SLOW — speed up to 15+ mph for calibration "
+                        f"(currently {mph:.0f} mph)")
             if (self._lc.samples > 50
                     and self._lc.rej_human > self._lc.samples * 0.3):
                 # If we've rejected lots of samples as human-input,
                 # the user is probably steering hard.
-                return "DRIVE STRAIGHT — small/no steering inputs while calibrating"
+                return ("⚠️ STEERING TOO MUCH — drive straight with gentle inputs "
+                        "while calibrating")
             eta = self._lc.eta_to_calibrated_s()
             if eta is not None and eta > 0:
-                return (f"keep driving on highway — camera ~{_fmt_eta(eta)} "
-                        f"@ {self._lc.acceptance_rate_hz:.0f} samples/s")
-            return "keep driving on highway — camera calibrating"
+                return (f"✓ Good — keep driving on highway "
+                        f"(~{_fmt_eta(eta)} left @ {self._lc.acceptance_rate_hz:.0f} samples/s)")
+            return "✓ Calibrating — keep driving straight on highway"
         if self.phase == WizardPhase.STEERING:
-            return "ENGAGE and drive gently — steering fit warming up"
-        return "calibration complete"
+            return "✓ Camera done! Press INSERT to engage and drive gently"
+        return "✓ Setup complete — ready to drive"
 
     # ----- banner -----------------------------------------------------
 
@@ -214,15 +215,15 @@ class Wizard:
         pct = self.progress_pct()
         eta = self.eta_seconds()
         if ph == WizardPhase.CAMERA:
-            prefix = f"FIRST DRIVE — {pct:.0f}% — drive manually on highway"
+            prefix = f"SETUP — {pct:.0f}% — Drive manually on highway (speed 15+ mph, straight line)"
             return (self._banner_with_eta(prefix, eta), (80, 200, 255))
         if ph == WizardPhase.STEERING:
-            prefix = f"FIRST DRIVE — {pct:.0f}% — press INSERT, drive gently"
+            prefix = f"SETUP — {pct:.0f}% — Press INSERT to engage, drive gently"
             return (self._banner_with_eta(prefix, eta), (80, 220, 200))
         # DONE: show bright READY banner for a window, then collapse.
         if time.time() < self._ready_banner_until:
-            return ("READY TO ENGAGE — press INSERT", (80, 255, 80))
-        return ("READY", (80, 255, 80))
+            return ("✓ READY — Press INSERT to engage autonomous driving", (80, 255, 80))
+        return ("✓ READY", (80, 255, 80))
 
     def progress_lines(self) -> list[tuple[str, tuple[int, int, int]]]:
         """Two-line progress detail under the banner."""
