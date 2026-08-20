@@ -67,6 +67,10 @@ class Settings:
     torque_override_threshold_rad: float = 0.5  # ~28.6 degrees
     # Enable torque override disengage (openpilot-style manual takeover).
     torque_override_enabled: bool = True
+    # Auto-FOV calibration: measures true FOV from vx_model/v_ego on straight
+    # highway driving (60 samples, ~30-60s) and applies the correction once.
+    # One-shot solve is safe; it cannot run away. Disable for manual FOV.
+    auto_fov: bool = True
 
     def __post_init__(self) -> None:
         # Dataclass defaults for mutable types (list/dict) can't be

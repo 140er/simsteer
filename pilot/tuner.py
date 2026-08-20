@@ -944,8 +944,9 @@ class Tuner:
                 self._paint_dash("steering", "warn", "—")
 
         # FOV.
+        fov_mode = "auto" if (self.settings and self.settings.auto_fov) else "static — match in-game"
         self._paint_dash("fov", "ok",
-                         f"{self.calib.fov_h_deg:.1f}° (static — match in-game)")
+                         f"{self.calib.fov_h_deg:.1f}° ({fov_mode})")
 
     def _refresh_cal_routine(self) -> None:
         """Mirror the guided-calibration routine's state into its label.
