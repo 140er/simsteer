@@ -55,6 +55,9 @@ from pilot.global_keys import (
     GlobalKeys, KEY_END, KEY_INSERT, KEY_NUMPAD4, KEY_NUMPAD6,
     KEY_PAGEDOWN, KEY_PAGEUP,
 )
+from pilot.input.wheel_buttons import (
+    WheelButtonListener, parse_button_bind, format_button_bind
+)
 from pilot.hotkeys import hk_enabled as _hk_enabled
 from pilot.hud import (
     COL_ACCENT_BLUE, COL_ACCENT_GREEN, COL_ACCENT_RED, COL_ACCENT_VIOLET,
@@ -450,6 +453,14 @@ def main() -> int:
             KEY_PAGEUP, KEY_PAGEDOWN, KEY_END,       # NAV: queue L / R / clear
         }
         global_keys = GlobalKeys(watched_keys)
+        
+        # Wheel button listener for engage/disengage bind (Fanatec, etc.)
+        wheel_buttons = WheelButtonListener()
+        bound_device, bound_button = parse_button_bind(settings.wheel_button_bind)
+        if wheel_buttons.is_available() and bound_device and bound_button is not None:
+            print(f"wheel button bind: {bound_device} button {bound_button} -> engage/disengage")
+        elif settings.wheel_button_bind:
+            print(f"wheel button bind configured but device not found: {settings.wheel_button_bind}")
 
         last = time.perf_counter()
         show_input = True
@@ -1096,6 +1107,15 @@ def main() -> int:
                 if cv_key != 0xFF:
                     pressed.append(cv_key)
                 pressed.extend(global_keys.poll())
+                
+                # Check for wheel button press (engage/disengage bind)
+                wheel_button_pressed = False
+                if wheel_buttons.is_available() and bound_device and bound_button is not None:
+                    button_events = wheel_buttons.poll()
+                    for device_name, button_idx in button_events:
+                        if device_name == bound_device and button_idx == bound_button:
+                            wheel_button_pressed = True
+                            break
 
                 quit_loop = False
                 def hk(hk_id: str) -> bool:
@@ -1136,7 +1156,7 @@ def main() -> int:
                         banner_persistent = False
                         print("-> CALIBRATION RESET (LiveCalib + LiveParams "
                               "+ wizard flag + probe wiped)")
-                    elif key == KEY_INSERT and pad is not None and hk("engage"):
+                    elif (key == KEY_INSERT or wheel_button_pressed) and pad is not None and hk("engage"):
                         if pad.engaged:
                             # User-initiated disengage — always allowed.
                             pad.disengage()
