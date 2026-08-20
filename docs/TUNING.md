@@ -35,7 +35,7 @@ A fresh setup, in order:
 
 | Knob | What it does |
 |---|---|
-| **Capture VFOV** | Vertical FOV of your capture. Set to match the game. HFOV is derived from aspect. **Static — no auto-FOV.** |
+| **Capture VFOV** | Vertical FOV of your capture. Set to match the game. HFOV is derived from aspect. **Auto-FOV measures and corrects this automatically** after 60 straight+fast samples (~30-60s highway). Set manually only if you disable auto-FOV. |
 | **Pitch / Yaw** | Camera mount angles. Auto-written by LiveCalib; only override if the cyan horizon line visibly drifts off the real horizon. |
 | **Camera height** | Height above road (m). Auto-refined by LiveCalib. |
 | **Crop top / bottom** | Hide cab roof / hood from the model input. |
@@ -44,13 +44,14 @@ A fresh setup, in order:
 
 **FOV health check** (HUD `FOV` line, dev HUD): drive straight at highway
 speed and read `ratio vx_model/v_ego`:
-- `~1.00` → correct.
-- `> 1.05` → FOV set too high → narrow VFOV.
-- `< 0.95` → FOV set too low → widen VFOV.
+- `~1.00` → correct. Auto-FOV achieved this automatically.
+- `> 1.05` → FOV set too high → narrow VFOV (or wait for auto-FOV).
+- `< 0.95` → FOV set too low → widen VFOV (or wait for auto-FOV).
 
-This ratio is the same signal the old auto-FOV used internally; it's
-shown for you to tune by hand instead of being applied in a feedback
-loop.
+**Automatic FOV**: Enabled by default (`settings.auto_fov = True`). Measures
+the true FOV from vx_model/v_ego on straight highway driving (60 samples)
+and applies the correction once per session. Disable with `--no-auto-fov` if
+you want full manual control.
 
 ---
 

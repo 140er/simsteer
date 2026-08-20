@@ -103,6 +103,20 @@ axis→wheel response (often nicer to tune).
 - Run the installer, **reboot**.
 - Also `pip install pyvjoy` (see step 1).
 
+### Fanatec (`--device fanatec`)
+**For Fanatec wheel owners** — uses your real Fanatec wheel alongside
+vJoy for AI output (coexistence mode).
+- Requirements:
+  - **Fanatec driver**: https://fanatec.com/en-us/technology/firmware-update
+  - Wheel in **PC mode** (check Fanatec Control Panel)
+  - **vJoy driver** (see above Wheel section)
+  - `pip install pygame` (for wheel detection)
+  - `pip install pyvjoy`
+- SimSteer detects your Fanatec wheel (CSL / ClubSport / Podium) and uses
+  vJoy as a second virtual wheel for AI commands
+- In-game, bind your Fanatec for manual control and vJoy for AI steering
+- Check preflight messages for detection status
+
 > You only need the one matching your `--device`. Gamepad is the default
 > and the simplest to get going.
 
@@ -172,12 +186,29 @@ Only do the game(s) you'll actually drive.
 
 ---
 
-## 6. Camera FOV — set it once, by hand
+## 6. Camera FOV — automatic detection + manual verification
 
-> **This is the step people miss.** SimSteer warps each frame onto the
-> model's fixed virtual camera, and that warp needs to know your game's
-> **horizontal FOV**. There is no auto-FOV — you set it once to match
-> the game.
+> **CRITICAL**: Wrong FOV used to be the #1 cause of the plan veering off
+> the road. SimSteer now includes **AUTOMATIC FOV detection** to fix this!
+
+### Automatic FOV Detection (NEW!)
+
+SimSteer will automatically measure and correct your FOV during the first
+drive:
+
+1. **Just drive normally on the highway** for 30-60 seconds at 15+ mph
+2. Watch the HUD **"auto-FOV"** line for progress (60 samples needed)
+3. When complete, SimSteer applies the correction automatically
+4. You'll see a banner: "auto-FOV: XX → YY deg (vx/v_ego=N.NN)"
+
+The auto-FOV system:
+- Measures `vx_model / v_ego` ratio on straight driving
+- Solves the true FOV once and freezes (cannot run away)
+- Saves the result automatically
+
+### Manual FOV Setup (Optional)
+
+If you prefer manual control or want to verify auto-FOV worked correctly:
 
 1. Find your in-game FOV setting:
    - **ETS2**: Options → Gameplay → Camera → *Field of view*.
@@ -192,8 +223,8 @@ Only do the game(s) you'll actually drive.
    - `> 1.05` → FOV too high, narrow it.
    - `< 0.95` → FOV too low, widen it.
 
-Pitch, yaw, and camera height *do* auto-calibrate (LiveCalib) — only FOV
-is manual.
+**Note**: Pitch, yaw, and camera height *do* auto-calibrate (LiveCalib).
+Only FOV needs manual setting if you disable auto-FOV.
 
 ---
 
@@ -216,13 +247,20 @@ knobs). The console / launcher tells you what's missing if a preflight
 check fails.
 
 ### First drive (calibration)
-1. Drive **manually** on a highway for ~10–15 minutes. A progress banner
-   tracks calibration.
-2. Don't yank the wheel — calibration auto-pauses when it sees human
-   steering input.
-3. When the banner turns green / you hear the ready chime, press
-   **INSERT** to engage.
-4. **INSERT** toggles engage/disengage any time.
+1. Drive **manually** on a highway for ~10–15 minutes
+2. **Setup wizard provides clear guidance**:
+   - Banner shows progress percentage and requirements
+   - Speed: must maintain 15+ mph for calibration
+   - Steering: drive straight with gentle inputs
+   - Warning indicators (⚠️) show if you're too slow or steering too much
+   - Success indicators (✓) confirm good calibration progress
+3. Calibration auto-pauses when it detects hard steering
+4. Watch for two milestones:
+   - Camera calibration (pitch/yaw/height)
+   - Steering calibration (rack fit via LiveParams)
+5. When the banner shows "✓ READY — Press INSERT to engage autonomous
+   driving", press **INSERT** to engage
+6. **INSERT** toggles engage/disengage any time
 
 See [docs/TUNING.md](TUNING.md) for what every knob does and how to fix
 bad driving, and [docs/ARCHITECTURE.md](ARCHITECTURE.md) for how the
@@ -256,13 +294,14 @@ full release/zip checklist.
 | Flag | Default | What it does |
 |---|---|---|
 | `--game {auto,ets2,ac,forza}` | auto | Which game's telemetry to read. `auto` tries ETS2 → AC → Forza. |
-| `--device {gamepad,wheel}` | gamepad | Output device. gamepad = ViGEm Xbox 360; wheel = vJoy. |
-| `--vjoy-device N` | 1 | vJoy device index when `--device wheel`. |
+| `--device {gamepad,wheel,fanatec}` | gamepad | Output device. gamepad = ViGEm Xbox 360; wheel = vJoy; fanatec = Fanatec + vJoy coexistence. |
+| `--vjoy-device N` | 1 | vJoy device index when `--device wheel` or `--device fanatec`. |
 | `--forza-port N` | 7777 | UDP port Forza Data Out targets. Must match in-game. |
 | `--max-width N` | 1600 | Cap overlay window width (px). |
 | `--no-gamepad` | off | Run overlay + model but open no virtual device. Skips ViGEm/vJoy preflight. Dry-run. |
 | `--no-tuner` | off | Don't open the tuner window. (You lose the Setup tab too.) |
 | `--no-probe` | off | Disable the active-steering probe used during the calibration wizard. |
+| `--no-auto-fov` | off | Disable automatic FOV detection (forces manual FOV setup). |
 | `--passive-fit-ets2` | off | Allow LiveParams to learn while disengaged on ETS2 (risky — see TUNING.md). |
 | `--force-engage` | off | **Dev only.** Bypass the calibration / FPS / telemetry engage gate. |
 | `--reset-calib` | — | Wipe LiveCalib + LiveParams + wizard flag at startup and recalibrate from zero. |
@@ -287,14 +326,20 @@ just press `R` in the overlay.
 
 ## Troubleshooting
 
-- **Truck doesn't steer (ETS2)** → deadzone isn't 0.
+- **Truck doesn't steer (ETS2)** → deadzone isn't 0. The preflight dialog
+  shows a detailed warning with step-by-step fix instructions.
 - **"Cannot engage — frame rate too low"** → DirectML didn't load, vision
-  is on CPU. Reinstall `onnxruntime-directml`.
-- **Plan veers way off the road / truck won't hold a lane** → FOV is
-  wrong. See [step 6](#6-camera-fov--set-it-once-by-hand).
+  is on CPU. Preflight shows a prominent warning. Reinstall
+  `onnxruntime-directml`.
+- **Plan veers way off the road / truck won't hold a lane** → Auto-FOV
+  should fix this automatically. If it persists, check the HUD FOV ratio
+  manually (see [step 6](#6-camera-fov--automatic-detection--manual-verification)).
 - **"Game telemetry not detected"** → SCS plugin missing (ETS2), Data Out
-  off (Forza), or AC not in a session.
+  off (Forza), or AC not in a session. Preflight provides specific
+  instructions for each case.
 - **Game launched as admin** → launch SimSteer as admin too (shared
-  memory lives in per-session namespaces).
+  memory lives in per-session namespaces). Preflight warns about this for AC.
 - **Build fails "Access is denied" on SimSteer.exe** → a copy is still
   running; close it first.
+- **Fanatec wheel not detected** → Check preflight messages for detailed
+  troubleshooting. Ensure driver installed, wheel in PC mode, powered on.
