@@ -130,12 +130,12 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
     nav = NavManager()
     probe = SteeringProbe(enabled=not settings.no_probe)
     cal_routine = CalibrationRoutine(live_params)
-    # Auto-FOV is OFF by default. Re-running the one-shot solve every
-    # session and persisting it turns into a slow closed loop, and a
-    # single bad straight-line measurement slams FOV to garbage (seen:
-    # 90 -> 40 deg) — exactly the runaway the project removed LiveFov
-    # for. FOV is a static knob: set it in the tuner's Camera tab.
-    fov_resolver = FovResolver(enabled=False)
+    # Auto-FOV: enabled by default. Solves FOV once from vx_model/v_ego
+    # on a straight (60 samples, ~30-60s of highway), then freezes.
+    # One-shot open-loop solve is safe; it cannot run away like the old
+    # continuous LiveFov. User can disable via settings.auto_fov = False.
+    enable_auto_fov = getattr(settings, "auto_fov", True)
+    fov_resolver = FovResolver(enabled=enable_auto_fov)
     hud_renderer = HudRenderer()
     # First-drive onboarding: gates engage until camera calibration is
     # done and drives the HUD's wizard panel. Inert once a game is
@@ -167,7 +167,8 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
           f"{'available' if tel.available else 'NOT detected'}")
     print(f"calibration: {live_calib.status_label}  "
           f"(FOV={calib.fov_h_deg:.1f} pitch={calib.pitch_deg:+.1f} "
-          f"h={calib.height_m:.2f})  auto-FOV will refine on a straight")
+          f"h={calib.height_m:.2f})")
+    print(f"auto-FOV: {'enabled (will measure on highway)' if enable_auto_fov else 'disabled'}")
     print(f"hud: {settings.hud_mode!r} (H toggles)   "
           f"probe: {'on' if probe.enabled else 'off'}")
     print("keys: INSERT engage  v model/capture  i input  h hud  r recal  "

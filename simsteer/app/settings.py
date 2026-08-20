@@ -37,6 +37,11 @@ class Settings:
     # only turn it OFF if the small steering wobble during setup is
     # unwanted.
     no_probe: bool = False
+    # Enable automatic FOV detection. When enabled, SimSteer measures
+    # the true FOV from vx_model/v_ego on straight highway driving
+    # (60 samples, ~30-60s) and applies the correction once per session.
+    # Default ON — significantly reduces "plan veering off road" failures.
+    auto_fov: bool = True
     # Bypass the engagement gate (camera-calibrated + telemetry + FPS).
     # DEV ONLY — without calibration the truck won't track lanes.
     force_engage: bool = False
