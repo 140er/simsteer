@@ -217,11 +217,11 @@ consecutive blocks.
 
 | Symptom | First thing to try |
 |---|---|
-| Plan veers off the road, won't hold lane | **FOV is wrong** — fix Capture VFOV (ratio ≈ 1.0). |
+| Plan veers off the road, won't hold lane | **Auto-FOV will fix this automatically** on first drive. If it persists, verify FOV ratio ≈ 1.0 in HUD. |
 | Steers in too early on gentle curves | Lower **Anticipation** (toward 0 or negative). |
 | Steers in too late | Raise **Anticipation**. |
 | Persistent drift to one side | **Axis bias**, or let closed-loop trim settle. |
 | Oversteers / wobbles in lane | Lower **Steer max** or **Authority**; check LiveParams `a` isn't inflated. |
 | Truck stopped steering / wild oversteer after off-highway | LiveParams corrupted → **Reset RLS**, reconverge on highway. |
 | Lane change stalls mid-maneuver | Raise **Hold duration**. |
-| Won't engage | Calibration not trusted yet (drive more), low FPS (DirectML), or no telemetry. |
+| Won't engage | Check preflight warnings: calibration not trusted yet (drive more), low FPS (DirectML missing), no telemetry (plugin/Data Out), or game in admin mode. |
