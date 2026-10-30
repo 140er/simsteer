@@ -91,6 +91,8 @@ a = Analysis(
         'winsound',
         # customtkinter — the tuner's slider GUI toolkit.
         'customtkinter',
+        'simsteer.runtime.telemetry.ac_shm',
+        'simsteer.runtime.telemetry.forza_udp',
     ],
     hookspath=[],
     runtime_hooks=[],

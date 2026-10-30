@@ -11,7 +11,7 @@ from typing import get_args
 import pytest
 
 import simsteer
-from simsteer.app.main import _pick_game, main
+from simsteer.app.main import _apply_settings, _pick_game, _remember_game, main
 from simsteer.app.settings import Settings
 from simsteer.core.calibration import Calibration
 from simsteer.core.control import ControllerConfig
@@ -254,9 +254,9 @@ def games(tmp_path):
 
 def test_pick_saved_unknown_game_falls_back_to_auto(games, monkeypatch, capsys):
     monkeypatch.setattr("simsteer.games.processes.running_process_names", lambda: set())
-    assert _pick_game(games, None, "ac", None).id == "ets2"
+    assert _pick_game(games, None, "removed", None).id == "ets2"
     out = capsys.readouterr().out
-    assert "saved game 'ac' has no profile, using auto" in out
+    assert "saved game 'removed' has no profile, using auto" in out
     assert "no known game running" in out
 
 
@@ -286,10 +286,10 @@ def test_replay_with_saved_unknown_game_runs(tmp_path, monkeypatch, capsys):
     import simsteer.runtime.loop as loop
     monkeypatch.setattr(loop, "DrivingModel", FakeModel)
     clip = _make_clip(tmp_path / "clip")
-    _write(clip / "state", "settings.json", json.dumps({"game": "ac"}))
+    _write(clip / "state", "settings.json", json.dumps({"game": "removed"}))
     log = tmp_path / "log.jsonl"
     assert main(["--source", str(clip), "--headless", "--log-jsonl", str(log)]) == 0
-    assert "saved game 'ac' has no profile, using auto" in capsys.readouterr().out
+    assert "saved game 'removed' has no profile, using auto" in capsys.readouterr().out
     assert log.read_text().count("\n") > 0
 
 
@@ -327,3 +327,77 @@ def test_running_process_names_sees_this_process():
     assert Path(sys.executable).name.lower() in names
     if Path("/proc/self/comm").exists():
         assert Path("/proc/self/comm").read_text().strip().lower() in names
+
+
+def test_ac_and_forza_profiles_keep_the_pilot_learner_values(games):
+    for game_id in ("ac", "acc", "fh4", "fh5"):
+        p = games.get(game_id)
+        assert p is not None
+        assert p.telemetry.kind == ("ac_shm" if game_id in ("ac", "acc") else "forza_udp")
+        assert p.liveparams.gates == "loose"
+        assert dict(p.liveparams.seeds) == {
+            "gamepad": (3.0, 0.0010, 0.0), "wheel": (3.0, 0.0010, 0.0)}
+        assert p.capabilities.passive_fit_safe and p.capabilities.synth_wheel_angle
+    assert not games.get("acc").tested
+    assert not games.get("fh4").tested
+
+
+def test_auto_remembers_last_game_then_falls_back_to_ets2(games, monkeypatch):
+    monkeypatch.setattr("simsteer.games.processes.running_process_names", lambda: set())
+    assert _pick_game(games, None, "auto", None, "fh5").id == "fh5"
+    assert _pick_game(games, None, "auto", None, "removed").id == "ets2"
+    assert _pick_game(games, None, "auto", None).id == "ets2"
+    monkeypatch.setattr("simsteer.games.processes.running_process_names", lambda: {"acs.exe"})
+    assert _pick_game(games, None, "auto", None, "fh5").id == "ac"
+
+
+def test_remembered_game_does_not_persist_cli_overrides(data_dir):
+    Settings(game="auto", device="gamepad", forza_port=9000).save()
+    _remember_game("fh5")
+    saved = Settings.load()
+    assert saved.last_game == "fh5"
+    assert (saved.game, saved.device, saved.forza_port) == ("auto", "gamepad", 9000)
+
+
+def test_forza_port_override_leaves_the_profile_unchanged(games):
+    fh5 = games.get("fh5")
+    assert _apply_settings(fh5, Settings()).telemetry.params["port"] == 7777
+    assert _apply_settings(fh5, Settings(forza_port=9000)).telemetry.params["port"] == 9000
+    assert fh5.telemetry.params["port"] == 7777
+    ets2 = games.get("ets2")
+    assert _apply_settings(ets2, Settings(forza_port=9000)) is ets2
+
+
+@pytest.mark.parametrize("port", [0, -1, 65536, True, "bad", []])
+def test_bad_forza_port_override_uses_profile(games, port, capsys):
+    p = games.get("fh5")
+    assert _apply_settings(p, Settings(forza_port=port)) is p
+    assert "not a UDP port" in capsys.readouterr().out
+
+
+def test_live_telemetry_replay_uses_user_port_and_leaves_user_state_alone(
+        tmp_path, monkeypatch, data_dir):
+    from test_replay import FakeModel, _make_clip
+
+    import simsteer.runtime.loop as loop
+    monkeypatch.setattr(loop, "DrivingModel", FakeModel)
+    opened = []
+
+    def open_reader(**params):
+        opened.append(params)
+        return telemetry.NoTelemetry()
+
+    monkeypatch.setitem(telemetry.KINDS, "forza_udp",
+                        telemetry.Kind({"port": int, "host": str}, open_reader))
+    clip = _make_clip(tmp_path / "clip")
+    Settings(last_game="ac", forza_port=9000).save()
+    before = (data_dir / "settings.json").read_bytes()
+    assert main(["--source", str(clip), "--game", "fh5", "--live-telemetry",
+                 "--headless"]) == 0
+    assert opened == [{"port": 9000}]
+    assert (data_dir / "settings.json").read_bytes() == before
+
+
+def test_live_telemetry_requires_a_clip(capsys):
+    assert main(["--live-telemetry"]) == 2
+    assert "needs --source" in capsys.readouterr().out

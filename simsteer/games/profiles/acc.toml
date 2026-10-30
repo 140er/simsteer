@@ -1,0 +1,35 @@
+# Assetto Corsa Competizione. Reads the same physics page as AC, untested.
+# docs/PROFILES.md describes every key.
+id = "acc"
+display_name = "Assetto Corsa Competizione"
+process_names = ["AC2-Win64-Shipping.exe"]
+steam_app_id = 805550
+tested = false
+
+[telemetry]
+kind = "ac_shm"
+
+[controller]
+# ACC has no wheel angle, so the adapter derives one from yaw rate with
+# this wheelbase and the controller inverts it with the same value. It
+# scales the fit, not the steering; 4.0 keeps the seeds below valid.
+wheelbase_m = 4.0
+lookahead_s = 0.3
+
+[camera]
+hint = "Cockpit view"
+
+[capabilities]
+longitudinal = true
+speed_source = "telemetry"
+synth_wheel_angle = true
+passive_fit_safe = true
+
+[liveparams.gates]
+profile = "loose"
+
+[liveparams.gamepad]
+seed = [3.0, 0.0010, 0.0]
+
+[liveparams.wheel]
+seed = [3.0, 0.0010, 0.0]

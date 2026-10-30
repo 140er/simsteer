@@ -17,9 +17,11 @@ References:
 from __future__ import annotations
 
 import math
-import mmap
 import struct
-import sys
+import time
+from collections.abc import Callable
+
+from simsteer.runtime.telemetry._shm import Buffer, SharedPage, open_windows_page
 
 
 SHARED_MEM_NAME = "Local\\SCSTelemetry"
@@ -51,40 +53,25 @@ OFF_CABIN_AV_Y = 1920             # float rad/s, yaw rate of the cabin (z-axis)
 
 
 class ScsTelemetry:
-    """Optional live source of v_ego (and later: current steering, heading)."""
+    def __init__(self, *, opener: Callable[[str, int], Buffer | None] = open_windows_page,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._page = SharedPage(SHARED_MEM_NAME, SHARED_MEM_SIZE, _is_active,
+                                opener=opener, clock=clock)
 
-    def __init__(self) -> None:
-        self._mm: mmap.mmap | None = None
-        if sys.platform != "win32":  # named mappings are a Windows API
-            return
-        try:
-            self._mm = mmap.mmap(-1, SHARED_MEM_SIZE, SHARED_MEM_NAME,
-                                 access=mmap.ACCESS_READ)
-        except OSError:
-            self._mm = None
-            return
-        # Sanity check: the mapping might exist with stale zeros if the
-        # plugin was unloaded. Treat that as "not available" too.
-        if not self._is_active():
-            self._mm.close()
-            self._mm = None
+    @property
+    def _mm(self) -> Buffer | None:
+        return self._page.get()
 
     @property
     def available(self) -> bool:
         return self._mm is not None
 
-    def _is_active(self) -> bool:
-        if self._mm is None:
-            return False
-        sdk_active = self._mm[OFF_SDK_ACTIVE] != 0
-        time_val = struct.unpack_from("<Q", self._mm, OFF_TIME)[0]
-        return sdk_active and time_val > 0
-
     def _read_float(self, offset: int) -> float | None:
-        if self._mm is None:
+        mm = self._mm
+        if mm is None:
             return None
         try:
-            return float(struct.unpack_from("<f", self._mm, offset)[0])
+            return float(struct.unpack_from("<f", mm, offset)[0])
         except struct.error:
             return None
 
@@ -123,10 +110,11 @@ class ScsTelemetry:
         yaw rate); ETS2 reports the real value so the arg is unused.
         """
         del wheelbase_m
-        if self._mm is None:
+        mm = self._mm
+        if mm is None:
             return None
         try:
-            arr = struct.unpack_from("<4f", self._mm, OFF_TRUCK_WHEEL_STEERING)
+            arr = struct.unpack_from("<4f", mm, OFF_TRUCK_WHEEL_STEERING)
             nz = [a for a in arr if abs(a) > 1e-6]
             mean_rot = float(sum(nz) / len(nz)) if nz else 0.0
             return mean_rot * 2.0 * math.pi
@@ -138,7 +126,13 @@ class ScsTelemetry:
         return self._read_float(OFF_CABIN_AV_Y)
 
     def close(self) -> None:
-        if self._mm is not None:
-            self._mm.close()
-            self._mm = None
+        self._page.close()
+
+
+def _is_active(mm: Buffer) -> bool:
+    # The page can outlive the plugin with stale data; the plugin clears
+    # sdkActive on shutdown.
+    sdk_active = mm[OFF_SDK_ACTIVE] != 0
+    time_val = struct.unpack_from("<Q", mm, OFF_TIME)[0]
+    return sdk_active and time_val > 0
 

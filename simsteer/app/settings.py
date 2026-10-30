@@ -25,6 +25,9 @@ class Settings:
     # A game profile id, or "auto" for the first profile whose process
     # is running. An id with no profile falls back to "auto".
     game: str = "auto"
+    # The game SimSteer last drove live. "auto" picks it when no known
+    # game is running.
+    last_game: str = "ets2"
     # Output device kind. "gamepad" = ViGEm Xbox 360. "wheel" = vJoy.
     device: str = "gamepad"
     # Let LiveParams fit while disengaged in games whose profile does
@@ -39,8 +42,9 @@ class Settings:
     # Bypass the engagement gate (camera-calibrated + telemetry + FPS).
     # DEV ONLY — without calibration the truck won't track lanes.
     force_engage: bool = False
-    # Forza Data Out UDP port — must match the in-game setting.
-    forza_port: int = 7777
+    # Forza Data Out UDP port, must match the in-game setting. None uses
+    # the profile's `telemetry.port`.
+    forza_port: int | None = None
     # vJoy device index when device=wheel.
     vjoy_device: int = 1
     # cv2 overlay max width (px). Larger = nicer view, more GPU/CPU.

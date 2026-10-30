@@ -5,8 +5,10 @@ speed, the cabin yaw rate, the front-wheel angle, and the steering
 input the game actually applied. The loop reads these every frame to
 drive longitudinal control, feed LiveCalib, and fit LiveParams.
 
-This is a `Protocol`, not a base class: each adapter (the SCS shared
-memory map, later AC's and Forza's) implements the methods structurally.
+This is a `Protocol`, not a base class: each adapter (the SCS and AC
+shared memory pages, Forza's UDP stream) implements the methods
+structurally. An adapter lives for the whole session and reconnects by
+itself, so the loop only polls `available`.
 A profile's `telemetry.kind` picks the adapter from `KINDS`, and the other
 keys of its `[telemetry]` table become the adapter's keyword arguments.
 Adapters are imported only when opened, so loading profiles stays cheap.
@@ -99,6 +101,16 @@ def _scs_shm() -> Telemetry:
     return ScsTelemetry()
 
 
+def _ac_shm() -> Telemetry:
+    from simsteer.runtime.telemetry.ac_shm import AcTelemetry
+    return AcTelemetry()
+
+
+def _forza_udp(**params) -> Telemetry:
+    from simsteer.runtime.telemetry.forza_udp import ForzaTelemetry
+    return ForzaTelemetry(**params)
+
+
 class Kind(NamedTuple):
     # Keys a profile may set in `[telemetry]` next to `kind`, with types.
     params: Mapping[str, type]
@@ -107,6 +119,8 @@ class Kind(NamedTuple):
 
 KINDS: dict[str, Kind] = {
     "scs_shm": Kind({}, _scs_shm),
+    "ac_shm": Kind({}, _ac_shm),
+    "forza_udp": Kind({"port": int, "host": str}, _forza_udp),
     "none": Kind({}, NoTelemetry),
 }
 

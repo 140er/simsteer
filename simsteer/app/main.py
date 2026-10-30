@@ -5,8 +5,8 @@ then hands off to the driving loop. CLI flags win for this run only —
 anything the user picks in the tuner's Setup tab is what persists.
 
 Games are TOML profiles (`docs/PROFILES.md`). `--game auto` drives the
-first profile whose process is running at launch; switching games needs
-a restart. For now:
+first profile whose process is running at launch, else the game driven
+last; switching games needs a restart. For now:
 
     python -m simsteer --list-games             # the known games
     python -m simsteer                          # drive the running game
@@ -17,11 +17,17 @@ Record a drive, then replay it headless and deterministically:
 
     python -m simsteer --record clips/drive1 --seconds 900
     python -m simsteer --source clips/drive1 --headless --log-jsonl out.jsonl
+
+Replay frames against the running game's telemetry, for example a
+telemetry sender in `tools/fake_telemetry.py`:
+
+    python -m simsteer --game fh5 --source clips/drive1 --live-telemetry --headless
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import shutil
 import sys
@@ -30,7 +36,7 @@ from pathlib import Path
 
 from simsteer.app.settings import Settings
 from simsteer.games.base import Registry, registry
-from simsteer.games.profile import GameProfile
+from simsteer.games.profile import GameProfile, TelemetrySpec
 
 
 def _build_parser(game_ids: list[str]) -> argparse.ArgumentParser:
@@ -62,6 +68,9 @@ def _build_parser(game_ids: list[str]) -> argparse.ArgumentParser:
     ap.add_argument("--source", metavar="CLIP",
                     help="replay a recorded clip (folder or video) instead of "
                          "the screen. No device output.")
+    ap.add_argument("--live-telemetry", action="store_true",
+                    help="with --source, read the game's live telemetry "
+                         "instead of the clip's.")
     ap.add_argument("--headless", action="store_true",
                     help="no window, no tuner, no keys.")
     ap.add_argument("--max-frames", type=int, default=None,
@@ -70,7 +79,8 @@ def _build_parser(game_ids: list[str]) -> argparse.ArgumentParser:
                     help="write one JSON line per frame (time, speed, steer, "
                          "curvature, telemetry state).")
     ap.add_argument("--log-timing", action="store_true",
-                    help="add per-stage times in ms to --log-jsonl lines. "
+                    help="add per-stage times in ms and the Unix time of the "
+                         "telemetry read (tel_wall) to --log-jsonl lines. "
                          "Wall-clock times differ between runs.")
     ap.add_argument("--record", metavar="DIR",
                     help="record screen frames and telemetry to DIR while "
@@ -108,10 +118,10 @@ def _list_games(games: Registry) -> None:
 
 
 def _pick_game(games: Registry, cli: str | None, saved: str,
-               clip: Path | None) -> GameProfile | None:
+               clip: Path | None, last: str | None = None) -> GameProfile | None:
     """CLI, else the clip's game when replaying, else the saved setting.
-    `auto` is the first running game, else `Registry.fallback()`. A replay
-    never looks at running processes, so it stays deterministic."""
+    `auto` is the first running game, else `Registry.fallback(last)`. A
+    replay never looks at running processes, so it stays deterministic."""
     if saved != "auto" and games.get(saved) is None:
         if saved:
             print(f"warning: saved game {saved!r} has no profile, using auto")
@@ -133,10 +143,31 @@ def _pick_game(games: Registry, cli: str | None, saved: str,
         if found is not None:
             print(f"auto: {found.display_name} is running")
             return found
-    found = games.fallback()
+    found = games.fallback(last)
     if found is not None:
         print(f"auto: no known game running, using {found.display_name}")
     return found
+
+
+def _apply_settings(game: GameProfile, settings: Settings) -> GameProfile:
+    """The profile with this machine's overrides: `forza_port` replaces a
+    Forza profile's port."""
+    port = settings.forza_port
+    if game.telemetry.kind != "forza_udp" or port is None:
+        return game
+    if not isinstance(port, int) or isinstance(port, bool) or not 0 < port < 65536:
+        print(f"warning: settings forza_port {port!r} is not a UDP port, using the profile's")
+        return game
+    params = {**game.telemetry.params, "port": port}
+    return dataclasses.replace(game, telemetry=TelemetrySpec(game.telemetry.kind, params))
+
+
+def _remember_game(game_id: str) -> None:
+    """Saved on its own, so this run's CLI overrides are not persisted."""
+    saved = Settings.load()
+    if saved.last_game != game_id:
+        saved.last_game = game_id
+        saved.save()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -151,16 +182,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.source and args.record:
         print("--source and --record are exclusive")
         return 2
+    if args.live_telemetry and not args.source:
+        print("--live-telemetry needs --source")
+        return 2
     if args.source:
         clip = Path(args.source).expanduser()
         if not clip.exists():
             print(f"no clip at {clip}")
             return 2
         replay_dir = _replay_data_dir(clip)
+        telemetry_settings = Settings.load() if args.live_telemetry else None
         user_dir = os.environ.get("SIMSTEER_DATA_DIR")
         os.environ["SIMSTEER_DATA_DIR"] = replay_dir
         try:
-            return _main(args, games, clip)
+            return _main(args, games, clip, telemetry_settings)
         finally:
             if user_dir is None:
                 os.environ.pop("SIMSTEER_DATA_DIR", None)
@@ -170,7 +205,8 @@ def main(argv: list[str] | None = None) -> int:
     return _main(args, games, None)
 
 
-def _main(args: argparse.Namespace, games: Registry, clip: Path | None) -> int:
+def _main(args: argparse.Namespace, games: Registry, clip: Path | None,
+          telemetry_settings: Settings | None = None) -> int:
 
     # Saved settings are the baseline; CLI flags override for this run.
     settings = Settings.load()
@@ -189,10 +225,13 @@ def _main(args: argparse.Namespace, games: Registry, clip: Path | None) -> int:
     if args.max_width is not None:
         settings.max_width = args.max_width
 
-    game = _pick_game(games, args.game, settings.game, clip)
+    game = _pick_game(games, args.game, settings.game, clip, settings.last_game)
     if game is None:
         print("no game profiles found")
         return 2
+    game = _apply_settings(game, telemetry_settings or settings)
+    if clip is None:
+        _remember_game(game.id)
 
     if args.record:
         from simsteer.runtime.replay import record
@@ -209,10 +248,13 @@ def _main(args: argparse.Namespace, games: Registry, clip: Path | None) -> int:
     from simsteer.runtime.replay import ReplayClock, ReplaySource, ReplayTelemetry
     settings.no_gamepad = True
     clock = ReplayClock()
-    tel = ReplayTelemetry(clip if clip.is_dir() else clip.parent, clock)
-    print(f"replay: {clip}")
+    make_telemetry = None
+    if not args.live_telemetry:
+        tel = ReplayTelemetry(clip if clip.is_dir() else clip.parent, clock)
+        make_telemetry = lambda: tel  # noqa: E731
+    print(f"replay: {clip}" + ("  telemetry: live" if args.live_telemetry else ""))
     return run(settings, game, source=ReplaySource(clip, clock),
-               make_telemetry=lambda: tel, clock=clock,
+               make_telemetry=make_telemetry, clock=clock,
                keys=None if args.headless else WindowKeys(), **loop_args)
 
 

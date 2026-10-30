@@ -14,6 +14,45 @@ the file and the key, for example
 `games\mygame.toml: liveparams.gamepad.sed: unknown key`. The other
 profiles still load.
 
+`--game auto` selects a running game's profile. If none is running, it
+uses the last game selected for a live session, then ETS2. Replays use
+the clip's game unless `--game` overrides it, and do not change the
+remembered game.
+
+## AC and Forza setup
+
+| Profile | Telemetry setup | Status |
+|---|---|---|
+| `ac` | Enter a driving session. AC publishes its physics page without a plugin. | Ported from the pilot adapter. |
+| `acc` | Enter a driving session. Uses the same physics page as AC. | Untested. |
+| `fh5` | Settings > HUD and Gameplay: enable Data Out, send to the local loopback address on port `7777`, and choose Dash if a packet format option is present. | Ported from the pilot adapter. |
+| `fh4` | Use the same Data Out settings as FH5. | Untested. |
+
+For Forza, `forza_port` in `settings.json` overrides the profile's
+`telemetry.port`. Without that setting, the profile chooses the port.
+Only one telemetry app can listen on a port at a time. The reader keeps
+one socket through menus and pauses and resumes when packets return.
+
+AC and Forza derive the road-wheel angle from yaw rate and speed. They
+keep the pilot's loose fitting gates and steering seeds for both output
+devices. ACC and FH4 still need a driving check before being marked
+tested.
+
+To exercise an adapter without a game, run a synthetic sender and replay
+a clip using live telemetry:
+
+```sh
+python tools/fake_telemetry.py forza --port 7777
+python -m simsteer --game fh5 --source clips/drive1 --live-telemetry --headless
+```
+
+The `ac` and `ets2` senders require Windows; the `forza` sender also
+works on Linux. `--format alternate` switches between 324-byte Horizon
+and 311-byte Dash packets. `--gap 10:20` pauses transmission for ten
+seconds. Replay keeps device output disabled, including with live
+telemetry. Without `--live-telemetry`, replay reads the clip's recorded
+telemetry and stays deterministic.
+
 ## Add a game
 
 1. Copy a built-in profile whose telemetry your game shares, or start from
@@ -94,14 +133,16 @@ listed here is an error.
 | `id` | string | required | Lowercase letters, digits, `-` and `_`. Names the state files (`calibration_<id>.json`). Not `auto` or `default`. |
 | `display_name` | string | required | Shown in the tuner, the window title and `--list-games`. |
 | `process_names` | list of strings | `[]` | Executable names. `--game auto` drives the first profile with one of them running. Case does not matter. |
-| `tested` | bool | `false` | Someone has driven this game with SimSteer. `auto` falls back to the first tested profile when no known game runs. |
+| `tested` | bool | `false` | Someone has driven this game with SimSteer. Shown by `--list-games`. |
 | `steam_app_id` | integer | none | The Steam app id, for finding the install folder. Not read yet. |
 
 ### `[telemetry]`
 
 | Key | Type | Meaning |
 |---|---|---|
-| `kind` | string | The adapter: `scs_shm` (ETS2 and ATS shared memory through the scs-telemetry plugin) or `none` (no telemetry). |
+| `kind` | string | The adapter: `scs_shm` (ETS2 and ATS), `ac_shm` (AC and ACC), `forza_udp` (Forza Data Out), or `none`. |
+| `port` | integer | `forza_udp` only: UDP listen port, default `7777`. The `forza_port` setting overrides it. |
+| `host` | string | `forza_udp` only: local interface to bind. Omit to listen on all interfaces. |
 
 Other keys in this table go to the adapter, and only the ones it declares
 are allowed.

@@ -402,9 +402,6 @@ def record(out: str | Path, seconds: float, profile: GameProfile) -> int:
                 sample = telemetry_sample(tel, wheelbase)
                 if sample is None:
                     lost += 1
-                    if lost % 40 == 0:
-                        tel.close()
-                        tel = profile.make_telemetry()
                 else:
                     writer.write_telemetry(t, sample)
                 if t >= next_report:

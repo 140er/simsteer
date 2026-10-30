@@ -41,11 +41,12 @@ class Registry:
         return next((p for p in self.profiles
                      if any(n in names for n in p.process_names)), None)
 
-    def fallback(self) -> GameProfile | None:
-        """What `auto` drives when no known game is running: the first
-        tested profile, else the first one."""
-        return next((p for p in self.profiles if p.tested),
-                    self.profiles[0] if self.profiles else None)
+    def fallback(self, last: str | None = None) -> GameProfile | None:
+        """What `auto` drives when no known game is running: the game
+        driven last, else ETS2, else the first tested profile."""
+        return self.get(last) or self.get("ets2") or next(
+            (p for p in self.profiles if p.tested),
+            self.profiles[0] if self.profiles else None)
 
 
 def _scan(folder: Path, builtin: bool) -> tuple[list[GameProfile], list[ProfileError]]:
