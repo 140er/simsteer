@@ -6,6 +6,7 @@ base to feel the same script directly (native), so the two can be compared:
     python tools\\ffb_sender.py --list
     python tools\\ffb_sender.py --device vjoy --log sender.txt
     python tools\\ffb_sender.py --device fanatec --ffb-test-cap 5 --log native.txt
+    python tools\\ffb_sender.py --device fanatec --ffb-test-cap 5 --probe
 
 The script covers every effect type vJoy carries (constant, ramp, square,
 sine, triangle, both sawtooths, spring, damper, inertia, friction), live
@@ -18,6 +19,9 @@ On a physical wheel the device gain is scaled by `--ffb-test-cap`
 (1 to 15 percent, required), and the run asks for Enter at the console,
 so it cannot start from a non-interactive shell. If the device refuses a
 gain write, the script stops there and the sender exits with code 3.
+`--probe` plays one low constant force for 1 s instead of the script, to
+check that the wheel honours the capped device gain before the full
+script runs on it. It goes through the same open, cap and gain path.
 `--list` only enumerates and queries capabilities; it never acquires a
 device or sends an effect.
 """
@@ -44,6 +48,10 @@ ALL = (fm.DIEP_DURATION | fm.DIEP_SAMPLEPERIOD | fm.DIEP_GAIN | fm.DIEP_TRIGGERB
 TS = fm.DIEP_TYPESPECIFICPARAMS
 MS = 1000
 EXIT_GAIN_REFUSED = 3
+PROBE_EBI = 1
+PROBE_SECONDS = 1.0
+PROBE_MAGNITUDE = 2000
+PROBE_MAGNITUDE_MAX = 3000
 
 Step = tuple[float, fm.DiCall]
 
@@ -212,16 +220,77 @@ def play(sink: di.FfbSink, steps: list[Step], seconds: float, cap: float | None,
     return 1 if errors else 0
 
 
+def probe_magnitude(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if not 1 <= value <= PROBE_MAGNITUDE_MAX:
+        raise argparse.ArgumentTypeError(f"must be a whole number from 1 to {PROBE_MAGNITUDE_MAX}, got {text!r}")
+    return value
+
+
+def probe_summary(cap: float | None, magnitude: int) -> str:
+    gain = fm.DI_FFNOMINALMAX if cap is None else capped_gain(fm.DI_FFNOMINALMAX, cap)
+    peak = magnitude * gain / fm.DI_FFNOMINALMAX**2 * 100
+    limit = "no cap" if cap is None else f"cap {cap:g} percent"
+    return (f"probe: one constant force for {PROBE_SECONDS:g} s, magnitude {magnitude} of {fm.DI_FFNOMINALMAX}, "
+            f"{limit}, expected peak {peak:.3g} percent of the wheel's peak torque")
+
+
+def probe(sink: di.FfbSink, magnitude: int) -> int:
+    """One constant force in a fixed direction for PROBE_SECONDS, no envelope
+    and no repeat, then stopped and unloaded on every exit path."""
+    results: list[tuple[fm.DiCall, int]] = []
+
+    def run(call: fm.DiCall) -> bool:
+        hr = sink.execute(call)
+        results.append((call, hr))
+        return not di.failed(hr)
+
+    params = _params(round(PROBE_SECONDS * 1e6), fm.DiConstant(magnitude))
+    created = False
+    try:
+        created = run(fm.DiCall("CreateEffect", PROBE_EBI, "ConstantForce"))
+        if (created and run(fm.DiCall("SetParameters", PROBE_EBI, "ConstantForce", ALL, params))
+                and run(fm.DiCall("Start", PROBE_EBI, iterations=1))):
+            time.sleep(PROBE_SECONDS)
+    finally:
+        if created:
+            run(fm.DiCall("Stop", PROBE_EBI))
+            run(fm.DiCall("Release", PROBE_EBI))
+        run(fm.DiCall("Command", flags=fm.DISFFC_STOPALL))
+    bad = [f"{call.op} {di.hresult_name(hr)}" for call, hr in results if di.failed(hr)]
+    if bad:
+        print(f"probe: {len(bad)} of {len(results)} calls failed: {', '.join(bad)}")
+        return 1
+    print(f"probe: all {len(results)} calls returned OK")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="ffb_sender", description="Play a fixed FFB script through DirectInput.")
-    p.add_argument("--list", action="store_true", help="list force feedback devices and their effects (read only)")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--list", action="store_true", help="list force feedback devices and their effects (read only)")
+    mode.add_argument("--probe", action="store_true",
+                      help=f"play one constant force for {PROBE_SECONDS:g} s instead of the script")
+    mode.add_argument("--print-script", action="store_true", help="print the script and exit")
     p.add_argument("--device", choices=("vjoy", "fanatec"), help="where to play the script")
     p.add_argument("--ffb-test-cap", type=float, metavar="PERCENT",
                    help=f"required on a physical wheel: device gain ceiling, {CAP_MIN:g} to {CAP_MAX:g} percent")
     p.add_argument("--seconds", type=float, default=0, help="repeat the script for this long (default: once)")
     p.add_argument("--log", metavar="FILE", help="write every call with its result and duration")
-    p.add_argument("--print-script", action="store_true", help="print the script and exit")
+    p.add_argument("--probe-magnitude", type=probe_magnitude, metavar="N",
+                   help=f"probe magnitude, 1 to {PROBE_MAGNITUDE_MAX} of {fm.DI_FFNOMINALMAX} (default "
+                        f"{PROBE_MAGNITUDE}: at a 5 percent cap, 1 percent of peak torque, enough to see the rim move)")
     args = p.parse_args(argv)
+    if args.probe:
+        if args.seconds or args.log:
+            p.error("--seconds and --log belong to the script, not --probe")
+        if args.probe_magnitude is None:
+            args.probe_magnitude = PROBE_MAGNITUDE
+    elif args.probe_magnitude is not None:
+        p.error("--probe-magnitude needs --probe")
 
     steps = default_script()
     if args.print_script:
@@ -238,9 +307,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         p.error("--device or --list is required")
 
     cap = None
-    if args.device == "vjoy":
-        sink = di.DirectInputSink(match=lambda d: d.is_vjoy, allow_vjoy=True)
-    else:
+    if args.device == "fanatec":
         if args.ffb_test_cap is None:
             print("Refusing: --ffb-test-cap PERCENT is required on a physical wheel.", file=sys.stderr)
             return 2
@@ -248,7 +315,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not sys.stdin.isatty():
             print("Refusing: playing on a physical wheel needs someone at the console.", file=sys.stderr)
             return 2
-        input(f"Script on the Fanatec base at {cap:g} percent. Hands near the rim, Enter to start, Ctrl+C to cancel: ")
+    if args.probe:
+        print(probe_summary(cap, args.probe_magnitude))
+    if cap is None:
+        sink = di.DirectInputSink(match=lambda d: d.is_vjoy, allow_vjoy=True)
+    else:
+        if args.probe:
+            input("Probe on the Fanatec base. Hands off the rim, Enter to start, Ctrl+C to cancel: ")
+        else:
+            input(f"Script on the Fanatec base at {cap:g} percent. Hands near the rim, "
+                  "Enter to start, Ctrl+C to cancel: ")
         sink = di.DirectInputSink()
     gain = fm.DI_FFNOMINALMAX if cap is None else capped_gain(fm.DI_FFNOMINALMAX, cap)
     try:
@@ -260,6 +336,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(f"playing on {sink.device.name} ({sink.device.vid:04X}:{sink.device.pid:04X}), axis 0x{sink.axis_id:08X}")
     try:
+        if args.probe:
+            return probe(sink, args.probe_magnitude)
         return play(sink, steps, args.seconds, cap, args.log)
     finally:
         sink.close()
