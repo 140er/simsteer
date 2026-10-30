@@ -49,6 +49,8 @@ def _build_parser(game_ids: list[str]) -> argparse.ArgumentParser:
                     help="allow LiveParams to fit while disengaged on ETS2.")
     ap.add_argument("--vjoy-device", type=int, default=None,
                     help="vJoy device index when --device wheel.")
+    ap.add_argument("--no-tuner", action="store_true",
+                    help="don't open the tuner window.")
     ap.add_argument("--max-width", type=int, default=None,
                     help="cap the overlay window width in px.")
     ap.add_argument("--source", metavar="CLIP",
@@ -124,6 +126,8 @@ def _main(args: argparse.Namespace, clip: Path | None) -> int:
         settings.passive_fit_ets2 = True
     if args.vjoy_device is not None:
         settings.vjoy_device = args.vjoy_device
+    if args.no_tuner:
+        settings.no_tuner = True
     if args.max_width is not None:
         settings.max_width = args.max_width
 
