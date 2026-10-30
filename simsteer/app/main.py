@@ -19,7 +19,6 @@ import argparse
 
 from simsteer.app.settings import Settings
 from simsteer.games.base import all_profiles
-from simsteer.runtime.loop import run
 
 
 def _build_parser(game_ids: list[str]) -> argparse.ArgumentParser:
@@ -72,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
     if game_id in (None, "", "auto"):
         game_id = "ets2"
 
+    # Deferred so `--help` works without onnxruntime and dxcam.
+    from simsteer.runtime.loop import run
     return run(settings, game_id=game_id)
 
 
