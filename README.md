@@ -11,6 +11,7 @@ wheel (vJoy).
 |---|---|
 | **[docs/SETUP.md](docs/SETUP.md)** | **Start here.** Full from-scratch setup: Python, deps, model fetch, drivers, per-game config, camera FOV, first run. |
 | [docs/TUNING.md](docs/TUNING.md) | Every tuner knob, the calibration workflow, and a symptom→fix cheat sheet. |
+| [docs/PROFILES.md](docs/PROFILES.md) | Adding a game: the TOML profile file and every key in it. |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the capture→model→controller→output pipeline works and what's a comma port vs ours. |
 | [RELEASE.md](RELEASE.md) | Maintainer release / build / zip checklist. |
 
@@ -112,20 +113,24 @@ There are two ways to run SimSteer:
 SimSteer opens a small tuner window alongside the overlay. The first
 tab — **Setup** — has everything a new user needs to pick:
 
-- **Game**: Auto-detect / ETS2 / AC / Forza. *Game change requires
-  restart* (click **Save & Restart**; SimSteer re-launches itself).
+- **Game**: Auto, or one of the game profiles (`--list-games` prints
+  them). Auto drives the game that is running at launch. *Game change
+  requires restart* (click **Save & Restart**; SimSteer re-launches
+  itself). Adding a game is one TOML file, see
+  [docs/PROFILES.md](docs/PROFILES.md).
 - **Output device**: Gamepad (ViGEm) or Wheel (vJoy). Applies on next
   launch; live device-swap is on the Manual tab.
 - **Active steering probing** (default on): the small ±0.03 axis wiggle
   the wizard uses during Phase B.
-- **Passive LiveParams fit on ETS2 while disengaged** (default off):
-  risky — pollutes the gamepad fit if you drive with a wheel.
+- **Passive LiveParams fit while disengaged** (default off): for games
+  whose profile does not allow it, such as ETS2. Risky there — pollutes
+  the gamepad fit if you drive with a wheel.
 - **Force-engage** (dev only): bypass the calibration / FPS /
   telemetry gate.
 
 Settings persist to `%LOCALAPPDATA%\SimSteer\settings.json`. CLI flags
 still override settings for the current run, so a one-off
-`SimSteer.exe --game forza` doesn't overwrite your saved default.
+`SimSteer.exe --game ats` doesn't overwrite your saved default.
 
 To skip the tuner window entirely, pass `--no-tuner` or set
 `no_tuner: true` in `settings.json` (you'll lose the Setup tab too,

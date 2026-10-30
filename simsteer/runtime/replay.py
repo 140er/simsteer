@@ -24,9 +24,13 @@ import shutil
 import threading
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
+
+if TYPE_CHECKING:
+    from simsteer.games.profile import GameProfile
 
 CLIP_FORMAT = 1
 RECORD_WIDTH = 960
@@ -369,19 +373,14 @@ def telemetry_sample(tel, wheelbase_m: float) -> dict | None:
     }
 
 
-def record(out: str | Path, seconds: float, game_id: str) -> int:
+def record(out: str | Path, seconds: float, profile: GameProfile) -> int:
     """Record screen frames and game telemetry while the user drives."""
     from simsteer.core.control import ControllerConfig
-    from simsteer.games.base import get_profile
     from simsteer.paths import bundle_dir, data_dir
     from simsteer.runtime.capture import Capture, CaptureConfig
 
-    profile = get_profile(game_id)
-    if profile is None:
-        print(f"unknown game: {game_id!r}")
-        return 2
-    wheelbase = ControllerConfig.load(game_id).wheelbase_m
-    writer = ClipWriter(out, game_id, threaded=True)
+    wheelbase = ControllerConfig.load(profile.id, seed=profile.controller).wheelbase_m
+    writer = ClipWriter(out, profile.id, threaded=True)
     writer.copy_state(data_dir())
     tel = profile.make_telemetry()
     clock = LiveClock()

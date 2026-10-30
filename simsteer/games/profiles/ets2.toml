@@ -1,0 +1,51 @@
+# Euro Truck Simulator 2. docs/PROFILES.md describes every key.
+id = "ets2"
+display_name = "Euro Truck Simulator 2"
+process_names = ["eurotrucks2.exe"]
+steam_app_id = 227300
+tested = true
+
+[telemetry]
+kind = "scs_shm"
+
+[controller]
+# EU tractors are 3.5 to 4.2 m.
+wheelbase_m = 4.0
+steer_authority = 1.0
+lookahead_s = 0.3
+curvature_anticipation_s = 0.0
+
+[camera]
+fov_h_deg = 90.0
+hint = "Interior cab view"
+
+[capabilities]
+longitudinal = true
+speed_source = "telemetry"
+synth_wheel_angle = false
+# With the gamepad rack assist, disengaged samples steered by a wheel or
+# the keyboard bias the gamepad fit.
+passive_fit_safe = false
+
+[liveparams.gates]
+profile = "strict"
+
+# Seeds are [a, b, c] in axis = a*wheel + b*wheel*v^2 + c, used until the
+# first fit is saved.
+[liveparams.gamepad]
+# ETS2's gamepad rack assist is variable-ratio, about 4.2 axis/rad at 22 m/s.
+seed = [3.5, 0.0015, 0.0]
+
+[liveparams.wheel]
+# vJoy bypasses the gamepad rack assist, so the rack is linear in speed.
+seed = [4.0, 0.0, 0.0]
+
+[[setup]]
+check = "scs_plugin"
+
+[[setup]]
+check = "ets2_deadzone"
+
+[[setup]]
+check = "camera_fov"
+where = "Options > Gameplay > Camera"

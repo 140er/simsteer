@@ -26,6 +26,7 @@ import customtkinter as ctk
 from simsteer.core.calibration import Calibration
 from simsteer.app.calibration_routine import CalibrationRoutine
 from simsteer.core.control import ControllerConfig
+from simsteer.games.base import registry
 from simsteer.runtime.output.base import DeviceManager
 from simsteer.app.hotkeys import groups_in_order, hotkeys_in_group
 from simsteer.core.learners.livecalib import LiveCalib
@@ -306,26 +307,21 @@ class Tuner:
                      anchor="w", text_color=COLOR_HEADER_TEXT,
                      font=ctk.CTkFont(size=12, weight="bold")
                      ).pack(anchor="w", pady=(0, 2))
-        self._hint(sec.body,
-                   "Which game's telemetry to read. 'auto' tries ETS2 "
-                   "(shared memory), then AC, then Forza UDP. Game "
-                   "changes require a restart.")
-        self._setup_game_var = ctk.StringVar(value=self.settings.game)
+        games = registry()
+        saved = self.settings.game
+        self._setup_game_var = ctk.StringVar(
+            value=saved if games.get(saved) else "auto")
         row = ctk.CTkFrame(sec.body, fg_color="transparent")
-        row.pack(fill="x", pady=(0, 2))
-        for label, val in [("Auto", "auto"), ("ETS2", "ets2"),
-                           ("AC", "ac"), ("Forza", "forza")]:
+        row.pack(fill="x", pady=(0, 8))
+        choices = [("Auto", "auto")] + [(p.display_name, p.id)
+                                        for p in games.profiles]
+        for i, (label, val) in enumerate(choices):
             ctk.CTkRadioButton(row, text=label, value=val,
                                variable=self._setup_game_var,
                                font=ctk.CTkFont(size=11),
                                text_color=COLOR_VALUE
-                               ).pack(side="left", padx=(0, 12))
-        ctk.CTkLabel(sec.body,
-                     text=(f"Currently running: "
-                           f"{self.game if self.game else 'unknown'}"),
-                     text_color=COLOR_HINT,
-                     font=ctk.CTkFont(size=10), anchor="w"
-                     ).pack(anchor="w", pady=(2, 8))
+                               ).grid(row=i // 2, column=i % 2, sticky="w",
+                                      padx=(0, 12), pady=1)
 
         # Advanced toggles.
         ctk.CTkLabel(sec.body, text="Advanced toggles (apply live)",
@@ -338,9 +334,9 @@ class Tuner:
             get=lambda: not self.settings.no_probe,
             set_=self._on_probe_toggle, sid="probe_enabled")
         self._add_switch(
-            sec.body, "Passive LiveParams fit on ETS2 while disengaged",
-            get=lambda: self.settings.passive_fit_ets2,
-            set_=self._on_passive_toggle, sid="passive_fit_ets2")
+            sec.body, "Passive LiveParams fit while disengaged",
+            get=lambda: self.settings.passive_fit,
+            set_=self._on_passive_toggle, sid="passive_fit")
         self._add_switch(
             sec.body, "Force-engage (DEV — bypass calibration / FPS gate)",
             get=lambda: self.settings.force_engage,
@@ -1098,10 +1094,10 @@ class Tuner:
     def _on_passive_toggle(self, v: bool) -> None:
         if self.settings is None:
             return
-        self.settings.passive_fit_ets2 = bool(v)
+        self.settings.passive_fit = bool(v)
         if self._setup_status_label is not None:
             self._setup_status_label.configure(
-                text=f"passive_fit_ets2 → {bool(v)}")
+                text=f"passive_fit → {bool(v)}")
 
     def _on_force_toggle(self, v: bool) -> None:
         if self.settings is None:

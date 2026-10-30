@@ -1,30 +1,25 @@
-"""Game profiles — one self-contained module per game.
-
-Each module defines a `GameProfile` subclass decorated with `@register`;
-the registry auto-discovers them. Import the registry helpers and base
-types from this package.
-"""
+"""Games are TOML profiles; see `docs/PROFILES.md`."""
 
 from simsteer.games.base import (
-    GameDefaults,
-    GameProfile,
-    SetupStep,
-    StepResult,
-    StepStatus,
+    Registry,
     all_profiles,
-    discover,
     get_profile,
-    register,
+    load_registry,
+    registry,
+    reload,
+    user_dir,
 )
+from simsteer.games.profile import GameProfile, ProfileError, parse_profile
 
 __all__ = [
-    "GameDefaults",
     "GameProfile",
-    "SetupStep",
-    "StepResult",
-    "StepStatus",
+    "ProfileError",
+    "Registry",
     "all_profiles",
-    "discover",
     "get_profile",
-    "register",
+    "load_registry",
+    "parse_profile",
+    "registry",
+    "reload",
+    "user_dir",
 ]

@@ -52,6 +52,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -256,10 +257,13 @@ class ControllerConfig:
 
     @classmethod
     def load(cls, game: str | None = None,
-             path: Path | None = None) -> "ControllerConfig":
+             path: Path | None = None,
+             seed: Mapping[str, float] | None = None) -> "ControllerConfig":
         """Load this game's controller config. Falls back to the legacy
         single-file `controller.json` if a per-game file doesn't exist
-        yet (smooth migration). Pass `path` to override entirely."""
+        yet (smooth migration), then to `seed` (the game profile's
+        `[controller]` table) over the defaults. Pass `path` to override
+        entirely."""
         if path is None:
             path = load_with_fallback("controller", game)
         if path is not None and path.exists():
@@ -267,7 +271,7 @@ class ControllerConfig:
             cfg = cls(**{k: v for k, v in data.items()
                          if k in cls.__dataclass_fields__})
         else:
-            cfg = cls()
+            cfg = cls(**(seed or {}))
         # No actuator-delay floor for sim use: the game applies steering
         # almost instantly, so lookahead_s can sit near 0 ("snap to now"),
         # which is what the user wants here. Only guard against a negative

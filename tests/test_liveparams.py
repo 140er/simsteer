@@ -18,8 +18,13 @@ STEER = 0.5 * np.sin(2 * np.pi * 0.05 * _t) + 0.3 * np.sin(2 * np.pi * 0.13 * _t
 SPEED = 18.0 + 8.0 * np.sin(2 * np.pi * 0.011 * _t)
 
 
-def _fresh(game: str | None = None) -> LiveParams:
-    lp = LiveParams(game=game)
+# The Forza and AC seed and gates from before game profiles.
+SYNTH_WHEEL = dict(device_kind="gamepad", seeds={"gamepad": (3.0, 0.0010, 0.0)},
+                   gates="loose")
+
+
+def _fresh(game: str | None = None, **kwargs) -> LiveParams:
+    lp = LiveParams(game=game, **kwargs)
     lp.reset()
     return lp
 
@@ -35,8 +40,9 @@ def _drive(lp: LiveParams, a: float, b: float, frames: range,
 
 
 def test_learns_the_rack_from_its_seed():
-    lp = _fresh("forza")
+    lp = _fresh("forza", **SYNTH_WHEEL)
     assert lp.a_linear == pytest.approx(3.0)
+    assert lp.lag_frames == 1
 
     _drive(lp, a=4.0, b=0.0, frames=range(4000))
 

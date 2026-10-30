@@ -22,15 +22,15 @@ _SETTINGS_FILE = "settings.json"
 
 @dataclass
 class Settings:
-    # Which game's telemetry to read. "auto" means the GameDetector
-    # picks the running game live. Naming a specific game pins it.
+    # A game profile id, or "auto" for the first profile whose process
+    # is running. An id with no profile falls back to "auto".
     game: str = "auto"
     # Output device kind. "gamepad" = ViGEm Xbox 360. "wheel" = vJoy.
     device: str = "gamepad"
-    # Allow LiveParams to fit while disengaged on ETS2 (off by default
-    # — ETS2's gamepad rack assist makes wheel/keyboard-sourced
-    # disengaged samples bias the gamepad fit).
-    passive_fit_ets2: bool = False
+    # Let LiveParams fit while disengaged in games whose profile does
+    # not set `passive_fit_safe` (off by default: in ETS2 the gamepad
+    # rack assist makes wheel/keyboard-sourced samples bias the fit).
+    passive_fit: bool = False
     # Disable active steering probing during onboarding calibration.
     # Default ON because probes dramatically accelerate LP convergence;
     # only turn it OFF if the small steering wobble during setup is
@@ -80,6 +80,8 @@ class Settings:
             return cls()
         if not isinstance(raw, dict):
             return cls()
+        if "passive_fit_ets2" in raw:
+            raw.setdefault("passive_fit", raw.pop("passive_fit_ets2"))
         # Filter to only known fields; coerce types best-effort.
         valid = {f.name: f for f in fields(cls)}
         kwargs: dict = {}

@@ -222,10 +222,12 @@ class Calibration:
 
     @classmethod
     def load(cls, game: str | None = None,
-             path: Path | None = None) -> "Calibration":
+             path: Path | None = None,
+             fov_h_deg: float | None = None) -> "Calibration":
         """Load this game's calibration. Falls back to the legacy
         single-file `calibration.json` if a per-game file doesn't
-        exist yet (smooth migration). Pass `path` to override the
+        exist yet (smooth migration), then to the defaults with the
+        game profile's `fov_h_deg` seed. Pass `path` to override the
         resolution entirely (used in tests)."""
         if path is None:
             path = load_with_fallback("calibration", game)
@@ -233,7 +235,7 @@ class Calibration:
             data = json.loads(path.read_text())
             return cls(**{k: v for k, v in data.items()
                           if k in cls.__dataclass_fields__})
-        return cls()
+        return cls() if fov_h_deg is None else cls(fov_h_deg=fov_h_deg)
 
     def save(self, game: str | None = None,
              path: Path | None = None) -> None:

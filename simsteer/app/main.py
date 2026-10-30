@@ -4,13 +4,14 @@ Resolves settings (saved settings + CLI overrides for the current run),
 then hands off to the driving loop. CLI flags win for this run only —
 anything the user picks in the tuner's Setup tab is what persists.
 
-Phase 1 runs a single pinned game (default ETS2). Live game detection
-and no-restart hot-swap arrive in Phase 2; the guided onboarding UI
-and one-click installer come later. For now:
+Games are TOML profiles (`docs/PROFILES.md`). `--game auto` drives the
+first profile whose process is running at launch; switching games needs
+a restart. For now:
 
-    python -m simsteer.app.main                 # drive ETS2
-    python -m simsteer.app.main --no-gamepad     # overlay-only (parity A/B)
-    python -m simsteer.app.main --device wheel    # vJoy output
+    python -m simsteer --list-games             # the known games
+    python -m simsteer                          # drive the running game
+    python -m simsteer --no-gamepad             # overlay-only (parity A/B)
+    python -m simsteer --device wheel           # vJoy output
 
 Record a drive, then replay it headless and deterministically:
 
@@ -23,20 +24,24 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
 from simsteer.app.settings import Settings
-from simsteer.games.base import all_profiles
+from simsteer.games.base import Registry, registry
+from simsteer.games.profile import GameProfile
 
 
 def _build_parser(game_ids: list[str]) -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="simsteer",
                                  description="Drive sim games with the "
                                              "openpilot model.")
-    ap.add_argument("--game", choices=game_ids, default=None,
-                    help="which game to drive (default: saved setting, "
-                         "else ets2). Live auto-detect lands in Phase 2.")
+    ap.add_argument("--game", choices=["auto", *game_ids], default=None,
+                    help="game profile to drive, or auto for the running "
+                         "game (default: saved setting).")
+    ap.add_argument("--list-games", action="store_true",
+                    help="print the game profiles and exit.")
     ap.add_argument("--device", choices=["gamepad", "wheel"], default=None,
                     help="output device (default: saved setting).")
     ap.add_argument("--no-gamepad", action="store_true",
@@ -45,8 +50,9 @@ def _build_parser(game_ids: list[str]) -> argparse.ArgumentParser:
     ap.add_argument("--force-engage", action="store_true",
                     help="DEV: bypass the engagement gate (won't track "
                          "without calibration).")
-    ap.add_argument("--passive-fit-ets2", action="store_true",
-                    help="allow LiveParams to fit while disengaged on ETS2.")
+    ap.add_argument("--passive-fit", "--passive-fit-ets2", action="store_true",
+                    help="let LiveParams fit while disengaged in games "
+                         "whose profile does not allow it.")
     ap.add_argument("--vjoy-device", type=int, default=None,
                     help="vJoy device index when --device wheel.")
     ap.add_argument("--no-tuner", action="store_true",
@@ -86,10 +92,62 @@ def _replay_data_dir(clip: Path) -> str:
     return d
 
 
+def _list_games(games: Registry) -> None:
+    if not games.profiles:
+        print("no game profiles")
+        return
+    rows = [("id", "game", "process", "telemetry", "")]
+    rows += [(p.id, p.display_name, " ".join(p.process_names) or "-",
+              p.telemetry.kind,
+              " ".join(([] if p.tested else ["untested"])
+                       + ([] if p.builtin else [f"user: {p.path}"])))
+             for p in games.profiles]
+    widths = [max(len(r[i]) for r in rows) for i in range(4)]
+    for r in rows:
+        print("  ".join(c.ljust(w) for c, w in zip(r, widths + [0])).rstrip())
+
+
+def _pick_game(games: Registry, cli: str | None, saved: str,
+               clip: Path | None) -> GameProfile | None:
+    """CLI, else the clip's game when replaying, else the saved setting.
+    `auto` is the first running game, else `Registry.fallback()`. A replay
+    never looks at running processes, so it stays deterministic."""
+    if saved != "auto" and games.get(saved) is None:
+        if saved:
+            print(f"warning: saved game {saved!r} has no profile, using auto")
+        saved = "auto"
+    wanted = cli or saved
+    if clip is not None and not cli:
+        from simsteer.runtime.replay import clip_meta
+        clip_game = clip_meta(clip if clip.is_dir() else clip.parent).get("game")
+        if clip_game and games.get(clip_game) is None:
+            print(f"warning: clip game {clip_game!r} has no profile, using auto")
+            wanted = "auto"
+        elif clip_game:
+            wanted = clip_game
+    if wanted != "auto":
+        return games.get(wanted)
+    if clip is None:
+        from simsteer.games.processes import running_process_names
+        found = games.detect(running_process_names())
+        if found is not None:
+            print(f"auto: {found.display_name} is running")
+            return found
+    found = games.fallback()
+    if found is not None:
+        print(f"auto: no known game running, using {found.display_name}")
+    return found
+
+
 def main(argv: list[str] | None = None) -> int:
-    profiles = all_profiles()
-    game_ids = [p.id for p in profiles]
-    args = _build_parser(game_ids).parse_args(argv)
+    # Loaded before a replay swaps the data dir, so user profiles count.
+    games = registry()
+    for err in games.errors:
+        print(f"game profile skipped: {err}", file=sys.stderr)
+    args = _build_parser(games.ids).parse_args(argv)
+    if args.list_games:
+        _list_games(games)
+        return 0
     if args.source and args.record:
         print("--source and --record are exclusive")
         return 2
@@ -102,17 +160,17 @@ def main(argv: list[str] | None = None) -> int:
         user_dir = os.environ.get("SIMSTEER_DATA_DIR")
         os.environ["SIMSTEER_DATA_DIR"] = replay_dir
         try:
-            return _main(args, clip)
+            return _main(args, games, clip)
         finally:
             if user_dir is None:
                 os.environ.pop("SIMSTEER_DATA_DIR", None)
             else:
                 os.environ["SIMSTEER_DATA_DIR"] = user_dir
             shutil.rmtree(replay_dir, ignore_errors=True)
-    return _main(args, None)
+    return _main(args, games, None)
 
 
-def _main(args: argparse.Namespace, clip: Path | None) -> int:
+def _main(args: argparse.Namespace, games: Registry, clip: Path | None) -> int:
 
     # Saved settings are the baseline; CLI flags override for this run.
     settings = Settings.load()
@@ -122,8 +180,8 @@ def _main(args: argparse.Namespace, clip: Path | None) -> int:
         settings.no_gamepad = True
     if args.force_engage:
         settings.force_engage = True
-    if args.passive_fit_ets2:
-        settings.passive_fit_ets2 = True
+    if args.passive_fit:
+        settings.passive_fit = True
     if args.vjoy_device is not None:
         settings.vjoy_device = args.vjoy_device
     if args.no_tuner:
@@ -131,25 +189,21 @@ def _main(args: argparse.Namespace, clip: Path | None) -> int:
     if args.max_width is not None:
         settings.max_width = args.max_width
 
-    # Game: CLI > saved setting > ets2. "auto" isn't resolvable until the
-    # Phase 2 detector exists, so fall back to ets2 for now.
-    game_id = args.game or settings.game
-    if clip is not None and not args.game:
-        from simsteer.runtime.replay import clip_meta
-        game_id = clip_meta(clip if clip.is_dir() else clip.parent).get("game", game_id)
-    if game_id in (None, "", "auto"):
-        game_id = "ets2"
+    game = _pick_game(games, args.game, settings.game, clip)
+    if game is None:
+        print("no game profiles found")
+        return 2
 
     if args.record:
         from simsteer.runtime.replay import record
-        return record(args.record, args.seconds, game_id)
+        return record(args.record, args.seconds, game)
 
     # Deferred so `--help` works without onnxruntime and dxcam.
     from simsteer.runtime.loop import run
     loop_args = dict(headless=args.headless, max_frames=args.max_frames,
                      log_path=args.log_jsonl, log_timing=args.log_timing)
     if clip is None:
-        return run(settings, game_id=game_id, **loop_args)
+        return run(settings, game, **loop_args)
 
     from simsteer.runtime.loop import WindowKeys
     from simsteer.runtime.replay import ReplayClock, ReplaySource, ReplayTelemetry
@@ -157,7 +211,7 @@ def _main(args: argparse.Namespace, clip: Path | None) -> int:
     clock = ReplayClock()
     tel = ReplayTelemetry(clip if clip.is_dir() else clip.parent, clock)
     print(f"replay: {clip}")
-    return run(settings, game_id=game_id, source=ReplaySource(clip, clock),
+    return run(settings, game, source=ReplaySource(clip, clock),
                make_telemetry=lambda: tel, clock=clock,
                keys=None if args.headless else WindowKeys(), **loop_args)
 

@@ -258,7 +258,8 @@ full release/zip checklist.
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--game {auto,ets2,ac,forza}` | auto | Which game's telemetry to read. `auto` tries ETS2 → AC → Forza. |
+| `--game {auto,<profile id>}` | auto | Which game profile to drive. `auto` picks the first profile whose process is running, else the first tested one. A saved id with no profile falls back to `auto`. |
+| `--list-games` | — | Print every game profile (built-in and yours from `%LOCALAPPDATA%\SimSteer\games\`) and exit. Broken profile files are named on stderr. |
 | `--device {gamepad,wheel}` | gamepad | Output device. gamepad = ViGEm Xbox 360; wheel = vJoy. |
 | `--vjoy-device N` | 1 | vJoy device index when `--device wheel`. |
 | `--forza-port N` | 7777 | UDP port Forza Data Out targets. Must match in-game. |
@@ -266,7 +267,7 @@ full release/zip checklist.
 | `--no-gamepad` | off | Run overlay + model but open no virtual device. Skips ViGEm/vJoy preflight. Dry-run. |
 | `--no-tuner` | off | Don't open the tuner window. (You lose the Setup tab too.) |
 | `--no-probe` | off | Disable the active-steering probe used during the calibration wizard. |
-| `--passive-fit-ets2` | off | Allow LiveParams to learn while disengaged on ETS2 (risky — see TUNING.md). |
+| `--passive-fit` | off | Allow LiveParams to learn while disengaged in games whose profile does not set `passive_fit_safe`, such as ETS2 (risky — see TUNING.md). `--passive-fit-ets2` still works. |
 | `--force-engage` | off | **Dev only.** Bypass the calibration / FPS / telemetry engage gate. |
 | `--reset-calib` | — | Wipe LiveCalib + LiveParams + wizard flag at startup and recalibrate from zero. |
 | `--record DIR` | — | Record 960 px JPEG frames and telemetry to `DIR` while you drive. Stops after `--seconds` (default 900) or Ctrl+C. |

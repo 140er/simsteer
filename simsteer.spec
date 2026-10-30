@@ -58,6 +58,8 @@ datas = [
     ('tools/uninstall_drivers.ps1', '.'),
     ('install-drivers.bat',         '.'),
     ('uninstall-drivers.bat',       '.'),
+    # Built-in game profiles, read next to simsteer/games/profile.py.
+    ('simsteer/games/profiles/*.toml', 'simsteer/games/profiles'),
 ]
 
 # Only ship the SCS plugin DLL if it's been built locally first.
@@ -89,13 +91,6 @@ a = Analysis(
         'winsound',
         # customtkinter — the tuner's slider GUI toolkit.
         'customtkinter',
-        # Game profiles are imported DYNAMICALLY by the registry
-        # (simsteer.games.base.discover -> pkgutil.iter_modules +
-        # importlib). PyInstaller's static scan can't see them, so the
-        # frozen exe would find ZERO games and refuse to launch. List
-        # each game module explicitly so it's bundled; PyInstaller 6's
-        # pkgutil runtime hook then lets iter_modules enumerate it.
-        'simsteer.games.ets2',
     ],
     hookspath=[],
     runtime_hooks=[],
