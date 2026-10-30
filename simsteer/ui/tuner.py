@@ -70,6 +70,7 @@ class _Number:
             self.var.set(
                 self.spec.fmt.format(getattr(self.spec.obj, self.spec.attr) * self.spec.scale)
             )
+            self.entry.configure(text_color=INK)
 
 
 class _Group:
@@ -540,10 +541,7 @@ class Tuner:
         self._numbers.append(field)
         entry.bind("<Return>", lambda _: self._commit_number(field))
         entry.bind("<FocusOut>", lambda _: self._commit_number(field))
-        entry.bind(
-            "<Escape>",
-            lambda _: var.set(spec.fmt.format(getattr(spec.obj, spec.attr) * spec.scale)),
-        )
+        entry.bind("<Escape>", lambda _: field.sync(force=True))
 
     def _commit_number(self, field):
         try:

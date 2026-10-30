@@ -167,3 +167,19 @@ def test_zero_manual_replaces_a_focused_edit(tuner):
     assert not tuner.manual.steer_override
     tuner._commit_number(number)
     assert tuner.manual.steer == 0
+
+
+def test_escape_restores_value_and_clears_invalid_input_color(tuner):
+    from simsteer.ui.tuner import INK, RED
+
+    number = tuner._numbers[0]
+    number.entry._entry.focus_force()
+    tuner._root.update()
+    number.var.set("invalid")
+    assert not tuner._commit_number(number)
+    assert number.entry.cget("text_color") == RED
+    number.entry._entry.event_generate("<Escape>")
+    tuner._root.update()
+    assert number.var.get() == "90"
+    assert number.entry.cget("text_color") == INK
+    assert tuner.ctrl_cfg.max_speed_mps == 25
