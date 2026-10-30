@@ -47,7 +47,13 @@ def data_dir() -> Path:
 
     Frozen: `%LOCALAPPDATA%\\SimSteer\\`.
     Dev:    the repo root (so existing JSONs at the project root still load).
+    `SIMSTEER_DATA_DIR`, when set, overrides both.
     """
+    override = os.environ.get("SIMSTEER_DATA_DIR")
+    if override:
+        d = Path(override)
+        d.mkdir(parents=True, exist_ok=True)
+        return d
     if is_frozen():
         base = os.environ.get("LOCALAPPDATA")
         if not base:
