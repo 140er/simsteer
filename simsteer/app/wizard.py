@@ -26,7 +26,7 @@ import time
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
-from pilot import audio
+from simsteer.app import audio
 from simsteer.core.learners.livecalib import (
     BLOCK_SIZE, CalStatus, INPUTS_NEEDED, MIN_SPEED_FILTER_MPS,
 )
