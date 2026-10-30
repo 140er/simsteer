@@ -234,11 +234,11 @@ def run(settings: Settings, game_id: str = "ets2", *,
 
     show_input = True
     view_mode = "model"   # default to the self-aligning model view
-    last = clock.now()
+    last = t_start = clock.now()
     fps = 0.0
     frame_idx = 0
     n_frames = 0
-    window_ready = headless
+    window_open = False
     log_f = open(log_path, "w", encoding="utf-8") if log_path else None
     blocked_reason = ""
     lane_change_idx: int | None = None
@@ -294,19 +294,20 @@ def run(settings: Settings, game_id: str = "ets2", *,
                         break
                     if ord("q") in keys.poll():
                         break
-                    if headless:
+                    if not window_open:
+                        # waitKey only sleeps once a window exists.
                         time.sleep(0.002)
                     continue
                 n_frames += 1
                 t_warp = time.perf_counter()
-                if not window_ready:
+                if not headless and not window_open:
                     h, w = frame.shape[:2]
                     win_w = min(w, settings.max_width)
                     _setup_window_or_exit(win_w, int(round(h * win_w / w)))
                     cv2.setWindowTitle(
                         WINDOW_NAME,
                         f"SimSteer {__version__} — {profile.display_name}")
-                    window_ready = True
+                    window_open = True
 
                 # Recover telemetry if it wasn't live at launch.
                 if (not tel.available
@@ -434,7 +435,7 @@ def run(settings: Settings, game_id: str = "ets2", *,
                 if log_f is not None:
                     row = {
                         "frame": n_frames,
-                        "t": round(now, 4),
+                        "t": round(now - t_start, 4),
                         "v_ego": round(float(v_ego), 4),
                         "steer_axis": round(float(steer), 6),
                         "curvature": round(float(lat_ctrl.last_curvature), 7),
@@ -625,7 +626,7 @@ def run(settings: Settings, game_id: str = "ets2", *,
             tel.close()
             if log_f is not None:
                 log_f.close()
-            if not headless:
+            if window_open:
                 cv2.destroyAllWindows()
     print(f"frames: {n_frames}")
     return 0

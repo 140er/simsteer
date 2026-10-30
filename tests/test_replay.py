@@ -170,3 +170,79 @@ def test_source_reads_video(tmp_path, clip):
 def test_writer_refuses_to_overwrite_a_clip(clip):
     with pytest.raises(FileExistsError):
         ClipWriter(clip, game="ets2")
+
+
+def test_record_writes_a_replayable_clip(tmp_path, monkeypatch, fake_model, data_dir):
+    import time
+
+    import simsteer.games.base as games_base
+    import simsteer.runtime.capture as capture
+    from simsteer.runtime.replay import clip_meta
+
+    class FakeCapture:
+        def __init__(self, cfg=None):
+            self.i = 0
+            self.done = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            pass
+
+        def grab(self):
+            time.sleep(0.01)
+            self.i += 1
+            img = np.full((1080, 1920, 3), self.i % 256, np.uint8)
+            img[:, : self.i % 1920] = 255
+            return img
+
+    class FakeTelemetry:
+        def __init__(self):
+            self.n = 0
+
+        @property
+        def available(self):
+            self.n += 1
+            return self.n % 10 != 0
+
+        def speed_mps(self):
+            return 15.0
+
+        def yaw_rate_rad_s(self):
+            return 0.02
+
+        def wheel_angle_rad(self, wheelbase_m=1.0):
+            return 0.01
+
+        def game_steer(self):
+            return 0.1
+
+        def user_steer(self):
+            return None
+
+        def close(self):
+            pass
+
+    profile = games_base.get_profile("ets2")
+    monkeypatch.setattr(profile, "make_telemetry", FakeTelemetry)
+    monkeypatch.setattr(games_base, "get_profile", lambda game_id: profile)
+    monkeypatch.setattr(capture, "Capture", FakeCapture)
+    (data_dir / "calibration_ets2.json").write_text("{}")
+
+    from simsteer.app.main import main
+    out = tmp_path / "rec"
+    assert main(["--record", str(out), "--seconds", "0.5"]) == 0
+
+    meta = clip_meta(out)
+    frames = sorted((out / "frames").glob("*.jpg"))
+    assert meta["frames"] == len(frames) > 10
+    assert (meta["width"], meta["height"]) == (960, 540)
+    assert (out / "state" / "calibration_ets2.json").exists()
+    tel_rows = (out / "telemetry.jsonl").read_text().splitlines()
+    assert 0 < len(tel_rows) < len(frames)
+    assert json.loads(tel_rows[0])["user_steer"] is None
+
+    log = tmp_path / "rec.jsonl"
+    assert _replay(out, log) == 0
+    assert len(log.read_text().splitlines()) == len(frames)
