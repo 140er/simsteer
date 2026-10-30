@@ -276,7 +276,7 @@ class CalibFlow:
 
     @property
     def probe_wanted(self) -> bool:
-        return self.step is Step.STEERING and self.direction.ready
+        return self.step is Step.STEERING and self.ai_steering_ready
 
     @property
     def ai_steering_ready(self) -> bool:
@@ -291,21 +291,29 @@ class CalibFlow:
     def observe_output(self, **observation) -> bool:
         if not self.steering_fit or not self.direction.ready:
             return False
-        was_ready = self.output_direction.ready
         if self.output_direction.update(**observation):
             print("calib: output direction contradicted; disengaging")
-            self._reset_steering()
+            self.output_direction = OutputDirection(self.lp.lag_frames,
+                                                    int(self.calib.lateral_sign))
             self.result = None
-            self.redo_note = "Output direction changed; verify steering again"
+            self.redo_note = "Output direction changed; stop to check again"
             self._enter(Step.STEERING)
             return True
+        return False
+
+    def measure_output(self, **observation) -> float:
+        was_ready = self.output_direction.ready
+        command = self.output_direction.tick_stopped(**observation)
         if self.output_direction.ready and not was_ready:
+            if self.redo_note.startswith("Output direction changed"):
+                self.redo_note = ""
             print(f"calib: output direction verified "
                   f"(output={self.output_direction.sign:+d}, "
                   f"prior={self.output_direction.prior:+d}, "
-                  f"r={self.output_direction.evidence.correlation:+.3f})")
+                  f"r={self.output_direction.evidence.correlation:+.3f}, "
+                  f"seconds={self.output_direction.elapsed:.2f})")
             self.save()
-        return False
+        return command
 
     @property
     def steering_sign(self) -> float:
@@ -360,8 +368,8 @@ class CalibFlow:
             return "calibrating camera: drive manually"
         if self.steering_fit and not self.direction.ready:
             return "checking steering direction: drive both left and right bends manually"
-        if self.steering_fit and not self.output_direction.ready and self.step is not Step.STEERING:
-            return "output direction unverified: recalibrate steering"
+        if self.steering_fit and not self.output_direction.ready:
+            return "stop to check steering direction"
         return ""
 
     # ----- per frame -----
@@ -645,8 +653,14 @@ class CalibFlow:
             if not self.direction.ready:
                 return "Drive gentle left and right bends manually"
             if not self.output_direction.ready:
-                return ("Checking output direction" if engaged else
-                        "Press INSERT to check output direction")
+                output = self.output_direction
+                if v_ego is None:
+                    return output.reason or "Steering check needs speed telemetry"
+                if abs(v_ego) >= output.STOP_SPEED_MPS:
+                    return "Stop to check steering direction"
+                if output.active:
+                    return "Checking steering direction: stay stopped"
+                return output.reason or "Press INSERT to check steering direction"
             if self.redo_note and self.prompt_idx == 0 and self.prompt_s < 10.0:
                 return f"Redo: {self.redo_note}"
             if not self.passive_fit and not engaged:

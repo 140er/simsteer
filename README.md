@@ -100,10 +100,11 @@ If Smart App Control blocks `SimSteer.exe`, [run from source](#run-from-source).
       inputs; big inputs pause it.
    3. **Steering.** First drive gentle left and right bends manually.
       SimSteer compares the model, input axis and measured wheel angle
-      to detect inverted input. Then press **INSERT** on a straight road:
-      a small symmetric probe measures the device-to-game direction,
-      while AI steering stays at zero. Only after that measurement does
-      SimSteer drive. Both mappings save for this game and device. It asks for
+      to detect inverted input. Then stop, release steering and press
+      **INSERT**: four small symmetric steering pulses check device-to-game
+      direction while SimSteer stays disengaged. Movement or player steering
+      aborts the check. After verification, press **INSERT** again to drive.
+      Both mappings save for this game and device. It asks for
       a straight stretch, gentle curves, two lane changes and a slow
       turn while it fits the steering.
    4. **Check.** Two minutes of engaged highway driving. It ends with
@@ -161,10 +162,15 @@ so leave this off unless you're scripting).
 
 ### Active steering probing
 
-During the calibration's Steering step, SimSteer applies a small sinusoidal
-perturbation (±0.03 axis at ≤12 m/s, scaled down at higher speeds). First it
-measures output direction with AI steering at zero. After verification it
-adds the probe to AI steering until the rack fit is trusted. This excites the
+Output direction is checked below 0.5 m/s with four alternating ±0.10
+steering holds of three seconds each. Only the final second of each hold
+counts, allowing game input lag and smoothing. The check ends within 14
+seconds or shows a one-line reason. It sends steering only, with AI
+disengaged, and remains available with `--no-probe`.
+
+After verification, during the calibration's Steering step SimSteer adds
+a small sinusoidal perturbation (±0.03 axis at ≤12 m/s, scaled down at higher
+speeds) to AI steering until the rack fit is trusted. This excites the
 rack across its operating range so `LiveParams` gets useful `(axis, wheel)`
 pairs every frame even on a perfectly straight highway — where natural
 driving would produce no signal at all (`rej_small_axis` rejecting every
@@ -174,12 +180,10 @@ of cornering" to "~15 seconds on a freeway."
 
 Safety: the probe is gated on engaged + the Steering step + speed in
 `[6, 30] m/s` + no lane change + the AI not already commanding a large
-steer. Once output direction is measured and `LiveParams.trusted()` flips
-True, the probe stops on its own. Disabling the probe before measurement
-leaves AI steering at zero.
+steer. Once `LiveParams.trusted()` flips True, the probe stops on its own.
 
 The HUD's `PROBE` line shows the current probe offset, the gate reason
-when inactive, and total active frames. Disable entirely with `--no-probe`.
+when inactive, and total active frames. Disable this rack probe with `--no-probe`.
 
 ### Calibration recovery
 

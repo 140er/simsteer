@@ -9,7 +9,7 @@ Fix: during the calibration flow's Steering step, superimpose a
 small sinusoidal perturbation on top of the AI's command. This excites
 the rack across its operating range so every frame contributes a useful
 (axis, wheel_angle) pair. Once `LiveParams.trusted()` flips True, the
-probe stops automatically, once output direction is also verified.
+probe stops automatically. Output direction must already be verified.
 
 Trade-off: while probing, the truck weaves by a small (~1 cm at 20 m/s
 peak) lateral amount. The perturbation is symmetric (sine) so the net
@@ -65,9 +65,8 @@ class SteeringProbe:
         """Compute this frame's probe offset (axis units). Returns 0
         when any safety gate or relevance gate is active.
 
-        Caller adds the offset in device units. Before output direction
-        is measured, AI steering stays zero and LiveParams is held. After
-        measurement, the caller converts the summed command back to game
+        Caller adds the offset in device units only after output direction
+        is measured, then converts the summed command back to game
         input units for LiveParams' intervention detector.
         """
         if not self.enabled:

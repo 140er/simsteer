@@ -108,7 +108,7 @@ are stored separately.
 |---|---|
 | **a / b / c sliders** | Manually seed the fit. RLS keeps refining unless locked. |
 | **Lock fit** | Freeze a/b/c — both RLS and intervention learning stop. |
-| **Flip sign** | Negate a and b for rack diagnostics. Recalibrate to measure steering direction; verification replaces an inconsistent fit sign. |
+| **Flip sign** | Negate a and b. In telemetry games this mirrors AI steering immediately; Recalibrate to undo. |
 | **Reset RLS** | Back to the per-(game, device) **seed** (e.g. ETS2 gamepad a=3.5). |
 | **Save liveparams** | Persist current a/b/c. |
 
@@ -132,15 +132,18 @@ strong correlation are required before engagement. Inverted input
 reseeds the rack fit with the measured sign. The correction saves per
 game and device; restarting calibration verifies it again.
 
-After those manual measurements, press **INSERT** on a straight road.
-AI steering stays at zero while the small symmetric probe measures the
-device-to-game input polarity. The profile convention (−1 for SCS) is
-only a prior: both probe directions, enough samples and strong correlation
-are required before AI steering is enabled. No response or ambiguous
-evidence leaves AI steering at zero. The measured output polarity saves
+After those manual measurements, stop below 0.5 m/s, release steering and
+press **INSERT**. While disengaged, four alternating ±0.10 steering pulses
+measure device-to-game polarity; no throttle is sent. Each holds for three
+seconds, averaging the final second to allow input lag and smoothing.
+Movement or player steering aborts the check. No response, unclear evidence
+or a timeout produces a one-line reason; AI remains disengaged. This check
+also works with `--no-probe`. The profile convention (−1 for SCS) is only a
+prior. Press **INSERT** again after verification to drive. Output polarity saves
 per game and device; recalibration and device swaps clear it. A sustained
-contradiction while driving disengages and requires fresh verification,
-without changing the output sign mid-drive. A replay has no device response
+contradiction while driving disengages and clears only output verification;
+the rack fit and manual direction remain. Driver corrections are excluded
+from this guard. A replay has no device response
 and therefore stops at this measurement.
 
 After output direction is verified, the step prompts for a straight stretch,

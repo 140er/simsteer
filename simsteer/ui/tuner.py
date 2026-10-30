@@ -462,7 +462,8 @@ class Tuner:
                        expanded=True)
         self._hint(sec.body,
                    "axis = a·wheel + b·wheel·v² + c. Drag a/b/c to seed "
-                   "a starting point; RLS keeps refining unless locked.")
+                   "a starting point; RLS keeps refining unless locked. "
+                   "Flip sign mirrors AI steering immediately; Recalibrate to undo.")
         for spec in [
             _SliderSpec(self.live_params, "a_linear",
                         "a  (axis per rad of wheel @ v=0)",

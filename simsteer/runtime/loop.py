@@ -254,9 +254,11 @@ def run(settings: Settings, game: GameProfile | str, *,
     banner_until = 0.0
     was_engaged_last_frame = False
     last_device_axis: float | None = None
-    last_probe_active = False
+    was_measuring = False
 
     def engage_check() -> tuple[bool, str]:
+        if not flow.ai_steering_ready:
+            return False, flow.engage_block()
         if settings.force_engage:
             return True, ""
         if pad is None or pad.kind is None:
@@ -285,6 +287,8 @@ def run(settings: Settings, game: GameProfile | str, *,
         if pad is not None and pad.engaged:
             pad.disengage()
             audio.play("disengage")
+        elif pad is not None and flow.output_direction.active:
+            pad.center()
         probe.reset()
         lat_ctrl.reset()
         flow.restart(reason)
@@ -299,7 +303,7 @@ def run(settings: Settings, game: GameProfile | str, *,
             keys = WindowKeys(GlobalKeys(watched)
                               if sys.platform == "win32" else None)
 
-        if settings.force_engage and pad is not None:
+        if settings.force_engage and pad is not None and flow.ai_steering_ready:
             pad.engage()
             print("force-engage: pad engaged at startup (DEV — needs "
                   "calibration to actually track)")
@@ -331,7 +335,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                     long_ctrl.reset()
                     probe.reset()
                     last_device_axis = None
-                    last_probe_active = False
+                    was_measuring = False
                 if not headless and not window_open:
                     h, w = frame.shape[:2]
                     win_w = min(w, settings.max_width)
@@ -353,6 +357,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                 actual_yaw = tel.yaw_rate_rad_s()
                 wheel_angle = tel.wheel_angle_rad(ctrl_cfg.wheelbase_m)
                 game_steer = tel.game_steer()
+                user_steer = getattr(tel, "user_steer", lambda: None)()
 
                 # --- Compose desire (nav + manual lane-change), step model ---
                 img_narrow, img_wide = fq.push(frame, calib)
@@ -399,12 +404,12 @@ def run(settings: Settings, game: GameProfile | str, *,
                         game_steer=game_steer)
 
                 # --- Lateral + longitudinal control ---
-                steering_was_ready = flow.ai_steering_ready
                 output_fault = flow.observe_output(
                     command=last_device_axis,
                     observed=game_steer if tel.available else None,
                     speed=v_real, engaged=bool(pad and pad.engaged),
-                    probing=last_probe_active,
+                    manual_override=manual.steer_override,
+                    user_axis=user_steer,
                     lane_change=lane_change_active or lat_ctrl.last_in_lane_change,
                     dt=dt)
                 if output_fault and pad is not None:
@@ -414,23 +419,19 @@ def run(settings: Settings, game: GameProfile | str, *,
                     probe.reset()
                     audio.play("disengage")
                     set_banner("DISENGAGED — output direction changed", COL_ACCENT_BLUE, 4.0)
-                if flow.ai_steering_ready and not steering_was_ready:
-                    lat_ctrl.reset()
                 ai_steer = lat_ctrl.compute(
                     decoded, v_ego, actual_wheel_angle=wheel_angle,
                     lane_change_command_active=lane_change_active, dt=dt,
                     wheel_sign=flow.steering_sign)
                 ai_steer = flow.device_axis(ai_steer)
                 steer = manual.steer if manual.steer_override else ai_steer
-                probe_active = False
-                if pad is not None and not manual.steer_override:
+                if pad is not None and flow.ai_steering_ready and not manual.steer_override:
                     steer += probe.tick(
                         dt=dt, ai_axis=steer, v_ego=v_real,
                         in_lane_change=lane_change_active,
                         engaged=pad.engaged,
-                        lp_trusted=live_params.trusted() and flow.ai_steering_ready,
+                        lp_trusted=live_params.trusted(),
                         calibrating=flow.probe_wanted)
-                    probe_active = probe.last_gate == "active"
                 ai_throttle, ai_brake = long_ctrl.compute(decoded, v_ego)
                 if not flow.ai_steering_ready:
                     ai_throttle = ai_brake = 0.0
@@ -455,12 +456,27 @@ def run(settings: Settings, game: GameProfile | str, *,
 
                 # --- Device output ---
                 last_device_axis = None
-                last_probe_active = False
                 if pad is not None:
-                    if pad.engaged:
+                    measuring = flow.output_direction.active
+                    if measuring:
+                        # Verification is steering only, with AI disengaged.
+                        # INSERT explicitly starts it; --no-probe only disables
+                        # the later rack-fitting perturbation.
+                        steer = flow.measure_output(
+                            speed=v_real if tel.available else None,
+                            observed=game_steer, user_axis=user_steer, dt=dt,
+                            manual_override=manual.steer_override or pad.engaged
+                            or lane_change_active)
+                        pad.set_steering(steer, force=True)
+                        throttle_out = brake_out = 0.0
+                        if not flow.output_direction.active:
+                            pad.center()
+                            lat_ctrl.reset()
+                    elif was_measuring:
+                        pad.center()
+                    elif pad.engaged:
                         pad.set_steering(steer)
                         last_device_axis = steer
-                        last_probe_active = probe_active
                         pad.set_throttle_brake(throttle_out, brake_out)
                     else:
                         if frame_idx % DISENGAGED_RECENTER_EVERY_N == 0:
@@ -470,6 +486,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                         if manual.long_override:
                             pad.set_throttle_brake(manual.throttle,
                                                    manual.brake, force=True)
+                    was_measuring = flow.output_direction.active
 
                 # --- FPS + auto-disengage (with DML-warmup grace) ---
                 now = clock.now()
@@ -502,7 +519,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                     telemetry_ok=tel.available))
                 if flow.direction.ready and not direction_was_ready:
                     lat_ctrl.reset()
-                if (flow.steering_fit and not flow.direction.ready
+                if (not flow.ai_steering_ready
                         and pad is not None and pad.engaged):
                     pad.disengage()
                     lat_ctrl.reset()
@@ -536,7 +553,20 @@ def run(settings: Settings, game: GameProfile | str, *,
                         set_banner(f"FOV {calib.fov_h_deg:.0f} kept",
                                    COL_ACCENT_BLUE, 3.0)
                     elif key == KEY_INSERT and pad is not None and hk("engage"):
-                        if pad.engaged:
+                        if (flow.step is Step.STEERING and flow.direction.ready
+                                and not flow.output_direction.ready and not pad.engaged):
+                            output = flow.output_direction
+                            if output.active:
+                                output.cancel("Press INSERT to check steering direction")
+                                pad.center()
+                            elif pad.kind is not None:
+                                output.start(speed=v_real if tel.available else None,
+                                             observed=game_steer, user_axis=user_steer,
+                                             manual_override=manual.steer_override)
+                                pad.center()
+                            probe.reset()
+                            lat_ctrl.reset()
+                        elif pad.engaged:
                             pad.disengage()
                             lat_ctrl.reset()
                             long_ctrl.reset()

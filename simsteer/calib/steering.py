@@ -13,8 +13,11 @@ WINDOW = 400
 
 
 class _Evidence:
-    def __init__(self, min_std: float) -> None:
+    def __init__(self, min_std: float, min_samples: int = MIN_SAMPLES,
+                 min_each_turn: int = MIN_EACH_TURN) -> None:
         self.min_std = min_std
+        self.min_samples = min_samples
+        self.min_each_turn = min_each_turn
         self.pairs: deque[tuple[float, float]] = deque()
         self.sx = self.sy = self.sxx = self.syy = self.sxy = 0.0
         self.left = self.right = 0
@@ -48,7 +51,7 @@ class _Evidence:
     @property
     def sign(self) -> int | None:
         n = len(self.pairs)
-        if n < MIN_SAMPLES or min(self.left, self.right) < MIN_EACH_TURN:
+        if n < self.min_samples or min(self.left, self.right) < self.min_each_turn:
             return None
         variance = max(0.0, self.sxx / n - (self.sx / n) ** 2)
         if variance < self.min_std ** 2 or abs(self.correlation) < MIN_CORRELATION:
@@ -57,8 +60,8 @@ class _Evidence:
 
     @property
     def progress(self) -> float:
-        return min(1.0, len(self.pairs) / MIN_SAMPLES,
-                   self.left / MIN_EACH_TURN, self.right / MIN_EACH_TURN)
+        return min(1.0, len(self.pairs) / self.min_samples,
+                   self.left / self.min_each_turn, self.right / self.min_each_turn)
 
     def load(self, pairs: list) -> None:
         for x, y in pairs[-WINDOW:]:
@@ -128,35 +131,133 @@ class SteeringDirection:
 class OutputDirection:
     """Device command -> observed game input, independent of wheel telemetry.
 
-    Only the symmetric probe can establish this mapping. The profile sign
-    is a prior, never permission to steer. A short command history admits
-    either immediate or delayed game input without mistaking a zero
-    crossing for inverted output. Once measured, a contradiction revokes
-    authority; it never changes the sign while driving.
+    Four stationary pulses establish the mapping without engaging AI.
+    Average the final second of each three-second hold so input lag and
+    smoothing do not depend on the loop's frame rate. Driving observations
+    can only revoke this authority, never establish or flip it.
     """
 
     MIN_AXIS = 0.004
     CONTRADICTION_S = 0.75
+    STOP_SPEED_MPS = 0.5
+    PLAYER_THRESHOLD = 0.04
+    AMPLITUDE = 0.10
+    PULSE_S = 3.0
+    SETTLE_S = 2.0
+    TIMEOUT_S = 14.0
+    METHOD = "stopped-pulses-v1"
 
     def __init__(self, lag_frames: int, prior: int = -1) -> None:
         self.prior = prior
         self.sign: int | None = None
-        self.evidence = _Evidence(0.003)
+        self.evidence = _Evidence(0.03, min_samples=4, min_each_turn=2)
         self._commands: deque[float] = deque(maxlen=max(1, lag_frames + 1))
         self._bad_s = 0.0
+        self.active = False
+        self.reason = ""
+        self.elapsed = self._pulse_s = 0.0
+        self._pulse = 0
+        self._response = self._sample_s = 0.0
+        self._command = 0.0
 
     @property
     def ready(self) -> bool:
         return self.sign is not None
 
+    def _hold_reason(self, speed, observed, user_axis, manual_override) -> str:
+        if speed is None or not math.isfinite(speed):
+            return "Steering check needs speed telemetry"
+        if abs(speed) >= self.STOP_SPEED_MPS:
+            return "Stop to check steering direction"
+        if observed is None or not math.isfinite(observed):
+            return "Steering check needs steering telemetry"
+        if manual_override:
+            return "Release steering to check direction"
+        # Raw game input includes the virtual device. Either polarity is
+        # still possible here; only a residual beyond both is player input.
+        raw = observed if user_axis is None else user_axis
+        if not math.isfinite(raw):
+            return "Steering check needs steering telemetry"
+        if user_axis is not None or not self.active:
+            residual = min(abs(raw - self._command), abs(raw + self._command))
+        else:
+            # With no raw input signal, allow the filtered pulse to settle.
+            residual = max(0.0, abs(raw) - self.AMPLITUDE)
+        if residual > self.PLAYER_THRESHOLD:
+            return "Release steering to check direction"
+        return ""
+
+    def start(self, *, speed, observed, user_axis=None, manual_override=False) -> bool:
+        self.cancel()
+        self.reason = self._hold_reason(speed, observed, user_axis, manual_override)
+        if self.ready or self.reason:
+            return False
+        self.evidence = _Evidence(0.03, min_samples=4, min_each_turn=2)
+        self.elapsed = self._pulse_s = 0.0
+        self._pulse = 0
+        self._response = self._sample_s = 0.0
+        self.active = True
+        return True
+
+    def cancel(self, reason: str = "") -> None:
+        self.active = False
+        self._command = 0.0
+        self.reason = reason
+        if not self.ready:
+            self.evidence = _Evidence(0.03, min_samples=4, min_each_turn=2)
+
+    def tick_stopped(self, *, speed, observed, dt, user_axis=None,
+                     manual_override=False) -> float:
+        if not self.active:
+            return 0.0
+        reason = self._hold_reason(speed, observed, user_axis, manual_override)
+        if reason:
+            self.cancel(reason)
+            return 0.0
+        if not math.isfinite(dt) or dt <= 0 or dt > 0.5:
+            self.cancel("Steering check stopped: frame rate too low")
+            return 0.0
+        self.elapsed += dt
+        if self.elapsed > self.TIMEOUT_S:
+            self.cancel("Steering check timed out: press INSERT to retry")
+            return 0.0
+        if self._command:
+            end = self._pulse_s + dt
+            sample_s = max(0.0, min(end, self.PULSE_S)
+                           - max(self._pulse_s, self.SETTLE_S))
+            self._response += observed * sample_s
+            self._sample_s += sample_s
+            self._pulse_s = end
+            if end + 1e-9 >= self.PULSE_S:
+                response = self._response / max(self._sample_s, 1e-9)
+                if abs(response) < self.MIN_AXIS:
+                    self.cancel("No steering response: check binding, then INSERT")
+                    return 0.0
+                self.evidence.add(self._command, response)
+                self._pulse += 1
+                self._pulse_s = self._response = self._sample_s = 0.0
+                if self._pulse == 4:
+                    self.sign = self.evidence.sign
+                    if self.ready:
+                        self.active = False
+                        self._command = 0.0
+                        self.reason = ""
+                    else:
+                        self.cancel("Steering response unclear: press INSERT to retry")
+                    return 0.0
+        self._command = self.AMPLITUDE * (1 if self._pulse % 2 == 0 else -1)
+        return self._command
+
     def update(self, *, command: float | None, observed: float | None,
-               speed: float | None, engaged: bool, probing: bool,
-               lane_change: bool, dt: float) -> bool:
-        """Observe a previously emitted command. True requests disengagement."""
-        if (not engaged or lane_change or command is None or observed is None
+               speed: float | None, engaged: bool,
+               lane_change: bool, dt: float, manual_override: bool = False,
+               user_axis: float | None = None) -> bool:
+        """Guard a verified binding. True requests disengagement."""
+        if (not self.ready or not engaged or lane_change or manual_override
+                or command is None or observed is None
                 or speed is None
                 or not all(math.isfinite(x) for x in (command, observed, speed))
-                or speed < 6.0 or (not self.ready and (not probing or speed > 30.0))):
+                or abs(speed) < 6.0):
             self._commands.clear()
             self._bad_s = 0.0
             return False
@@ -170,9 +271,14 @@ class OutputDirection:
             self._bad_s = 0.0
             return False
         expected = sum(self._commands) / len(self._commands)
-        if not self.ready:
-            self.evidence.add(expected, observed)
-            self.sign = self.evidence.sign
+        # A large opposing response is a driver correction, not evidence
+        # of a mirrored binding. Raw input, when available, has no game lag.
+        magnitude = abs(expected)
+        player_opposing = (user_axis is not None and math.isfinite(user_axis)
+                           and user_axis * expected * self.sign < 0
+                           and abs(user_axis) > 2 * magnitude + self.PLAYER_THRESHOLD)
+        if player_opposing or not 0.5 * magnitude <= abs(observed) <= 2 * magnitude:
+            self._bad_s = 0.0
             return False
         if expected * observed * self.sign < 0:
             self._bad_s += min(max(dt, 0.0), 0.25)
@@ -181,9 +287,12 @@ class OutputDirection:
         return self._bad_s >= self.CONTRADICTION_S
 
     def to_dict(self) -> dict:
-        return {"sign": self.sign, "pairs": list(self.evidence.pairs)}
+        return {"method": self.METHOD, "sign": self.sign,
+                "pairs": list(self.evidence.pairs) if self.ready else []}
 
     def load_dict(self, d: dict) -> None:
+        if d.get("method") != self.METHOD:
+            return
         self.evidence.load(d.get("pairs", []))
         sign = d.get("sign")
         if sign in (-1, 1) and self.evidence.sign == sign:

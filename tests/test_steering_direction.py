@@ -12,7 +12,6 @@ import pytest
 
 from simsteer.calib.flow import CalibFlow, Obs, Step, flow_path
 from simsteer.calib.steering import SteeringDirection
-from simsteer.app.probe import SteeringProbe
 from simsteer.core.calibration import Calibration
 from simsteer.core.constants import IDX_N, PLAN_WIDTH, T_IDXS
 from simsteer.core.control import ControllerConfig, LateralController
@@ -57,18 +56,15 @@ def _plan(curvature, speed=22.0):
 
 
 def _probe_output(flow, sign):
-    probe = SteeringProbe()
+    assert flow.output_direction.start(speed=0.0, observed=0.0)
     commands = deque([0.0] * (flow.lp.lag_frames + 1),
                      maxlen=flow.lp.lag_frames + 1)
-    for _ in range(240):
-        command = probe.tick(0.05, 0.0, 22.0, False, True, False, True)
+    for _ in range(300):
+        command = flow.measure_output(speed=0.0, observed=sign * commands[0], dt=0.05)
         commands.append(command)
-        flow.observe_output(command=command, observed=sign * commands[0],
-                            speed=22.0, engaged=True, probing=True,
-                            lane_change=False, dt=0.05)
         if flow.output_direction.ready:
             return
-    raise AssertionError("symmetric output probe did not establish direction")
+    raise AssertionError("stopped output check did not establish direction")
 
 
 @pytest.mark.parametrize("model_sign", [1, -1])
@@ -85,7 +81,7 @@ def test_manual_calibration_corrects_actual_output_and_persists(model_sign, axis
 
     assert flow.direction.model_sign == model_sign
     assert flow.direction.axis_sign == axis_sign
-    assert not flow.engage_block()
+    assert flow.engage_block()
     assert not flow.ai_steering_ready
     _probe_output(flow, -1)
     assert flow.ai_steering_ready
