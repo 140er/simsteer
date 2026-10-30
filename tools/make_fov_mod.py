@@ -203,7 +203,7 @@ def write_manifest(zf: zipfile.ZipFile, fov: float, height_boost_m: float,
     manifest = (
         "SiiNunit\n"
         "{\n"
-        "mod_package : .comma_wide_cam\n"
+        "mod_package : .package_name\n"
         "{\n"
         f"    package_version: \"1.0\"\n"
         f"    display_name: \"Comma Wide Cam ({target_label} {desc_parts})\"\n"
