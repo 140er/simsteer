@@ -60,6 +60,7 @@ import json
 import math
 import time
 from collections import deque
+from collections.abc import Callable
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
@@ -150,7 +151,11 @@ def _wrap_rotation_composition(current_rpy_rad: tuple[float, float, float],
 
 
 class LiveCalib:
-    def __init__(self, game: str | None = None) -> None:
+    def __init__(self, game: str | None = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        # The ETA reads this clock; replay passes its recorded time so the
+        # ETA is the same on every run.
+        self.clock = clock
         # In-flight block accumulator. Sum + count, committed as a mean
         # every BLOCK_SIZE samples. Pre-allocated as ndarrays so the
         # composition math stays in radians.
@@ -211,7 +216,7 @@ class LiveCalib:
         self._blocks_since_save = 0
 
         # Per-game persistence. None = no save/load. Restoring block
-        # history on launch is what lets the first-drive wizard survive
+        # history on launch is what lets the calibration flow survive
         # a quit/relaunch mid-calibration.
         self._game = game
         if game is not None:
@@ -367,7 +372,7 @@ class LiveCalib:
             self._block_height_sum += observed_height
         self._block_n += 1
         self.samples += 1
-        self._accept_timestamps.append(time.monotonic())
+        self._accept_timestamps.append(self.clock())
 
         # Wide-camera mount estimate (slice 99:105) — averaged separately
         # for HUD; openpilot publishes this on liveCalibration but doesn't
@@ -470,7 +475,7 @@ class LiveCalib:
 
         # Persist our own block history every commit (~once per ~12s of
         # accepted highway samples). This is what lets the first-drive
-        # wizard survive a Quit/relaunch — without it, _rpys resets to
+        # calibration flow survive a Quit/relaunch — without it, _rpys resets to
         # empty on every launch and the user has to start over.
         if self._game is not None:
             self.save_state(self._game)
@@ -563,16 +568,44 @@ class LiveCalib:
             except OSError:
                 pass
 
+    def rescale_for_fov(self, calib: "Calibration", old_fov_deg: float,
+                        new_fov_deg: float) -> None:
+        """Carry the pose history over to a new capture FOV instead of
+        discarding it. A FOV set wider than the truth shrinks the view the
+        model sees, so it reads angles larger by tan(set/2)/tan(true/2);
+        scaling each angle's tangent by tan(new/2)/tan(old/2) undoes that.
+        On a synthetic drive, blocks taken at 90 and 60 degrees land within
+        0.1 degree of blocks taken at the new value. Height does not
+        depend on FOV."""
+        k = (math.tan(math.radians(new_fov_deg) / 2.0)
+             / math.tan(math.radians(old_fov_deg) / 2.0))
+
+        def scale(rpy: np.ndarray) -> np.ndarray:
+            out = np.array(rpy, dtype=np.float64)
+            out[1:] = np.arctan(np.tan(out[1:]) * k)
+            return out
+        self._rpys = deque((scale(r) for r in self._rpys), maxlen=INPUTS_WANTED)
+        if self._block_n:
+            self._block_rpy_sum = scale(self._block_rpy_sum / self._block_n) * self._block_n
+        if self._wrote_to_calib:
+            calib.pitch_deg = math.degrees(math.atan(
+                math.tan(math.radians(calib.pitch_deg)) * k))
+            calib.yaw_deg = math.degrees(math.atan(
+                math.tan(math.radians(calib.yaw_deg)) * k))
+        self._refresh_cal_status()
+        if self._game is not None:
+            self.save_state(self._game)
+
     # ----- diagnostics -----
 
     @property
     def acceptance_rate_hz(self) -> float:
         """Recent acceptance rate (samples/sec). 0 if we haven't seen
-        any accepted samples in the last 10s. Used by the wizard to
+        any accepted samples in the last 10s. Used by the calibration flow to
         compute ETA-to-CALIBRATED."""
         if len(self._accept_timestamps) < 2:
             return 0.0
-        now = time.monotonic()
+        now = self.clock()
         window_start = self._accept_timestamps[0]
         # Drop samples older than 10s for ETA freshness.
         if now - window_start > 10.0:

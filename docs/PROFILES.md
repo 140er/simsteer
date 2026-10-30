@@ -126,7 +126,7 @@ built-in default.
 |---|---|---|
 | `fov_h_deg` | number | Horizontal FOV seed, 10 to 170, used until `calibration_<id>.json` exists. |
 | `hint` | string | The camera view to drive in. Not read yet. |
-| `[camera.fov_source]` | table | Where the game saves its FOV: `file`, `key` and `axis` (`horizontal` or `vertical`). Not read yet. |
+| `[camera.fov_source]` | table | Where the game saves its FOV: `file`, `key` and `axis` (`horizontal` or `vertical`). The calibration's FOV step reads it and skips measuring; a missing file or key falls back to measuring. `file` may use `~` and environment variables. Reads SCS `uset key "value"` lines and plain `key = value` lines. |
 
 ### `[capabilities]`
 

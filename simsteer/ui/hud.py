@@ -3,9 +3,9 @@
 Two modes:
 
   USER (default) — clean panels with what the driver actually needs:
-    big engagement chip top-center, warning chips top-left, wizard banner
-    above the chip (when active), speed dial bottom-left, calibration
-    progress dashboard bottom-right, fps/version footer. Nothing else.
+    big engagement chip top-center, warning chips top-left, the
+    calibration panel above the chip (while calibrating), speed dial
+    bottom-left, fps/version footer. Nothing else.
 
   DEV — the old stack-of-text-lines dump for debugging. Toggled with H.
 
@@ -34,7 +34,7 @@ COL_ACCENT_GREEN = (96, 220, 110)     # engaged, ready, healthy
 COL_ACCENT_YELLOW = (95, 220, 240)    # warming, warnings
 COL_ACCENT_RED = (95, 95, 245)        # blocked, fatal, emergency
 COL_ACCENT_BLUE = (245, 195, 95)      # disengaged, info
-COL_ACCENT_VIOLET = (210, 130, 230)   # wizard
+COL_ACCENT_VIOLET = (210, 130, 230)   # calibrating
 
 
 Mode = Literal["user", "dev"]
@@ -55,26 +55,17 @@ class HudState:
     banner_text: str = ""
     banner_color: Color = COL_FG_MUTED
 
-    # ----- wizard -----
-    wizard_active: bool = False
-    wizard_text: str = ""               # main wizard banner
-    wizard_color: Color = COL_ACCENT_VIOLET
-    wizard_progress: float = 0.0        # 0..100
-    wizard_hint: str = ""               # one-line guidance below
+    # ----- calibration panel (hidden when calib_text is empty) -----
+    calib_text: str = ""
+    calib_color: Color = COL_ACCENT_VIOLET
+    calib_progress: float = 0.0         # 0..1
+    calib_hint: str = ""
 
     # ----- warnings -----
     warnings: list[str] = field(default_factory=list)
 
     # ----- speed -----
     v_ego_mps: float | None = None      # for the bottom-left dial
-
-    # ----- calibration progress dashboard -----
-    cal_camera_frac: float | None = None       # 0..1 or None to hide
-    cal_camera_status: str = ""                # "WARMING" / "READY" / "RESET" / ""
-    cal_steering_frac: float | None = None
-    cal_steering_status: str = ""
-    cal_fov_frac: float | None = None
-    cal_fov_status: str = ""
 
     # ----- chips along the top -----
     probe_active: bool = False          # show "PROBE active" chip
@@ -111,12 +102,10 @@ class HudRenderer:
         h, w = img.shape[:2]
         margin = 16
 
-        # Top center: wizard banner (when active) sits above the engage
-        # chip — wizard is the primary attention-getter during first
-        # drive.
+        # Top center: the calibration panel sits above the engage chip.
         cursor_y = margin
-        if s.wizard_active and s.wizard_text:
-            cursor_y = self._wizard_panel(img, w, cursor_y, s)
+        if s.calib_text:
+            cursor_y = self._calib_panel(img, w, cursor_y, s)
             cursor_y += 8
 
         # The engage chip — fixed width, color-coded.
@@ -146,13 +135,6 @@ class HudRenderer:
         # Bottom-left: speed dial.
         if s.v_ego_mps is not None:
             self._speed_panel(img, margin, h - margin, s.v_ego_mps)
-
-        # Bottom-right: calibration progress dashboard. Hidden when
-        # everything is ready / no progress to show.
-        if (s.cal_camera_frac is not None
-                or s.cal_steering_frac is not None
-                or s.cal_fov_frac is not None):
-            self._calibration_panel(img, w - margin, h - margin, s)
 
         # Footer: fps + version + mode hint in muted text. Stick to
         # ASCII separators — cv2's Hershey font has no glyph for U+00B7
@@ -232,15 +214,15 @@ class HudRenderer:
         self._draw_text(img, text, x + pad_x, y + pad_y + th - 2,
                         s.engaged_color, scale=scale, thickness=thickness)
 
-    def _wizard_panel(self, img: np.ndarray, view_w: int, y: int,
-                       s: HudState) -> int:
-        """Wizard banner + progress bar. Returns y of the bottom edge."""
-        title = s.wizard_text
+    def _calib_panel(self, img: np.ndarray, view_w: int, y: int,
+                     s: HudState) -> int:
+        """Calibration title, progress bar and hint. Returns y of the bottom edge."""
+        title = s.calib_text
         title_scale = 0.8
         tw_title, th_title = self._text_size(title, title_scale, 2)
         bar_w = max(360, tw_title + 80)
         bar_h = 12
-        hint = s.wizard_hint or ""
+        hint = s.calib_hint or ""
         hint_h = 22 if hint else 0
         panel_w = bar_w + 32
         panel_h = th_title + bar_h + hint_h + 28
@@ -251,18 +233,18 @@ class HudRenderer:
         # Title text, centered.
         tx = x + (panel_w - tw_title) // 2
         ty = y + 8 + th_title
-        self._draw_text(img, title, tx, ty, s.wizard_color,
+        self._draw_text(img, title, tx, ty, s.calib_color,
                         scale=title_scale, thickness=2)
         # Progress bar.
         bar_x = x + 16
         bar_y = ty + 8
-        frac = max(0.0, min(1.0, s.wizard_progress / 100.0))
+        frac = max(0.0, min(1.0, s.calib_progress))
         cv2.rectangle(img, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h),
                        (60, 60, 70), -1, cv2.LINE_AA)
         if frac > 0:
             cv2.rectangle(img, (bar_x, bar_y),
                            (bar_x + int(bar_w * frac), bar_y + bar_h),
-                           s.wizard_color, -1, cv2.LINE_AA)
+                           s.calib_color, -1, cv2.LINE_AA)
         cv2.rectangle(img, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h),
                        COL_FG_MUTED, 1, cv2.LINE_AA)
         # Hint line.
@@ -371,61 +353,6 @@ class HudRenderer:
         # Unit, dimmer, below.
         self._draw_text(img, unit, x + pad_x, py + pad_y + bh + 6 + uh,
                         COL_FG_MUTED, scale=unit_scale, thickness=unit_thick)
-
-    def _calibration_panel(self, img: np.ndarray, x_right: int,
-                            y_bottom: int, s: HudState) -> None:
-        """Bottom-right dashboard with up to 3 small progress bars."""
-        rows: list[tuple[str, float, str]] = []
-        if s.cal_camera_frac is not None:
-            rows.append(("Camera", s.cal_camera_frac, s.cal_camera_status))
-        if s.cal_steering_frac is not None:
-            rows.append(("Steering", s.cal_steering_frac, s.cal_steering_status))
-        if s.cal_fov_frac is not None:
-            rows.append(("FOV", s.cal_fov_frac, s.cal_fov_status))
-        if not rows:
-            return
-        scale = 0.55
-        thickness = 1
-        label_max = max(self._text_size(name, scale, thickness)[0]
-                        for name, _, _ in rows)
-        bar_w = 160
-        bar_h = 10
-        row_h = 22
-        pad_x, pad_y = 14, 12
-        panel_w = label_max + 12 + bar_w + 12 + 50 + pad_x * 2
-        panel_h = row_h * len(rows) + pad_y * 2 - 4
-        x = x_right - panel_w
-        y = y_bottom - panel_h
-        self._fill_rounded_rect(img, x, y, panel_w, panel_h, COL_BG_DARK,
-                                  alpha=0.82)
-        rx = x + pad_x
-        ry = y + pad_y
-        for name, frac, status in rows:
-            frac_c = max(0.0, min(1.0, frac))
-            # Label.
-            self._draw_text(img, name, rx,
-                              ry + bar_h + 1,
-                              COL_FG_LIGHT, scale=scale, thickness=thickness)
-            # Bar.
-            bx = rx + label_max + 12
-            cv2.rectangle(img, (bx, ry), (bx + bar_w, ry + bar_h),
-                           (60, 60, 70), -1, cv2.LINE_AA)
-            color = (COL_ACCENT_GREEN if frac_c >= 1.0 - 1e-3
-                     else COL_ACCENT_YELLOW)
-            if status == "RESET":
-                color = COL_ACCENT_RED
-            if frac_c > 0:
-                cv2.rectangle(img, (bx, ry),
-                               (bx + int(bar_w * frac_c), ry + bar_h),
-                               color, -1, cv2.LINE_AA)
-            cv2.rectangle(img, (bx, ry), (bx + bar_w, ry + bar_h),
-                           COL_FG_MUTED, 1, cv2.LINE_AA)
-            # Pct value, monospace alignment.
-            pct = f"{frac_c * 100:3.0f}%"
-            self._draw_text(img, pct, bx + bar_w + 10,
-                              ry + bar_h + 1,
-                              COL_FG_LIGHT, scale=scale, thickness=thickness)
-            ry += row_h
 
     def _footer_text(self, img: np.ndarray, x_center: int, y_bottom: int,
                        text: str) -> None:

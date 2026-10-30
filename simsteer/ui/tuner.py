@@ -24,17 +24,16 @@ from typing import Any, Callable
 import customtkinter as ctk
 
 from simsteer.core.calibration import Calibration
-from simsteer.app.calibration_routine import CalibrationRoutine
 from simsteer.core.control import ControllerConfig
 from simsteer.games.base import registry
 from simsteer.runtime.output.base import DeviceManager
 from simsteer.app.hotkeys import groups_in_order, hotkeys_in_group
-from simsteer.core.learners.livecalib import LiveCalib
-from simsteer.core.learners.liveparams import LiveParams
+from simsteer.core.learners.livecalib import BLOCK_SIZE, INPUTS_NEEDED, LiveCalib
+from simsteer.core.learners.liveparams import TRUSTED_MIN_SAMPLES, LiveParams
 from simsteer.app.manual import ManualInputs
 from simsteer.app.probe import SteeringProbe
 from simsteer.app.settings import Settings
-from simsteer.app.wizard import Wizard
+from simsteer.calib.flow import CalibFlow
 
 
 WINDOW_W = 620
@@ -120,8 +119,7 @@ class Tuner:
                  settings: Settings | None = None,
                  probe: SteeringProbe | None = None,
                  live_calib: LiveCalib | None = None,
-                 wizard: Wizard | None = None,
-                 cal_routine: CalibrationRoutine | None = None) -> None:
+                 calib_flow: CalibFlow | None = None) -> None:
         self.calib = calib
         self.ctrl_cfg = ctrl_cfg
         self.manual = manual
@@ -131,8 +129,7 @@ class Tuner:
         self.settings = settings
         self.probe = probe
         self.live_calib = live_calib
-        self.wizard = wizard
-        self.cal_routine = cal_routine
+        self.calib_flow = calib_flow
 
         # Slider widgets keyed by (id(obj), attr).
         self._sliders: dict[tuple[int, str],
@@ -161,7 +158,7 @@ class Tuner:
         self._setup_game_var: "ctk.StringVar | None" = None
         self._setup_status_label: ctk.CTkLabel | None = None
 
-        # Guided-calibration-routine status label.
+        # Calibration flow status, next to Recalibrate.
         self._cal_status_label: ctk.CTkLabel | None = None
 
         self._bind_frame: ctk.CTkFrame | None = None
@@ -330,7 +327,7 @@ class Tuner:
                      ).pack(anchor="w", pady=(0, 4))
 
         self._add_switch(
-            sec.body, "Active steering probing during wizard Phase B",
+            sec.body, "Steering probe during calibration",
             get=lambda: not self.settings.no_probe,
             set_=self._on_probe_toggle, sid="probe_enabled")
         self._add_switch(
@@ -349,12 +346,13 @@ class Tuner:
                      anchor="w", text_color=COLOR_HEADER_TEXT,
                      font=ctk.CTkFont(size=12, weight="bold")
                      ).pack(anchor="w", pady=(0, 2))
-        self._hint(sec.body,
-                   "Recalibrate wipes camera pose + steering fit + "
-                   "first-drive flag so the wizard starts over. Same "
-                   "as the R hotkey.")
+        self._cal_status_label = ctk.CTkLabel(
+            sec.body, text="", text_color=COLOR_HINT, anchor="w",
+            justify="left", wraplength=WINDOW_W - 80,
+            font=ctk.CTkFont(size=11))
+        self._cal_status_label.pack(anchor="w", pady=(0, 4))
         ctk.CTkButton(sec.body,
-                      text="Recalibrate (wipe LiveCalib + LiveParams)",
+                      text="Recalibrate",
                       command=self._on_recalibrate_click,
                       fg_color="#7f3b3b", hover_color="#964545"
                       ).pack(fill="x")
@@ -492,37 +490,6 @@ class Tuner:
                       command=self._reset_liveparams
                       ).pack(side="left", expand=True, fill="x",
                              padx=(4, 0))
-
-        # Guided calibration — sub-block within LiveParams since it
-        # drives the RLS refit with widened gates.
-        if self.cal_routine is not None:
-            self._divider(sec.body)
-            ctk.CTkLabel(sec.body, text="Guided calibration",
-                         anchor="w", text_color=COLOR_HEADER_TEXT,
-                         font=ctk.CTkFont(size=12, weight="bold")
-                         ).pack(anchor="w", pady=(0, 2))
-            self._hint(sec.body,
-                       "4-step routine (straight / slalom / corner / "
-                       "highway). Widens RLS gates and bumps Q so the "
-                       "fit converges in ~60 s of driving. ETS2 strict "
-                       "gates untouched (per-call override). Cancel "
-                       "anytime; 90 s total cap.")
-            row = ctk.CTkFrame(sec.body, fg_color="transparent")
-            row.pack(fill="x", pady=(0, 4))
-            ctk.CTkButton(row, text="Start guided calibration",
-                          command=self._start_calibration
-                          ).pack(side="left", fill="x", expand=True,
-                                 padx=(0, 4))
-            ctk.CTkButton(row, text="Cancel",
-                          command=self._cancel_calibration,
-                          fg_color="#7f3b3b", hover_color="#964545"
-                          ).pack(side="left", fill="x", expand=True)
-            self._cal_status_label = ctk.CTkLabel(
-                sec.body, text="(idle)", text_color=COLOR_HINT,
-                anchor="w", justify="left",
-                wraplength=WINDOW_W - 80,
-                font=ctk.CTkFont(size=11))
-            self._cal_status_label.pack(anchor="w", pady=(2, 0))
 
     def _build_closed_loop_trim_section(self, parent) -> None:
         sec = _Section(parent, "Closed-loop trim (wheel-angle)",
@@ -801,7 +768,7 @@ class Tuner:
         try:
             self._refresh_strip()
             self._refresh_dashboard()
-            self._refresh_cal_routine()
+            self._refresh_calib_flow()
         except Exception:
             pass
         self._root.after(POLL_MS, self._poll_status)
@@ -880,8 +847,9 @@ class Tuner:
                 elif st == CalStatus.INVALID:
                     self._paint_dash("camera", "bad", "INVALID — drift")
                 else:
-                    pct = ((self.live_calib.blocks * 100
-                            + self.live_calib._block_n) / 500.0) * 100
+                    pct = ((self.live_calib.blocks * BLOCK_SIZE
+                            + self.live_calib._block_n)
+                           / float(INPUTS_NEEDED * BLOCK_SIZE)) * 100
                     self._paint_dash("camera", "warn",
                                      f"warming up ({pct:.0f}%)")
             except Exception:
@@ -901,40 +869,40 @@ class Tuner:
                         f"a={self.live_params.a_linear:+.2f} n={n}")
                 else:
                     self._paint_dash("steering", "warn",
-                                     f"warming up ({n}/200 samples)")
+                                     f"warming up ({n}/{TRUSTED_MIN_SAMPLES} samples)")
             except Exception:
                 self._paint_dash("steering", "warn", "—")
 
         # FOV.
+        source = self.calib_flow.fov_source if self.calib_flow else ""
         self._paint_dash("fov", "ok",
-                         f"{self.calib.fov_h_deg:.1f}° (static — match in-game)")
+                         f"{self.calib.fov_h_deg:.1f}° ({source or 'saved'})")
 
-    def _refresh_cal_routine(self) -> None:
-        """Mirror the guided-calibration routine's state into its label.
-        Also pulls fresh a/b/c into the LiveParams sliders on completion
-        so the UI reflects the new fit without the user dragging."""
-        if self.cal_routine is None or self._cal_status_label is None:
+    def _refresh_calib_flow(self) -> None:
+        """Show the flow's state and follow the steering sliders, which a
+        restart or a fresh fit moves from the loop thread."""
+        flow = self.calib_flow
+        if flow is None or self._cal_status_label is None:
             return
         try:
-            if self.cal_routine.active:
-                self._cal_status_label.configure(
-                    text=self.cal_routine.prompt)
-            elif self.cal_routine.summary_text:
-                self._cal_status_label.configure(
-                    text=self.cal_routine.summary_text)
-                # The routine moved a/b/c — refresh sliders cheaply.
-                if self.live_params is not None:
-                    for attr in ("a_linear", "b_quad", "c_bias"):
-                        key = (id(self.live_params), attr)
-                        if key in self._sliders:
-                            slider, value_label, spec = self._sliders[key]
-                            current = getattr(self.live_params, attr)
-                            if abs(slider.get() - current) > 1e-5:
-                                slider.set(float(current))
-                                value_label.configure(
-                                    text=spec.fmt.format(current))
+            panel = flow.panel(None)
+            if panel is not None:
+                text = panel.title + (f"\n{panel.hint}" if panel.hint else "")
+            elif flow.calibrated:
+                text = (f"Calibrated, score {flow.result['score']:.2f}, "
+                        f"{flow.result.get('date', '')}")
             else:
-                self._cal_status_label.configure(text="(idle)")
+                text = flow.step.value
+            self._cal_status_label.configure(text=text)
+            if self.live_params is not None:
+                for attr in ("a_linear", "b_quad", "c_bias"):
+                    key = (id(self.live_params), attr)
+                    if key in self._sliders:
+                        slider, value_label, spec = self._sliders[key]
+                        current = getattr(self.live_params, attr)
+                        if abs(slider.get() - current) > 1e-5:
+                            slider.set(float(current))
+                            value_label.configure(text=spec.fmt.format(current))
         except Exception:
             pass
 
@@ -1048,27 +1016,6 @@ class Tuner:
               f"a={self.live_params.a_linear:+.2f} "
               f"b={self.live_params.b_quad:+.4f}")
 
-    def _start_calibration(self) -> None:
-        if self.cal_routine is None:
-            return
-        self.cal_routine.start()
-
-    def _cancel_calibration(self) -> None:
-        if self.cal_routine is None:
-            return
-        self.cal_routine.cancel()
-        # If the routine moved a/b/c before cancel, the strip will pick
-        # that up on the next poll — but refresh the sliders here too
-        # so they don't sit at pre-routine values.
-        if self.live_params is not None:
-            for attr in ("a_linear", "b_quad", "c_bias"):
-                key = (id(self.live_params), attr)
-                if key in self._sliders:
-                    slider, value_label, spec = self._sliders[key]
-                    current = getattr(self.live_params, attr)
-                    slider.set(float(current))
-                    value_label.configure(text=spec.fmt.format(current))
-
     def _zero_manual(self) -> None:
         for attr in ("throttle", "brake", "steer"):
             self._set_slider_value(self.manual, attr, 0.0)
@@ -1111,48 +1058,19 @@ class Tuner:
         from tkinter import messagebox
         ok = messagebox.askyesno(
             "Recalibrate?",
-            "This wipes camera calibration AND steering fit AND camera "
-            "pose (pitch/yaw/sign) for the current game, then restarts "
-            "the first-drive wizard.\n\n"
-            "You'll need to drive ~10-15 min on a highway before "
-            "engagement is allowed again.\n\n"
-            "Continue?")
+            "Wipes this game's camera calibration and steering fit and "
+            "restarts calibration at FOV.")
         if not ok:
             if self._setup_status_label is not None:
                 self._setup_status_label.configure(
                     text="recalibrate cancelled")
             return
-        if self.device is not None and self.device.engaged:
-            self.device.disengage()
-        if self.live_calib is not None:
-            self.live_calib.reset(reason="user clicked Recalibrate")
-        if self.live_params is not None:
-            self.live_params.reset(wipe_disk=True)
-            for attr in ("a_linear", "b_quad", "c_bias"):
-                self._set_slider_value(self.live_params, attr,
-                                       getattr(self.live_params, attr))
-        if self.wizard is not None:
-            self.wizard.reset()
-        if self.probe is not None:
-            self.probe.reset()
-        defaults = Calibration()
-        for attr in ("pitch_deg", "yaw_deg", "lateral_sign", "height_m"):
-            self._set_slider_value(self.calib, attr,
-                                   getattr(defaults, attr))
-        try:
-            self.calib.save(game=self.game)
-        except Exception:
-            pass
-        # Refresh the mirror-sign switch in case sign changed.
-        mirror = self._switches.get("mirror_lateral_sign")
-        if mirror is not None:
-            if self.calib.lateral_sign < 0:
-                mirror.select()
-            else:
-                mirror.deselect()
+        if self.calib_flow is not None:
+            # The loop applies it on its next frame, on its own thread.
+            self.calib_flow.request_restart("Recalibrate clicked")
         if self._setup_status_label is not None:
             self._setup_status_label.configure(
-                text="calibration wiped — wizard restarted, drive ~15 min")
+                text="calibration restarts at FOV")
 
     def _save_and_restart(self) -> None:
         if self.settings is None:

@@ -5,7 +5,7 @@ happens naturally. On a straight highway with the AI just keeping lane,
 the commanded axis is near zero, `rej_small_axis` fires constantly, and
 the fit barely moves — minutes of driving with no progress.
 
-Fix: during the wizard's steering-fit phase (Phase B), superimpose a
+Fix: during the calibration flow's Steering step, superimpose a
 small sinusoidal perturbation on top of the AI's command. This excites
 the rack across its operating range so every frame contributes a useful
 (axis, wheel_angle) pair. Once `LiveParams.trusted()` flips True, the
@@ -14,7 +14,7 @@ probe stops automatically.
 Trade-off: while probing, the truck weaves by a small (~1 cm at 20 m/s
 peak) lateral amount. The perturbation is symmetric (sine) so the net
 drift over a cycle is ~0. The user sees "the truck is wiggling slightly
-while it's testing my steering" — communicated via the wizard banner.
+while it's testing my steering", which the calibration panel says.
 
 Safety gates:
 - Disabled when not engaged, when LiveParams is already trusted, during
@@ -61,7 +61,7 @@ class SteeringProbe:
              in_lane_change: bool,
              engaged: bool,
              lp_trusted: bool,
-             wizard_steering_phase: bool) -> float:
+             calibrating: bool) -> float:
         """Compute this frame's probe offset (axis units). Returns 0
         when any safety gate or relevance gate is active.
 
@@ -75,11 +75,8 @@ class SteeringProbe:
             return self._gate("disengaged")
         if lp_trusted:
             return self._gate("lp_trusted")
-        if not wizard_steering_phase:
-            # Outside of the wizard's calibration window, leave the
-            # truck alone. (Users can extend probing with a future
-            # always-probe flag if they want.)
-            return self._gate("not_wizard_phase_b")
+        if not calibrating:
+            return self._gate("not_calibrating")
         if in_lane_change:
             return self._gate("lane_change")
         if v_ego is None:

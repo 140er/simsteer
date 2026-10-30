@@ -1,86 +1,233 @@
-"""In-loop, one-shot auto-FOV (the safe plug-and-play FOV fix).
+"""One-shot FOV measurement for the calibration flow's FOV step.
 
-The model is fed a warp that crops the captured frame to the model's
-expected HFOV using `calib.fov_h_deg`. A wrong FOV makes the crop the
-wrong width, so the world looks zoomed in/out and the model's perceived
-forward speed `pose[0]` diverges from real speed by exactly the zoom
-factor:
+The warp crops the capture to the model's view using `calib.fov_h_deg`.
+A wrong value zooms that view, and the model's forward speed `pose[0]`
+drifts from telemetry speed:
 
-    vx_model / v_ego = tan(FOV_set / 2) / tan(FOV_true / 2)
-    =>  FOV_true = 2 * atan( tan(FOV_set / 2) / ratio )
+    vx_model / v_ego ~= tan(FOV_true / 2) / tan(FOV_set / 2)
 
-This is NOT the removed LiveFov (a *continuous* closed loop that fed
-itself, because the model's vx is a function of the very FOV it was
-tuning, so it could converge to nonsense). `FovResolver` collects the
-ratio over one straight-and-fast stretch, solves once, applies, and
-**freezes**. A single open-loop solve cannot run away.
+A value set too wide magnifies the view, the road looks nearer, and the
+model reads slower. Earlier code divided by the ratio instead, so one
+solve could push FOV further the wrong way (seen: 90 -> 40 degrees).
 
-The loop feeds it `(calib, vx_model, v_ego, yaw_rate)` each frame; it
-self-gates on straight (low yaw) and fast (above a floor) samples, and
-returns a one-line message when it commits a correction (so the loop can
-log + persist + banner it).
+On the synthetic clip the relation holds within a few degrees of the
+true value but flattens when the set value is far too wide (95 set on a
+75 render solves to 70). So the solve has two stages, and the applied
+FOV never changes while either runs:
+
+  1. Estimate. The median ratio at the applied FOV, inverted with the
+     formula above.
+  2. Bracket. The vision model also runs on the same frames warped at
+     four candidate FOVs around the estimate, one candidate per frame.
+     The answer is where the candidates' median ratios cross 1,
+     interpolated between the two neighbours around the crossing. The
+     ratio curve bends near the true FOV, so a straight line through all
+     four lands degrees off. If all ratios sit on one side of 1, the
+     candidates move that way, at most `MAX_SHIFTS` times.
+
+On the synthetic clips the model reads 3 to 5 percent slow at the true
+FOV, so the answer lands 2 to 3 degrees narrow there. Whether real game
+footage has that bias is for the recorded drive to show.
+
+Each FOV step runs one solve, and the flow asks the player to accept the
+result, so nothing here can run away like the removed `LiveFov`.
 """
+
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
+from dataclasses import replace
 from statistics import median
 
+import numpy as np
 
-class FovResolver:
-    def __init__(self, enabled: bool = True, need_samples: int = 60,
-                 min_speed_mps: float = 8.0, max_yaw_rad_s: float = 0.06,
-                 clamp_deg: tuple[float, float] = (40.0, 150.0)) -> None:
-        self.enabled = enabled
-        self.need = need_samples
-        self.min_speed = min_speed_mps
-        self.max_yaw = max_yaw_rad_s
-        self.clamp = clamp_deg
-        self.done = False
-        self._ratios: list[float] = []
-        self.last_ratio: float | None = None
+from simsteer.core.constants import FRAME_SKIP
+
+FOV_MIN_DEG, FOV_MAX_DEG = 40.0, 150.0
+MIN_SPEED_MPS = 8.0
+MAX_YAW_RAD_S = 0.06
+ESTIMATE_SAMPLES = 40
+CANDIDATE_SAMPLES = 30
+# Spacing matches FRAME_SKIP, so each candidate's previous warp is the
+# frame the model stacks with the current one.
+CANDIDATE_OFFSETS = (-6.0, -2.0, 2.0, 6.0)
+MAX_SHIFTS = 2
+
+VisionFn = Callable[[np.ndarray, np.ndarray], tuple[float, float] | None]
+ViewsFn = Callable[[np.ndarray, object], tuple[np.ndarray, np.ndarray]]
+
+assert len(CANDIDATE_OFFSETS) == FRAME_SKIP
+
+
+def solve_from_ratio(fov_set_deg: float, ratio: float) -> float:
+    fov = math.degrees(2.0 * math.atan(
+        ratio * math.tan(math.radians(fov_set_deg) / 2.0)))
+    return _clamp(fov)
+
+
+def _clamp(fov: float) -> float:
+    return max(FOV_MIN_DEG, min(FOV_MAX_DEG, fov))
+
+
+def _usable(v: float | None, yaw: float | None) -> bool:
+    return (v is not None and yaw is not None
+            and v >= MIN_SPEED_MPS and abs(yaw) <= MAX_YAW_RAD_S)
+
+
+class FovSolver:
+    """Feed it every frame while the FOV step runs. `result` is set once.
+
+    `vision(img, big_img)` returns `(vx, vx_std)` for a stacked input, and
+    `views(bgr, calib)` warps one frame into the (narrow, wide) YUV pair.
+    Without `vision` only the estimate stage runs."""
+
+    def __init__(self, vision: VisionFn | None = None,
+                 views: ViewsFn | None = None) -> None:
+        self.vision = vision
+        self.views = views
+        self.stage = "estimate"
         self.applied_fov: float | None = None
+        self.estimate: float | None = None
+        self.candidates: list[float] = []
+        self.shifts = 0
+        self.result: float | None = None
+        self._ratios: list[float] = []
+        self._cand_ratios: list[list[float]] = []
+        self._prev: list[tuple[np.ndarray, np.ndarray] | None] = []
+        self._tick = 0
+        self.vision_s = 0.0
+
+    # ----- progress -----
+
+    @property
+    def done(self) -> bool:
+        return self.result is not None
 
     @property
     def progress(self) -> float:
-        """0..1 toward a confident solve (for the HUD)."""
         if self.done:
             return 1.0
-        return min(1.0, len(self._ratios) / float(self.need))
+        if self.stage == "estimate":
+            return 0.25 * min(1.0, len(self._ratios) / ESTIMATE_SAMPLES)
+        have = sum(min(len(r), CANDIDATE_SAMPLES) for r in self._cand_ratios)
+        need = CANDIDATE_SAMPLES * len(self._cand_ratios)
+        return 0.25 + 0.75 * have / need
 
     @property
-    def status(self) -> str:
-        if not self.enabled:
-            return "off"
-        if self.done:
-            return f"FOV {self.applied_fov:.0f}deg (auto)"
-        return f"measuring {len(self._ratios)}/{self.need}"
+    def samples(self) -> int:
+        return len(self._ratios) + sum(len(r) for r in self._cand_ratios)
 
-    def update(self, calib, vx_model: float | None,
-               v_ego: float | None, yaw_rate: float | None) -> str | None:
-        """Feed one frame. Returns a message string when it applies a
-        correction (once), else None. Mutates `calib.fov_h_deg` on solve;
-        the caller persists + banners it."""
-        if self.done or not self.enabled:
+    # ----- feed -----
+
+    def update(self, frame: np.ndarray | None, calib, vx_model: float | None,
+               v_ego: float | None, yaw_rate: float | None,
+               perf_counter: Callable[[], float] | None = None) -> float | None:
+        """Returns the solved FOV on the frame it is found, else None."""
+        if self.done:
             return None
-        if v_ego is None or yaw_rate is None or vx_model is None:
+        if self.applied_fov is None:
+            self.applied_fov = float(calib.fov_h_deg)
+        if self.stage == "estimate":
+            if _usable(v_ego, yaw_rate) and vx_model is not None and vx_model > 0.1:
+                self._ratios.append(vx_model / v_ego)
+            if len(self._ratios) >= ESTIMATE_SAMPLES:
+                self.estimate = solve_from_ratio(self.applied_fov,
+                                                 median(self._ratios))
+                if self.vision is None or self.views is None or frame is None:
+                    self.result = self.estimate
+                    return self.result
+                self._start_candidates(self.estimate)
             return None
-        if v_ego < self.min_speed or abs(yaw_rate) > self.max_yaw:
+        self._feed_candidate(frame, calib, v_ego, yaw_rate, perf_counter)
+        if all(len(r) >= CANDIDATE_SAMPLES for r in self._cand_ratios):
+            return self._solve_candidates()
+        return None
+
+    def _start_candidates(self, centre: float) -> None:
+        lo = FOV_MIN_DEG - min(CANDIDATE_OFFSETS)
+        hi = FOV_MAX_DEG - max(CANDIDATE_OFFSETS)
+        centre = max(lo, min(hi, centre))
+        self.stage = "bracket"
+        self.candidates = [round(centre + o, 3) for o in CANDIDATE_OFFSETS]
+        self._cand_ratios = [[] for _ in self.candidates]
+        self._prev = [None for _ in self.candidates]
+        self._tick = 0
+
+    def _feed_candidate(self, frame, calib, v_ego, yaw_rate, perf_counter) -> None:
+        if frame is None:
+            return
+        j = self._tick % len(self.candidates)
+        self._tick += 1
+        cur = self.views(frame, replace(calib, fov_h_deg=self.candidates[j]))
+        prev, self._prev[j] = self._prev[j], cur
+        if prev is None or not _usable(v_ego, yaw_rate):
+            return
+        img = np.concatenate([prev[0], cur[0]], axis=0)[np.newaxis, ...]
+        big = np.concatenate([prev[1], cur[1]], axis=0)[np.newaxis, ...]
+        t0 = perf_counter() if perf_counter else 0.0
+        pose = self.vision(img, big)
+        if perf_counter:
+            self.vision_s += perf_counter() - t0
+        if pose is None or pose[0] <= 0.1:
+            return
+        self._cand_ratios[j].append(pose[0] / v_ego)
+
+    def _solve_candidates(self) -> float | None:
+        x = self.candidates
+        y = [median(r) for r in self._cand_ratios]
+        crossings = [x[i] + (x[i + 1] - x[i]) * (y[i] - 1.0) / (y[i] - y[i + 1])
+                     for i in range(len(x) - 1)
+                     if y[i] >= 1.0 >= y[i + 1] and y[i] > y[i + 1]]
+        if crossings:
+            # Noise can make two; the one nearest the estimate wins.
+            self.result = _clamp(min(crossings, key=lambda c: abs(c - self.estimate)))
+            return self.result
+        if self.shifts < MAX_SHIFTS and (min(y) > 1.0 or max(y) < 1.0):
+            self.shifts += 1
+            span = x[-1] - x[0]
+            self._start_candidates(x[-1] + span / 2 + 2.0 if min(y) > 1.0
+                                   else x[0] - span / 2 - 2.0)
             return None
-        if vx_model <= 0.1:
-            return None
-        ratio = vx_model / v_ego
-        self._ratios.append(ratio)
-        self.last_ratio = median(self._ratios)
-        if len(self._ratios) < self.need:
-            return None
-        # Enough straight+fast samples — solve once and freeze.
-        r = float(median(self._ratios))
-        fov_old = float(calib.fov_h_deg)
-        fov_new = math.degrees(2.0 * math.atan(
-            math.tan(math.radians(fov_old) / 2.0) / r))
-        fov_new = max(self.clamp[0], min(self.clamp[1], fov_new))
-        calib.fov_h_deg = fov_new
-        self.applied_fov = fov_new
-        self.done = True
-        return (f"auto-FOV: {fov_old:.0f} -> {fov_new:.0f}deg "
-                f"(vx/v_ego={r:.2f})")
+        self.result = _clamp(min(zip(x, y), key=lambda p: abs(p[1] - 1.0))[0])
+        return self.result
+
+    # ----- persistence -----
+
+    def to_dict(self) -> dict:
+        return {
+            "stage": self.stage,
+            "applied_fov": self.applied_fov,
+            "estimate": self.estimate,
+            "candidates": self.candidates,
+            "shifts": self.shifts,
+            "result": self.result,
+            "ratios": [round(r, 6) for r in self._ratios],
+            "cand_ratios": [[round(r, 6) for r in rs] for rs in self._cand_ratios],
+        }
+
+    def load_dict(self, d: dict) -> None:
+        self.stage = d.get("stage", "estimate")
+        self.applied_fov = d.get("applied_fov")
+        self.estimate = d.get("estimate")
+        self.candidates = [float(c) for c in d.get("candidates", [])]
+        self.shifts = int(d.get("shifts", 0))
+        self.result = d.get("result")
+        self._ratios = [float(r) for r in d.get("ratios", [])]
+        self._cand_ratios = [[float(r) for r in rs] for rs in d.get("cand_ratios", [])]
+        self._prev = [None for _ in self.candidates]
+        if self.stage == "bracket" and len(self._cand_ratios) != len(self.candidates):
+            self._cand_ratios = [[] for _ in self.candidates]
+
+
+def model_vision(model) -> VisionFn | None:
+    """Adapt a `DrivingModel` into the solver's vision callable."""
+    run = getattr(model, "vision_only", None)
+    if run is None:
+        return None
+    from simsteer.core.postprocess import decode_pose
+
+    def vision(img: np.ndarray, big: np.ndarray) -> tuple[float, float]:
+        mu, std = decode_pose(run(img, big))
+        return float(mu[0]), float(std[0])
+    return vision

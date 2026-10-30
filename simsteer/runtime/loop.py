@@ -16,13 +16,9 @@ Two things this loop fixes vs a naive port of v1's monolith:
     lines up by construction. Drawing onto the raw capture (press `v`)
     depends on the static FOV/pitch being exactly right, which is the
     historical "path too small / not lined up" failure.
-  - **Auto-FOV.** `FovResolver` solves the true FOV once from
-    `vx_model / v_ego` on a straight (open-loop, then frozen) so a wrong
-    stored FOV self-corrects instead of needing a manual slider.
-
-Onboarding wizard, the Tk tuner, and the preflight installer dialogs are
-the remaining Phase 4 surfaces and are intentionally not wired here yet;
-everything the user needs to drive and tune live is.
+  - **Calibration.** `CalibFlow` walks FOV, Camera, Steering and a
+    scored Check per game and device, and gates engagement until the
+    camera is calibrated. See `simsteer/calib/flow.py`.
 """
 
 from __future__ import annotations
@@ -37,7 +33,6 @@ import cv2
 import numpy as np
 
 from simsteer.app import audio
-from simsteer.app.calibration_routine import CalibrationRoutine
 from simsteer.app.global_keys import (
     GlobalKeys, KEY_END, KEY_INSERT, KEY_NUMPAD4, KEY_NUMPAD6,
     KEY_PAGEDOWN, KEY_PAGEUP,
@@ -47,22 +42,21 @@ from simsteer.app.manual import ManualInputs
 from simsteer.app.nav import ManeuverDir, NavManager
 from simsteer.app.probe import SteeringProbe
 from simsteer.app.settings import Settings
-from simsteer.app.wizard import Wizard
+from simsteer.calib.flow import CalibFlow, Obs, Step, steering_fit_for
+from simsteer.calib.fov_source import profile_reader
 from simsteer.core.calibration import Calibration, model_view_calib
 from simsteer.core.constants import DESIRE_LEN, T_IDXS
 from simsteer.core.control import (
     ControllerConfig, LateralController, LongitudinalController,
 )
-from simsteer.core.learners.livecalib import (
-    BLOCK_SIZE, INPUTS_NEEDED, CalStatus, LiveCalib,
-)
-from simsteer.core.learners.liveparams import LiveParams, TRUSTED_MIN_SAMPLES
+from simsteer.core.learners.livecalib import CalStatus, LiveCalib
+from simsteer.core.learners.liveparams import LiveParams
 from simsteer.core.model import DrivingModel
 from simsteer.core.postprocess import decode
-from simsteer.core.preprocess import FrameQueue, yuv6_to_bgr
+from simsteer.core.preprocess import FrameQueue, model_views, yuv6_to_bgr
 from simsteer.games.base import GameProfile, get_profile
 from simsteer.runtime.capture import Capture, CaptureConfig
-from simsteer.runtime.fov import FovResolver
+from simsteer.runtime.fov import FovSolver, model_vision
 from simsteer.runtime.output.base import DeviceManager
 from simsteer.runtime.replay import LiveClock
 from simsteer.runtime.telemetry import Telemetry
@@ -87,11 +81,17 @@ except Exception:  # pragma: no cover - version file optional
 DESIRE_LANE_CHANGE_LEFT = 3
 DESIRE_LANE_CHANGE_RIGHT = 4
 
+KEY_BACKSPACE = 8
+CALIB_TONE_COLORS = {"calibrating": COL_ACCENT_VIOLET,
+                     "passed": COL_ACCENT_GREEN, "failed": COL_ACCENT_RED}
+
 MIN_HEALTHY_FPS = 8.0
 DISENGAGED_RECENTER_EVERY_N = 20
 # DirectML compiles its kernels on the first few inferences (<5 fps);
 # don't enforce the fps auto-disengage until past this many frames.
 WARMUP_FRAMES = 20
+# Until the frame queue holds distinct frames the model sees no motion.
+FRAME_QUEUE_FILL = 5
 # Telemetry detection is a one-shot handshake; retry this often (frames)
 # while unavailable so it recovers without a restart.
 TELEMETRY_RETRY_EVERY_N = 40
@@ -176,10 +176,11 @@ def run(settings: Settings, game: GameProfile | str, *,
     ctrl_cfg = ControllerConfig.load(game_id, seed=profile.controller)
     live_params = LiveParams(game=game_id, device_kind=settings.device,
                              seeds=profile.liveparams.seeds,
-                             gates=profile.liveparams.gates)
+                             gates=profile.liveparams.gates,
+                             clock=clock.now)
     lat_ctrl = LateralController(ctrl_cfg, live_params)
     long_ctrl = LongitudinalController(ctrl_cfg)
-    live_calib = LiveCalib(game=game_id)
+    live_calib = LiveCalib(game=game_id, clock=clock.now)
 
     # --- Session-wide, game-agnostic resources ---
     fq = FrameQueue()
@@ -189,18 +190,19 @@ def run(settings: Settings, game: GameProfile | str, *,
     manual = ManualInputs()
     nav = NavManager()
     probe = SteeringProbe(enabled=not settings.no_probe)
-    cal_routine = CalibrationRoutine(live_params)
-    # Auto-FOV is OFF by default. Re-running the one-shot solve every
-    # session and persisting it turns into a slow closed loop, and a
-    # single bad straight-line measurement slams FOV to garbage (seen:
-    # 90 -> 40 deg) — exactly the runaway the project removed LiveFov
-    # for. FOV is a static knob: set it in the tuner's Camera tab.
-    fov_resolver = FovResolver(enabled=False)
     hud_renderer = HudRenderer()
-    # First-drive onboarding: gates engage until camera calibration is
-    # done and drives the HUD's wizard panel. Inert once a game is
-    # already calibrated (wizard.active == False).
-    wizard = Wizard(game=game_id, live_calib=live_calib, live_params=live_params)
+
+    def passive_fit_allowed() -> bool:
+        return profile.capabilities.passive_fit_safe or settings.passive_fit
+
+    vision = model_vision(model)
+    flow = CalibFlow(
+        game_id, settings.device, live_calib=live_calib,
+        live_params=live_params, calib=calib,
+        steering_fit=steering_fit_for(profile),
+        passive_fit=passive_fit_allowed(),
+        make_fov_solver=lambda: FovSolver(vision, model_views),
+        fov_config=profile_reader(profile.camera.fov_source))
 
     pad: DeviceManager | None = None
     if not settings.no_gamepad:
@@ -217,7 +219,7 @@ def run(settings: Settings, game: GameProfile | str, *,
         try:
             Tuner(calib, ctrl_cfg, manual, live_params=live_params,
                   game=game_id, device=pad, settings=settings, probe=probe,
-                  live_calib=live_calib, wizard=wizard, cal_routine=cal_routine)
+                  live_calib=live_calib, calib_flow=flow)
             print("tuner: slider window opened (set no_tuner to skip)")
         except Exception as e:
             print(f"tuner: failed to open ({e}) — continuing without it")
@@ -226,12 +228,13 @@ def run(settings: Settings, game: GameProfile | str, *,
           f"policy: {getattr(model, 'policy_provider', '?')}")
     print(f"game: {profile.display_name}   telemetry: "
           f"{'available' if tel.available else 'NOT detected'}")
-    print(f"calibration: {live_calib.status_label}  "
+    print(f"calibration: {flow.step.value}  camera {live_calib.status_label}  "
           f"(FOV={calib.fov_h_deg:.1f} pitch={calib.pitch_deg:+.1f} "
-          f"h={calib.height_m:.2f})  auto-FOV will refine on a straight")
+          f"h={calib.height_m:.2f})")
     print(f"hud: {settings.hud_mode!r} (H toggles)   "
           f"probe: {'on' if probe.enabled else 'off'}")
-    print("keys: INSERT engage  v model/capture  i input  h hud  r recal  "
+    print("keys: INSERT engage (accepts a measured FOV)  BACKSPACE keep FOV  "
+          "v model/capture  i input  h hud  r recalibrate  "
           "k/l turn-in later/earlier  NumPad4/6 lane L/R  "
           "PgUp/PgDn/End nav  t test  q quit")
 
@@ -260,8 +263,8 @@ def run(settings: Settings, game: GameProfile | str, *,
             return False, "game telemetry not detected"
         if fps < MIN_HEALTHY_FPS:
             return False, f"frame rate too low ({fps:.1f} < {MIN_HEALTHY_FPS:.0f})"
-        ok, why = wizard.allows_engage()
-        if not ok:
+        why = flow.engage_block()
+        if why:
             return False, why
         if live_calib.cal_status != CalStatus.CALIBRATED:
             return False, "camera calibration not done — drive manually first"
@@ -272,6 +275,18 @@ def run(settings: Settings, game: GameProfile | str, *,
         banner_text = text
         banner_color = color
         banner_until = clock.now() + secs
+
+    def hk(hk_id: str) -> bool:
+        return _hk_enabled(hk_id, settings)
+
+    def restart_calibration(reason: str) -> None:
+        if pad is not None and pad.engaged:
+            pad.disengage()
+            audio.play("disengage")
+        probe.reset()
+        lat_ctrl.reset()
+        flow.restart(reason)
+        set_banner("CALIBRATION RESET", (80, 220, 255), 4.0)
 
     with source as cap:
         if keys is None and headless:
@@ -303,6 +318,9 @@ def run(settings: Settings, game: GameProfile | str, *,
                     continue
                 n_frames += 1
                 t_warp = time.perf_counter()
+                restart_reason = flow.take_restart_request()
+                if restart_reason:
+                    restart_calibration(restart_reason)
                 if not headless and not window_open:
                     h, w = frame.shape[:2]
                     win_w = min(w, settings.max_width)
@@ -349,26 +367,25 @@ def run(settings: Settings, game: GameProfile | str, *,
                 t_ctrl = time.perf_counter()
                 decoded = decode(vision_out, policy_out)
 
-                # --- Online camera-pose calibration ---
-                live_calib.update(
-                    calib, decoded.pose, decoded.road_transform,
-                    actual_yaw, v_real,
-                    pose_std=decoded.pose_std,
-                    road_transform_std=decoded.road_transform_std,
-                    wide_from_device_euler=decoded.wide_from_device_euler,
-                    game_steer=game_steer)
-                wizard.tick()
+                vx = (float(decoded.pose[0])
+                      if decoded.pose is not None and len(decoded.pose) > 0
+                      else None)
 
-                # --- Auto-FOV (one-shot, open-loop, then frozen) ---
-                if frame_idx > WARMUP_FRAMES:
-                    vx = (float(decoded.pose[0])
-                          if decoded.pose is not None and len(decoded.pose) > 0
-                          else None)
-                    fov_msg = fov_resolver.update(calib, vx, v_real, actual_yaw)
-                    if fov_msg:
-                        calib.save(game=game_id)
-                        set_banner(fov_msg, (80, 220, 255), 5.0)
-                        print(f"-> {fov_msg} (saved)")
+                # --- Calibration: FOV measurement, then camera pose ---
+                fov_vision_s = 0.0
+                if flow.step is Step.FOV and frame_idx > FRAME_QUEUE_FILL:
+                    before = flow.fov_solver.vision_s
+                    flow.feed_fov(frame, vx, v_real, actual_yaw,
+                                  time.perf_counter)
+                    fov_vision_s = flow.fov_solver.vision_s - before
+                if flow.camera_learning:
+                    live_calib.update(
+                        calib, decoded.pose, decoded.road_transform,
+                        actual_yaw, v_real,
+                        pose_std=decoded.pose_std,
+                        road_transform_std=decoded.road_transform_std,
+                        wide_from_device_euler=decoded.wide_from_device_euler,
+                        game_steer=game_steer)
 
                 # --- Lateral + longitudinal control ---
                 ai_steer = lat_ctrl.compute(
@@ -381,7 +398,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                         dt=dt, ai_axis=steer, v_ego=v_real,
                         in_lane_change=lane_change_active,
                         engaged=pad.engaged, lp_trusted=live_params.trusted(),
-                        wizard_steering_phase=False)
+                        calibrating=flow.probe_wanted)
                 ai_throttle, ai_brake = long_ctrl.compute(decoded, v_ego)
                 if manual.long_override:
                     throttle_out, brake_out = manual.throttle, manual.brake
@@ -389,15 +406,16 @@ def run(settings: Settings, game: GameProfile | str, *,
                     throttle_out, brake_out = ai_throttle, ai_brake
 
                 # --- Feed LiveParams (after the command is known) ---
-                cal_routine.tick(v_real, wheel_angle, dt)
-                allow_passive = (profile.capabilities.passive_fit_safe
-                                 or settings.passive_fit
-                                 or wizard.in_camera_phase)
-                if pad is not None and (pad.engaged or allow_passive):
-                    cmd = steer if pad.engaged else game_steer
+                # Disengaged, the observed axis is the player's, so only
+                # profiles whose rack response doesn't depend on the input
+                # device fit from it. Replay has no pad and fits here too.
+                engaged_now = bool(pad is not None and pad.engaged)
+                flow.passive_fit = passive_fit_allowed()
+                if engaged_now or flow.passive_fit:
+                    cmd = steer if engaged_now else game_steer
                     live_params.update(game_steer, v_real, wheel_angle,
                                        commanded_axis=cmd,
-                                       gate_override=cal_routine.gate_override())
+                                       gate_override=flow.gate_override)
 
                 # --- Device output ---
                 if pad is not None:
@@ -431,98 +449,22 @@ def run(settings: Settings, game: GameProfile | str, *,
                     audio.play("disengage")
                     set_banner("DISENGAGED", COL_ACCENT_BLUE, 2.0)
                 was_engaged_last_frame = engaged_now
+                flow.tick(Obs(
+                    now=now, dt=dt, v=v_real, yaw_rate=actual_yaw,
+                    wheel=wheel_angle, vx_model=vx,
+                    lane_offset=_lane_offset(decoded), axis=float(steer),
+                    driving=engaged_now or pad is None, engaged=engaged_now,
+                    lane_change=(lane_change_active
+                                 or lat_ctrl.last_in_lane_change),
+                    telemetry_ok=tel.available))
                 allowed, blocked_reason = engage_check()
                 t_render = time.perf_counter()
 
-                if log_f is not None:
-                    row = {
-                        "frame": n_frames,
-                        "t": round(now - t_start, 4),
-                        "v_ego": round(float(v_ego), 4),
-                        "steer_axis": round(float(steer), 6),
-                        "curvature": round(float(lat_ctrl.last_curvature), 7),
-                        "throttle": round(float(throttle_out), 4),
-                        "brake": round(float(brake_out), 4),
-                        "engaged": engaged_now,
-                        "telemetry": "ok" if tel.available else "lost",
-                    }
-                    if log_timing:
-                        row.update(
-                            cap_ms=round((t_warp - t_grab) * 1e3, 3),
-                            warp_ms=round((t_model - t_warp) * 1e3, 3),
-                            model_ms=round((t_ctrl - t_model) * 1e3, 3),
-                            ctrl_ms=round((t_render - t_ctrl) * 1e3, 3),
-                            frame_ms=round((t_render - t_grab) * 1e3, 3))
-                    log_f.write(json.dumps(row) + "\n")
-
-                if headless:
-                    continue
-
-                # --- Render: model view (self-aligning) or capture view ---
-                # BOTH views project the model's path using the height the
-                # MODEL assumes (road_transform[2], ~1.2 m), NOT our physical
-                # cab height. comma's model predicts road geometry at its
-                # trained height; projecting with the taller calib.height_m
-                # (~2.1 m, what LiveCalib estimates for the real mount) pushes
-                # the near path off the bottom of the frame and squishes the
-                # rest toward the horizon — the "path too small / converging
-                # low" bug. Fall back to LiveCalib's estimate, then calib.
-                rt = decoded.road_transform
-                model_h = (float(rt[2]) if rt is not None and len(rt) >= 3
-                           and 0.5 < float(rt[2]) < 4.0
-                           else (live_calib.height_estimate or calib.height_m))
-                if view_mode == "model" and fq.last_yuv is not None:
-                    mv_bgr = yuv6_to_bgr(fq.last_yuv)
-                    mv_h = 720
-                    mv_w = mv_h * mv_bgr.shape[1] // mv_bgr.shape[0]
-                    mv_bgr = cv2.resize(mv_bgr, (mv_w, mv_h),
-                                        interpolation=cv2.INTER_LINEAR)
-                    mv_calib = model_view_calib(
-                        calib,
-                        captured_shape=fq.last_captured_shape or frame.shape,
-                        cropped_shape=fq.last_cropped_shape or frame.shape,
-                        view_w=mv_w, view_h=mv_h, model_height_m=model_h)
-                    overlay = draw_overlay(mv_bgr, decoded, mv_calib)
-                    if show_input:
-                        small = cv2.resize(frame, (mv_w // 3, mv_h // 3),
-                                           interpolation=cv2.INTER_AREA)
-                        H, W = overlay.shape[:2]
-                        sh, sw = small.shape[:2]
-                        overlay[10:10 + sh, W - 10 - sw:W - 10] = small
-                else:
-                    cap_calib = replace(calib, height_m=model_h)
-                    overlay = draw_overlay(frame, decoded, cap_calib)
-                    if show_input:
-                        draw_model_input_inset(overlay, fq.last_yuv_narrow,
-                                               fq.last_yuv_wide)
-
-                # --- HUD ---
-                hud_state = _build_hud_state(
-                    pad=pad, view_mode=view_mode, fps=fps, v_real=v_real,
-                    v_ego=v_ego, settings=settings, banner_text=banner_text,
-                    banner_color=banner_color, banner_until=banner_until,
-                    blocked_reason=blocked_reason, lane_change_idx=lane_change_idx,
-                    lane_change_active=lane_change_active, manual=manual,
-                    probe=probe, lat_ctrl=lat_ctrl, long_ctrl=long_ctrl,
-                    live_params=live_params, live_calib=live_calib,
-                    ctrl_cfg=ctrl_cfg, fov_resolver=fov_resolver,
-                    decoded=decoded, actual_yaw=actual_yaw, wheel_angle=wheel_angle,
-                    game_steer=game_steer, steer=steer, ai_steer=ai_steer,
-                    ai_throttle=ai_throttle, ai_brake=ai_brake,
-                    throttle_out=throttle_out, brake_out=brake_out, nav=nav,
-                    cal_routine=cal_routine, wizard=wizard, now=now)
-                hud_renderer.draw(overlay, hud_state, mode=settings.hud_mode)
-                draw_calibration_hud(overlay, calib)
-                show_scaled(overlay, settings.max_width)
-
                 # --- Keys (game-focused global + overlay-focused cv2) ---
-                pressed = keys.poll()
-
-                def hk(hk_id: str) -> bool:
-                    return _hk_enabled(hk_id, settings)
-
+                # Read before rendering, so headless replay with scripted
+                # keys takes the same path as the window.
                 quit_loop = False
-                for key in pressed:
+                for key in keys.poll():
                     if key == ord("q") and hk("quit"):
                         quit_loop = True
                         break
@@ -537,18 +479,12 @@ def run(settings: Settings, game: GameProfile | str, *,
                         settings.save()
                         print(f"hud: {settings.hud_mode!r}")
                     elif key == ord("r") and hk("recalibrate"):
-                        if pad is not None and pad.engaged:
-                            pad.disengage()
-                            audio.play("disengage")
-                        live_calib.reset(reason="user pressed R")
-                        live_params.reset(wipe_disk=True)
-                        probe.reset()
-                        lat_ctrl.reset()
-                        wizard.reset()
-                        fov_resolver = FovResolver(enabled=False)
-                        set_banner("CALIBRATION RESET", (80, 220, 255), 4.0)
-                        print("-> CALIBRATION RESET (LiveCalib + LiveParams "
-                              "+ probe + auto-FOV)")
+                        restart_calibration("R pressed")
+                    elif key == KEY_INSERT and flow.accept_fov():
+                        set_banner(f"FOV {calib.fov_h_deg:.0f}", COL_ACCENT_GREEN, 3.0)
+                    elif key == KEY_BACKSPACE and hk("keep_fov") and flow.keep_fov():
+                        set_banner(f"FOV {calib.fov_h_deg:.0f} kept",
+                                   COL_ACCENT_BLUE, 3.0)
                     elif key == KEY_INSERT and pad is not None and hk("engage"):
                         if pad.engaged:
                             pad.disengage()
@@ -618,13 +554,99 @@ def run(settings: Settings, game: GameProfile | str, *,
                         msg = handle_calibration_key(calib, key)
                         if msg is not None:
                             print(msg)
+
+                if log_f is not None:
+                    row = {
+                        "frame": n_frames,
+                        "t": round(now - t_start, 4),
+                        "v_ego": round(float(v_ego), 4),
+                        "steer_axis": round(float(steer), 6),
+                        "curvature": round(float(lat_ctrl.last_curvature), 7),
+                        "throttle": round(float(throttle_out), 4),
+                        "brake": round(float(brake_out), 4),
+                        "engaged": engaged_now,
+                        "telemetry": "ok" if tel.available else "lost",
+                        **flow.log_fields(),
+                    }
+                    if log_timing:
+                        # The FOV step's extra vision runs are model time.
+                        row.update(
+                            cap_ms=round((t_warp - t_grab) * 1e3, 3),
+                            warp_ms=round((t_model - t_warp) * 1e3, 3),
+                            model_ms=round((t_ctrl - t_model + fov_vision_s) * 1e3, 3),
+                            ctrl_ms=round((t_render - t_ctrl - fov_vision_s) * 1e3, 3),
+                            frame_ms=round((t_render - t_grab) * 1e3, 3))
+                    log_f.write(json.dumps(row) + "\n")
+
                 if quit_loop:
                     break
+                if headless:
+                    continue
+
+                # --- Render: model view (self-aligning) or capture view ---
+                # BOTH views project the model's path using the height the
+                # MODEL assumes (road_transform[2], ~1.2 m), NOT our physical
+                # cab height. comma's model predicts road geometry at its
+                # trained height; projecting with the taller calib.height_m
+                # (~2.1 m, what LiveCalib estimates for the real mount) pushes
+                # the near path off the bottom of the frame and squishes the
+                # rest toward the horizon — the "path too small / converging
+                # low" bug. Fall back to LiveCalib's estimate, then calib.
+                rt = decoded.road_transform
+                model_h = (float(rt[2]) if rt is not None and len(rt) >= 3
+                           and 0.5 < float(rt[2]) < 4.0
+                           else (live_calib.height_estimate or calib.height_m))
+                if view_mode == "model" and fq.last_yuv is not None:
+                    mv_bgr = yuv6_to_bgr(fq.last_yuv)
+                    mv_h = 720
+                    mv_w = mv_h * mv_bgr.shape[1] // mv_bgr.shape[0]
+                    mv_bgr = cv2.resize(mv_bgr, (mv_w, mv_h),
+                                        interpolation=cv2.INTER_LINEAR)
+                    mv_calib = model_view_calib(
+                        calib,
+                        captured_shape=fq.last_captured_shape or frame.shape,
+                        cropped_shape=fq.last_cropped_shape or frame.shape,
+                        view_w=mv_w, view_h=mv_h, model_height_m=model_h)
+                    overlay = draw_overlay(mv_bgr, decoded, mv_calib)
+                    if show_input:
+                        small = cv2.resize(frame, (mv_w // 3, mv_h // 3),
+                                           interpolation=cv2.INTER_AREA)
+                        H, W = overlay.shape[:2]
+                        sh, sw = small.shape[:2]
+                        overlay[10:10 + sh, W - 10 - sw:W - 10] = small
+                else:
+                    cap_calib = replace(calib, height_m=model_h)
+                    overlay = draw_overlay(frame, decoded, cap_calib)
+                    if show_input:
+                        draw_model_input_inset(overlay, fq.last_yuv_narrow,
+                                               fq.last_yuv_wide)
+
+                # --- HUD ---
+                hud_state = _build_hud_state(
+                    pad=pad, view_mode=view_mode, fps=fps, v_real=v_real,
+                    v_ego=v_ego, settings=settings, banner_text=banner_text,
+                    banner_color=banner_color, banner_until=banner_until,
+                    blocked_reason=blocked_reason, lane_change_idx=lane_change_idx,
+                    lane_change_active=lane_change_active, manual=manual,
+                    probe=probe, lat_ctrl=lat_ctrl, long_ctrl=long_ctrl,
+                    live_params=live_params, live_calib=live_calib,
+                    ctrl_cfg=ctrl_cfg, flow=flow,
+                    decoded=decoded, actual_yaw=actual_yaw, wheel_angle=wheel_angle,
+                    game_steer=game_steer, steer=steer, ai_steer=ai_steer,
+                    ai_throttle=ai_throttle, ai_brake=ai_brake,
+                    throttle_out=throttle_out, brake_out=brake_out, nav=nav,
+                    now=now)
+                hud_renderer.draw(overlay, hud_state, mode=settings.hud_mode)
+                draw_calibration_hud(overlay, calib)
+                show_scaled(overlay, settings.max_width)
+
         finally:
             if pad is not None:
                 pad.disengage()
             live_params.save()
+            live_calib.save_state(game_id)
             calib.save(game=game_id)
+            flow.save()
             tel.close()
             if log_f is not None:
                 log_f.close()
@@ -638,9 +660,9 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
                      banner_text, banner_color, banner_until, blocked_reason,
                      lane_change_idx, lane_change_active, manual, probe,
                      lat_ctrl, long_ctrl, live_params, live_calib, ctrl_cfg,
-                     fov_resolver, decoded, actual_yaw, wheel_angle, game_steer,
+                     flow, decoded, actual_yaw, wheel_angle, game_steer,
                      steer, ai_steer, ai_throttle, ai_brake, throttle_out,
-                     brake_out, nav, cal_routine, wizard, now) -> HudState:
+                     brake_out, nav, now) -> HudState:
     """Assemble both the clean user-mode HudState fields and the dev-mode
     text stack. Kept out of the hot loop body for readability."""
     if pad is None:
@@ -651,13 +673,6 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
         eng_label, eng_col = "DISENGAGED", COL_ACCENT_BLUE
 
     cam_ready = live_calib.cal_status == CalStatus.CALIBRATED
-    lp_ready = live_params.trusted()
-    fov_ready = fov_resolver.done or not fov_resolver.enabled
-    dashboard = (not cam_ready) or (not lp_ready) or (not fov_ready)
-    cam_frac = min(1.0, (live_calib.blocks * BLOCK_SIZE + live_calib._block_n)
-                   / float(INPUTS_NEEDED * BLOCK_SIZE))
-    lp_frac = min(1.0, max(live_params.samples, live_params.session_samples)
-                  / float(TRUSTED_MIN_SAMPLES))
 
     banner = (banner_text if banner_text and now < banner_until else "")
 
@@ -671,8 +686,10 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
         (f"{eng_label}   view={view_mode}   {fps:5.1f} fps   "
          f"v={v_ego * 3.6:5.1f} km/h", eng_col),
     ]
-    if cal_routine.active:
-        dev_lines.append((cal_routine.prompt, (80, 255, 255)))
+    if flow.calibrating:
+        dev_lines.append((f"CALIB {flow.step.value} {flow.progress * 100:.0f}%  "
+                          f"{flow.hint(v_real, bool(pad and pad.engaged))}",
+                          (80, 255, 255)))
     dev_lines += [
         (f"steer cmd: {steer:+.3f} [{'MANUAL' if manual.steer_override else 'AI'}]"
          f"   target wheel: {lat_ctrl.last_target_wheel:+.4f} rad   "
@@ -703,21 +720,14 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
          f"pitch={live_calib.pitch_estimate or 0:+.2f} "
          f"h={live_calib.height_estimate or 0:.2f}m",
          (80, 255, 80) if cam_ready else (200, 200, 80)),
-        (f"AUTO-FOV {fov_resolver.status}"
-         + (f"  ratio={fov_resolver.last_ratio:.2f}"
-            if fov_resolver.last_ratio else ""),
-         (80, 255, 80) if fov_resolver.done else (160, 200, 255)),
+        (f"FOV {calib_fov_line(flow)}",
+         (160, 200, 255) if flow.step is Step.FOV else (80, 255, 80)),
         (f"{fps:5.1f} fps   SimSteer v{__version__}", (255, 255, 255)),
     ]
     if blocked_reason and not (pad and pad.engaged):
         dev_lines.insert(1, (f"cannot engage: {blocked_reason}", COL_ACCENT_BLUE))
 
-    wiz_text, wiz_color, wiz_hint = "", COL_ACCENT_VIOLET, ""
-    if wizard.active:
-        wb = wizard.banner()
-        if wb is not None:
-            wiz_text, wiz_color = wb[0], wb[1]
-        wiz_hint = wizard.hint(v_real) or ""
+    panel = flow.panel(v_real, engaged=bool(pad and pad.engaged))
 
     return HudState(
         engaged=bool(pad and pad.engaged),
@@ -725,19 +735,13 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
         engaged_color=eng_col,
         banner_text=banner,
         banner_color=banner_color,
-        wizard_active=wizard.active,
-        wizard_text=wiz_text,
-        wizard_color=wiz_color,
-        wizard_progress=wizard.progress_pct() if wizard.active else 0.0,
-        wizard_hint=wiz_hint,
+        calib_text=panel.title if panel else "",
+        calib_color=(CALIB_TONE_COLORS[panel.tone] if panel
+                     else COL_ACCENT_VIOLET),
+        calib_progress=panel.progress if panel else 0.0,
+        calib_hint=panel.hint if panel else "",
         warnings=[],
         v_ego_mps=v_real,
-        cal_camera_frac=cam_frac if dashboard else None,
-        cal_camera_status=("READY" if cam_ready else "WARMING"),
-        cal_steering_frac=lp_frac if dashboard else None,
-        cal_steering_status=("READY" if lp_ready else "WARMING"),
-        cal_fov_frac=fov_resolver.progress if dashboard else None,
-        cal_fov_status=("READY" if fov_ready else "MEASURING"),
         probe_active=(probe.last_gate == "active"),
         manual_override=(manual.steer_override or manual.long_override),
         lane_change=lc_chip,
@@ -748,6 +752,26 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
         mode_hint="H: dev view" if settings.hud_mode == "user" else "H: user view",
         dev_lines=dev_lines,
     )
+
+
+def calib_fov_line(flow: CalibFlow) -> str:
+    solver = flow.fov_solver
+    if flow.step is Step.FOV:
+        if flow.fov_proposal is not None:
+            return f"proposed {flow.fov_proposal:.1f}"
+        est = f" est={solver.estimate:.1f}" if solver.estimate else ""
+        cands = (" cand=" + ",".join(f"{c:.0f}" for c in solver.candidates)
+                 if solver.candidates else "")
+        return f"{solver.stage} {solver.samples} samples{est}{cands}"
+    return f"{flow.calib.fov_h_deg:.1f} ({flow.fov_source or 'saved'})"
+
+
+def _lane_offset(decoded) -> float | None:
+    """Metres from the ego lane centre, when both ego lines are seen."""
+    prob = decoded.lane_lines_prob
+    if prob is None or len(prob) < 3 or prob[1] < 0.5 or prob[2] < 0.5:
+        return None
+    return -float(decoded.lane_lines[1, 0, 0] + decoded.lane_lines[2, 0, 0]) / 2.0
 
 
 def pred_yaw_safe(decoded, ctrl_cfg) -> float:

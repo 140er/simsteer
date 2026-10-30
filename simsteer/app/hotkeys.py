@@ -96,9 +96,13 @@ HOTKEYS: list[Hotkey] = [
            "Restores pitch / yaw / FOV / height to dataclass defaults.",
            "Calibration", "overlay", danger=True),
     Hotkey("recalibrate", "R", "Recalibrate",
-           "Wipe LiveCalib + LiveParams + first-drive flag and restart "
-           "the wizard. Force-disengages first.",
+           "Wipe the camera pose and steering fit and restart the "
+           "calibration at FOV. Force-disengages first.",
            "Calibration", "overlay", danger=True),
+    Hotkey("keep_fov", "Backspace", "Keep current FOV",
+           "During calibration, keep your FOV instead of the measured "
+           "one. INSERT accepts the measured one.",
+           "Calibration", "overlay"),
     Hotkey("fov_minus", "[", "FOV −1°",
            "Narrow capture FOV by 1°. FOV is static — set it to match "
            "your in-game horizontal FOV.",
