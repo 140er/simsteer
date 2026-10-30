@@ -16,6 +16,7 @@ where a recording covers the same case. Recorded fixtures come from
 from __future__ import annotations
 
 import json
+import re
 import struct
 import sys
 from pathlib import Path
@@ -206,6 +207,51 @@ def directions() -> dict:
 
 
 SYNTHETIC = {"synthetic_all_types": all_types, "synthetic_directions": directions}
+
+
+# --------------------------------------------------------------------------
+# Round trip: what the sender asked of vJoy against what the bridge asks of
+# the wheel, compared effect by effect at every start.
+
+_TOKEN = re.compile(r"(\w+)\(([^)]*)\)|(\w+)=(\S+)")
+
+
+def parse_call(text: str) -> tuple[str, int, dict[str, str]]:
+    op, _, rest = text.partition(" ")
+    fields: dict[str, str] = {}
+    for block, inner, key, value in _TOKEN.findall(rest):
+        if block:
+            for k, v in re.findall(r"(\w+)=(\S+)", inner):
+                fields[f"{block}.{k}"] = v
+            fields["kind"] = block
+        else:
+            fields[key] = value
+    return op, int(fields.pop("ebi", 0)), fields
+
+
+def starts(calls: list[str]) -> list[tuple[int, dict[str, str]]]:
+    """(creation index, accumulated parameters) at every Start, in order."""
+    state: dict[int, dict[str, str]] = {}
+    order: dict[int, int] = {}
+    out = []
+    for text in calls:
+        op, ebi, fields = parse_call(text)
+        if op == "CreateEffect":
+            order[ebi] = len(order)
+            state[ebi] = {"type": fields["type"]}
+        elif op == "SetParameters" and ebi in state:
+            fields.pop("flags", None)
+            if "envelope" in fields:  # envelope=none
+                state[ebi] = {k: v for k, v in state[ebi].items() if not k.startswith("envelope.")}
+            state[ebi].update(fields)
+        elif op == "Start" and ebi in state:
+            out.append((order[ebi], dict(state[ebi], iterations=fields["iterations"])))
+    return out
+
+
+def sender_calls(path: Path) -> list[str]:
+    lines = path.read_text(encoding="utf-8").splitlines()[1:]
+    return [line.split("\t")[1] for line in lines if line.count("\t") >= 3 and not line.split("\t")[2].startswith("DIERR")]
 
 
 def load(name: str) -> dict:

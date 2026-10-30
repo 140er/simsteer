@@ -68,6 +68,33 @@ def test_recorded_packets_decode_like_the_dll(name):
         assert checked == len(fx.load(name)["packets"])
 
 
+ROUND_TRIP = [n for n in NAMES if (fx.FIXTURES / f"{n}.sender.txt").exists()]
+IGNORED = {"axes", "direction", "trigger_button", "iterations", "duration", "gain"}
+
+
+@pytest.mark.parametrize("name", ROUND_TRIP)
+def test_recorded_round_trip_matches_the_sender(name):
+    """Each effect the sender started on vJoy starts on the wheel with the
+    same parameters, apart from the safety window and gain rounding."""
+    model = fm.FfbModel()
+    bridged = []
+    for p in fx.load(name)["packets"]:
+        bridged += texts(model.apply(fm.decode_packet(p["cmd"], bytes.fromhex(p["data"])), p["t"]))
+    sent = fx.starts(fx.sender_calls(fx.FIXTURES / f"{name}.sender.txt"))
+    got = fx.starts(bridged)
+    assert [i for i, _ in got] == [i for i, _ in sent]
+    for (_, want), (_, have) in zip(sent, got):
+        endless = want.get("duration") == "INFINITE"
+        assert have.get("duration") == ("200000" if endless else want.get("duration"))
+        assert abs(int(have.get("gain", 10000)) - int(want.get("gain", 10000))) <= 20
+        if want["iterations"] != "INFINITE":
+            assert have["iterations"] == want["iterations"]
+        if endless and "envelope.fade_time" in want:
+            want = dict(want, **{"envelope.fade_time": "0"})
+        assert {k: v for k, v in have.items() if k not in IGNORED} == \
+            {k: v for k, v in want.items() if k not in IGNORED}
+
+
 def test_fixtures_cover_every_packet_and_effect_type():
     records = [rec for name in NAMES for _, rec in decoded(name)]
     kinds = {type(r) for r in records}
