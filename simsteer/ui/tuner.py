@@ -67,10 +67,11 @@ class _Number:
 
     def sync(self, force=False):
         if force or not self.editing():
-            self.var.set(
-                self.spec.fmt.format(getattr(self.spec.obj, self.spec.attr) * self.spec.scale)
-            )
-            self.entry.configure(text_color=INK)
+            text = self.spec.fmt.format(getattr(self.spec.obj, self.spec.attr) * self.spec.scale)
+            if self.var.get() != text:
+                self.var.set(text)
+            if self.entry.cget("text_color") != INK:
+                self.entry.configure(text_color=INK)
 
 
 class _Group:
@@ -644,7 +645,10 @@ class Tuner:
         for field in self._numbers:
             field.sync(force=field.spec.obj is force_obj)
         for sw, get in self._switches:
-            if get():
+            enabled = bool(get())
+            if bool(sw.get()) == enabled:
+                continue
+            if enabled:
                 sw.select()
             else:
                 sw.deselect()
