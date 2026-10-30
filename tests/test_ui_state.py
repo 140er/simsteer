@@ -39,10 +39,12 @@ def test_legacy_wizard_has_only_its_actual_steps():
     assert view.steps == ("Camera", "Steering")
     assert view.step_index == 0
     assert view.instruction
+    assert "camera calibrating" not in view.instruction
     lc.cal_status = CalStatus.CALIBRATED
     view = calibration_view(wizard=wizard, v_ego=20)
     assert view.step_name == "Steering"
     assert view.key_prompt == "Insert  Engage"
+    assert "warming up" not in view.instruction
     assert calibration_view(wizard=wizard, v_ego=20, engaged=True).key_prompt == ""
     wizard._active = False
     assert calibration_view(wizard=wizard) is None

@@ -134,7 +134,7 @@ def calibration_view(
             progress = wizard._calib_frac(wizard._lc) if camera else wizard._lp_frac(wizard._lp)
             return CalibrationView(
                 "Camera" if camera else "Steering",
-                wizard.hint(v_ego),
+                wizard.hint(v_ego).partition(" — ")[0],
                 progress,
                 wizard.eta_seconds(),
                 "" if camera or engaged else "Insert  Engage",
