@@ -363,6 +363,24 @@ def test_candidate_measurement_handles_periodic_motion_and_resume(resume_at):
     assert all(seen == {0, 1, 2, 3} for seen in phases.values())
 
 
+def test_inconsistent_candidate_response_keeps_the_coarse_estimate():
+    responses = {69.0: 1.15, 73.0: 1.04, 77.0: 1.07, 81.0: 0.85}
+
+    def views(frame, calib):
+        return np.full((6, 1, 1), calib.fov_h_deg), np.zeros((6, 1, 1))
+
+    def vision(img, big):
+        return 22.0 * responses[float(img[0, 6, 0, 0])], 0.1
+
+    solver = FovSolver(vision, views)
+    cal = Calibration(fov_h_deg=95.0)
+    for _ in range(500):
+        solver.update(np.zeros((1, 1)), cal, model_vx(95.0), 22.0, 0.0)
+        if solver.done:
+            break
+    assert solver.result == solver.estimate == pytest.approx(TRUE_FOV)
+
+
 # ----- resume -----
 
 def test_resume_mid_camera_and_mid_check(tmp_path):
