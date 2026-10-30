@@ -175,12 +175,12 @@ Only do the game(s) you'll actually drive.
 
 ---
 
-## 6. Camera FOV — set it once, by hand
+## 6. Camera FOV
 
-> **This is the step people miss.** SimSteer warps each frame onto the
-> model's fixed virtual camera, and that warp needs to know your game's
-> **horizontal FOV**. There is no auto-FOV — you set it once to match
-> the game.
+SimSteer needs your game's **horizontal FOV** to warp the capture into
+the model's virtual cameras. Calibration reads it from the game's config
+when the profile provides a source; otherwise it measures once and asks
+you to accept the result. You can enter a known value instead:
 
 1. Find your in-game FOV setting:
    - **ETS2**: Options → Gameplay → Camera → *Field of view*.
@@ -192,11 +192,11 @@ Only do the game(s) you'll actually drive.
 3. Verify while driving: the HUD's **FOV** line shows
    `ratio vx_model/v_ego`. Drive a straight road at highway speed:
    - `~1.00` (±5%) → FOV is right.
-   - `> 1.05` → FOV too high, narrow it.
-   - `< 0.95` → FOV too low, widen it.
+   - `> 1.05` → FOV too low, widen it.
+   - `< 0.95` → FOV too high, narrow it.
 
-Pitch, yaw, and camera height *do* auto-calibrate (LiveCalib) — only FOV
-is manual.
+The Camera step learns pitch, yaw and camera height. FOV stays fixed
+after the player accepts or enters it.
 
 ---
 
@@ -323,7 +323,7 @@ just press `R` in the overlay.
 - **"Cannot engage — frame rate too low"** → DirectML didn't load, vision
   is on CPU. Reinstall `onnxruntime-directml`.
 - **Plan veers way off the road / truck won't hold a lane** → FOV is
-  wrong. See [step 6](#6-camera-fov--set-it-once-by-hand).
+  wrong. See [step 6](#6-camera-fov).
 - **"Game telemetry not detected"** → SCS plugin missing (ETS2), Data Out
   off (Forza), or AC not in a session.
 - **Game launched as admin** → launch SimSteer as admin too (shared

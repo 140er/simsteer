@@ -232,7 +232,7 @@ To start calibration over for a game, delete the matching files in
 
 For working on SimSteer itself (not just running it). This is the quick
 version — [docs/SETUP.md](docs/SETUP.md) has the full walkthrough
-including drivers, per-game config, and the manual FOV step.
+including drivers, per-game config, and guided calibration.
 
 ```powershell
 py -3.11 -m venv .venv
@@ -270,9 +270,9 @@ full release checklist.
 - Feed-forward lateral controller with online steering-rack fitting
   (`LiveParams`, ports openpilot's `paramsd`) + a slow closed-loop
   wheel-angle trim
-- Online camera-pose calibration (`LiveCalib`, ports openpilot's
-  `calibrationd`). Camera **FOV is static / manual** — set once to match
-  the game.
+- Guided camera-pose calibration (`LiveCalib`, based on openpilot's
+  `calibrationd`). FOV comes from the game's config, a measurement the
+  player accepts, or manual entry.
 - Virtual output: ViGEm Xbox 360 pad or vJoy wheel
 
 Steering timing (`lookahead_s` = actuator delay, `curvature_anticipation_s`

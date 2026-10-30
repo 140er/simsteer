@@ -47,12 +47,12 @@ A fresh setup, in order:
 **FOV health check** (HUD `FOV` line, dev HUD): drive straight at highway
 speed and read `ratio vx_model/v_ego`:
 - `~1.00` → correct.
-- `> 1.05` → FOV set too high → narrow VFOV.
-- `< 0.95` → FOV set too low → widen VFOV.
+- `> 1.05` → FOV set too low → widen VFOV.
+- `< 0.95` → FOV set too high → narrow VFOV.
 
-This ratio is the same signal the old auto-FOV used internally; it's
-shown for you to tune by hand instead of being applied in a feedback
-loop.
+The FOV step measures this ratio at fixed candidate warps and asks you
+to accept the answer. It never adjusts FOV continuously. A known
+in-game setting can also be entered by hand.
 
 ---
 
@@ -124,11 +124,11 @@ wash out when you're back on the highway.
 steer or wildly oversteers): hit **Reset RLS**, then drive highway until
 trusted again.
 
-**Guided calibration** (sub-block): a 4-step routine (straight → slalom
-→ corner → highway, ~90 s) that widens the RLS gates so the fit
-converges fast. Press **Start guided calibration** and follow the HUD
-prompts. ETS2's strict gates are untouched — the routine passes a
-per-call override only while it's running.
+The guided flow's **Steering** step prompts for a straight stretch,
+gentle curves, lane changes and slow turns until the fit is trusted.
+It widens the RLS gates with a per-call override during this step;
+the profile's gates stay unchanged. **Recalibrate** restarts the whole
+flow, including camera calibration and the scored Check.
 
 ---
 
