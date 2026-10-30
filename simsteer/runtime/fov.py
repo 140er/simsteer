@@ -19,14 +19,16 @@ FOV never changes while either runs:
      formula above.
   2. Bracket. The vision model also runs on the same frames warped at
      four candidate FOVs around the estimate, one candidate per frame.
+     Each candidate samples all four frame phases so repeating road
+     texture cannot bias one candidate's optical flow.
      The answer is where the candidates' median ratios cross 1,
      interpolated between the two neighbours around the crossing. The
      ratio curve bends near the true FOV, so a straight line through all
      four lands degrees off. If all ratios sit on one side of 1, the
      candidates move that way, at most `MAX_SHIFTS` times.
 
-On the synthetic clips the model reads 3 to 5 percent slow at the true
-FOV, so the answer lands 2 to 3 degrees narrow there. Whether real game
+On the synthetic clips the model reads a few percent slow at the true
+FOV, so the answer lands a few degrees narrow there. Whether real game
 footage has that bias is for the recorded drive to show.
 
 Each FOV step runs one solve, and the flow asks the player to accept the
@@ -48,7 +50,8 @@ FOV_MIN_DEG, FOV_MAX_DEG = 40.0, 150.0
 MIN_SPEED_MPS = 8.0
 MAX_YAW_RAD_S = 0.06
 ESTIMATE_SAMPLES = 40
-CANDIDATE_SAMPLES = 30
+CANDIDATE_PHASE_SAMPLES = 8
+CANDIDATE_SAMPLES = CANDIDATE_PHASE_SAMPLES * FRAME_SKIP
 # Spacing matches FRAME_SKIP, so each candidate's previous warp is the
 # frame the model stacks with the current one.
 CANDIDATE_OFFSETS = (-6.0, -2.0, 2.0, 6.0)
@@ -96,6 +99,7 @@ class FovSolver:
         self._cand_ratios: list[list[float]] = []
         self._prev: list[tuple[np.ndarray, np.ndarray] | None] = []
         self._tick = 0
+        self._candidate_phase = 0
         self.vision_s = 0.0
 
     # ----- progress -----
@@ -153,11 +157,17 @@ class FovSolver:
         self._cand_ratios = [[] for _ in self.candidates]
         self._prev = [None for _ in self.candidates]
         self._tick = 0
+        self._candidate_phase = 0
 
     def _feed_candidate(self, frame, calib, v_ego, yaw_rate, perf_counter) -> None:
         if frame is None:
             return
-        j = self._tick % len(self.candidates)
+        phase = min(len(r) for r in self._cand_ratios) // CANDIDATE_PHASE_SAMPLES
+        if phase != self._candidate_phase:
+            self._candidate_phase = phase
+            # Changing phase breaks the cached pair's four-frame interval.
+            self._prev = [None for _ in self.candidates]
+        j = (self._tick + phase) % len(self.candidates)
         self._tick += 1
         cur = self.views(frame, replace(calib, fov_h_deg=self.candidates[j]))
         prev, self._prev[j] = self._prev[j], cur
@@ -201,6 +211,7 @@ class FovSolver:
             "estimate": self.estimate,
             "candidates": self.candidates,
             "shifts": self.shifts,
+            "tick": self._tick,
             "result": self.result,
             "ratios": [round(r, 6) for r in self._ratios],
             "cand_ratios": [[round(r, 6) for r in rs] for rs in self._cand_ratios],
@@ -212,6 +223,7 @@ class FovSolver:
         self.estimate = d.get("estimate")
         self.candidates = [float(c) for c in d.get("candidates", [])]
         self.shifts = int(d.get("shifts", 0))
+        self._tick = int(d.get("tick", 0))
         self.result = d.get("result")
         self._ratios = [float(r) for r in d.get("ratios", [])]
         self._cand_ratios = [[float(r) for r in rs] for rs in d.get("cand_ratios", [])]

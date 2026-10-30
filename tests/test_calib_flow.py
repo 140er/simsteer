@@ -330,6 +330,39 @@ def test_solver_without_vision_uses_the_estimate():
     assert out == pytest.approx(TRUE_FOV)
 
 
+@pytest.mark.parametrize("resume_at", [None, 95])
+def test_candidate_measurement_handles_periodic_motion_and_resume(resume_at):
+    phases = {}
+
+    def views(frame, calib):
+        pixels = np.zeros((6, 1, 2))
+        pixels[:, 0, 0] = calib.fov_h_deg
+        pixels[:, 0, 1] = frame.item()
+        return pixels, pixels
+
+    def vision(img, big):
+        previous, current = img[0, 0, 0, 1], img[0, 6, 0, 1]
+        assert current - previous == fov.FRAME_SKIP
+        candidate = float(img[0, 6, 0, 0])
+        phase = int(current) % fov.FRAME_SKIP
+        phases.setdefault(candidate, set()).add(phase)
+        bias = (0.72, 1.28, 0.88, 1.12)[phase]
+        return model_vx(candidate) * bias, 0.1
+
+    solver = FovSolver(vision, views)
+    cal = Calibration(fov_h_deg=95.0)
+    for frame in range(500):
+        solver.update(np.array([frame]), cal, model_vx(95.0), 22.0, 0.0)
+        if frame == resume_at:
+            saved = solver.to_dict()
+            solver = FovSolver(vision, views)
+            solver.load_dict(saved)
+        if solver.done:
+            break
+    assert solver.result == pytest.approx(TRUE_FOV, abs=0.5)
+    assert all(seen == {0, 1, 2, 3} for seen in phases.values())
+
+
 # ----- resume -----
 
 def test_resume_mid_camera_and_mid_check(tmp_path):
