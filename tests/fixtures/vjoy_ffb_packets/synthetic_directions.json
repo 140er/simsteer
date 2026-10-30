@@ -1,7 +1,7 @@
 {
  "source": {
   "kind": "synthetic",
-  "note": "synthetic from SDK, to be replaced by recorded packets when Jeffrey allows. Polar, spherical, Y-only and turned-round directions.",
+  "note": "synthetic from SDK, to be replaced by recorded packets. Polar, spherical, Y-only and turned-round directions.",
   "sdk": "BrunnerInnovation vJoy v2.2.2.0 SDK.zip, vjoyinterface.h, public.h"
  },
  "packets": [

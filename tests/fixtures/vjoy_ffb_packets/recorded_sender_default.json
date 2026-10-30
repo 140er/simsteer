@@ -1,8 +1,7 @@
 {
  "source": {
   "kind": "recorded",
-  "note": "Recorded on the simrig: tools/ffb_sender.py --device vjoy (default script, DirectInput on vJoy device 1 only, nothing sent to the DD2) while python -m simsteer.runtime.ffb.vjoy_ffb --record ran. Each packet keeps its raw bytes and the DLL Ffb_h_* reading. The sender log is recorded_sender_default.sender.txt.",
-  "host": "simrig",
+  "note": "Recorded on a Windows 11 test machine with vJoy 2.2.2.0: tools/ffb_sender.py --device vjoy (default script, DirectInput on vJoy device 1 only, nothing sent to the DD2) while python -m simsteer.runtime.ffb.vjoy_ffb --record ran. Each packet keeps its raw bytes and the DLL Ffb_h_* reading. The sender log is recorded_sender_default.sender.txt.",
   "windows": "Windows-10-10.0.26200-SP0",
   "vjoy": "0x222",
   "recorded_at": "2026-10-30T17:30:13+0100",

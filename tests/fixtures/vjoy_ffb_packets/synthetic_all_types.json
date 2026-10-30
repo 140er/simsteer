@@ -1,7 +1,7 @@
 {
  "source": {
   "kind": "synthetic",
-  "note": "synthetic from SDK, to be replaced by recorded packets when Jeffrey allows. Covers every PID packet type and the drops.",
+  "note": "synthetic from SDK, to be replaced by recorded packets. Covers every PID packet type and the drops.",
   "sdk": "BrunnerInnovation vJoy v2.2.2.0 SDK.zip, vjoyinterface.h, public.h"
  },
  "packets": [

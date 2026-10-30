@@ -422,7 +422,6 @@ def record(device_id: int, seconds: float, idle_s: float, path: str, note: str) 
         "source": {
             "kind": "recorded",
             "note": note,
-            "host": platform.node(),
             "windows": platform.platform(),
             "vjoy": f"0x{probe_vjoy(load_dll(), device_id).version or 0:X}",
             "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),

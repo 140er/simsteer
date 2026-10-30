@@ -16,7 +16,7 @@ against dinput.h:
 - The data format reports absolute axes (DIDF_ABSAXIS).
 - The force axis is named by object ID (DIEFF_OBJECTIDS) with the
   actuator's dwType from EnumObjects, 0x01000002 on the DD2. The DD2 answers
-  DIEFF_OBJECTOFFSETS with DIERR_INVALIDPARAM (PR #3, simrig runs).
+  DIEFF_OBJECTOFFSETS with DIERR_INVALIDPARAM (found on real DD2 hardware).
 - DIERR_NOTACQUIRED is 0x8007000C (PR #2 had 0x8007001C).
 - Autocenter goes off before Acquire; the DD2 only accepts it then (PR #3).
 

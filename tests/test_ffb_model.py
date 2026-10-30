@@ -2,7 +2,7 @@
 
 Each fixture in tests/fixtures/vjoy_ffb_packets/ replays through the model
 and must reproduce its .expected.txt call log line for line. Fixtures say
-in their header whether they were recorded on the simrig or built from the
+in their header whether they were recorded on hardware or built from the
 vJoy SDK layout.
 """
 

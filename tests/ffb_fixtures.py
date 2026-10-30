@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT.parent))
 from simsteer.core import ffb_model as fm  # noqa: E402
 
 FIXTURES = ROOT / "fixtures" / "vjoy_ffb_packets"
-SYNTHETIC_NOTE = "synthetic from SDK, to be replaced by recorded packets when Jeffrey allows"
+SYNTHETIC_NOTE = "synthetic from SDK, to be replaced by recorded packets"
 DEV = 1 << 4
 W, F = fm.IOCTL_HID_WRITE_REPORT, fm.IOCTL_HID_SET_FEATURE
 NONE_BUTTON = 0xFF
