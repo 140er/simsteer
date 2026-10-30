@@ -87,26 +87,26 @@ There are two ways to run SimSteer:
 
 5. **Run** `SimSteer.exe`. The launcher tells you what's missing.
 
-6. **Set the camera FOV** (once, by hand — there is no auto-FOV). In the
-   tuner's **Camera & Calibration** section, set **Capture VFOV** to match
-   your in-game field of view (ETS2: Options → Gameplay → Camera; AC:
-   Options → Video → Camera FOV; Forza: Settings → Difficulty → Camera
-   FOV). Then drive a straight road at speed and check the HUD **FOV**
-   line: `ratio vx_model/v_ego` should sit near `1.00`. `>1.05` = FOV too
-   high (narrow it); `<0.95` = too low (widen it). **Wrong FOV is the #1
-   cause of the plan veering off the road** — pitch/yaw/height
-   auto-calibrate, FOV does not. See [docs/TUNING.md](docs/TUNING.md).
+6. **Calibrate** (first drive per game and device). SimSteer walks you through four steps at the top of the overlay, as
+   in `CALIBRATE 2/4 Camera 63% ~3 min`. The target is under 10 minutes of
+   highway driving.
+   1. **FOV.** Drive straight above 30 km/h. SimSteer measures your FOV
+      once and shows it. **INSERT** accepts it, **BACKSPACE** keeps
+      yours. Setting FOV by hand during this step (tuner, `[` `]`) uses
+      that value.
+   2. **Camera.** Drive manually on a highway with small steering
+      inputs; big inputs pause it.
+   3. **Steering.** Press **INSERT** and let SimSteer drive. It asks for
+      a straight stretch, gentle curves, two lane changes and a slow
+      turn while it fits the steering.
+   4. **Check.** Two minutes of engaged highway driving. It ends with
+      `CALIBRATED score 0.86`, or names the step to redo and why and
+      goes back to it.
 
-7. **Calibrate** (first launch per game):
-   - Drive normally on highway for ~10-15 minutes.
-   - A progress bar at the top of the overlay tracks calibration.
-   - Don't yank the wheel — the calibration auto-pauses when it detects
-     human steering input.
-   - When you hear the READY chime (if you've dropped audio files into
-     `assets/` — see [Audio](#audio)) and the banner turns green, press
-     **INSERT** to engage.
+   Progress saves as you go, so quitting resumes where you stopped.
+   **R** starts over at FOV.
 
-8. **Drive.** Press **INSERT** to engage/disengage at any time.
+7. **Drive.** Press **INSERT** to engage/disengage at any time.
 
 ### Configuration
 
@@ -121,7 +121,7 @@ tab — **Setup** — has everything a new user needs to pick:
 - **Output device**: Gamepad (ViGEm) or Wheel (vJoy). Applies on next
   launch; live device-swap is on the Manual tab.
 - **Active steering probing** (default on): the small ±0.03 axis wiggle
-  the wizard uses during Phase B.
+  used during the calibration's Steering step.
 - **Passive LiveParams fit while disengaged** (default off): for games
   whose profile does not allow it, such as ETS2. Risky there — pollutes
   the gamepad fit if you drive with a wheel.
@@ -145,7 +145,8 @@ so leave this off unless you're scripting).
 | `PgUp / PgDn` | NAV: queue LEFT / RIGHT maneuver (global) |
 | `End` | NAV: clear queue (global) |
 | `Q` | Quit (overlay window) |
-| `R` | Reset calibration — wipes LiveCalib + LiveParams + wizard flag, restarts the first-drive wizard. Force-disengages first. (overlay) |
+| `R` | Recalibrate: wipes the camera pose and steering fit and restarts calibration at FOV. Force-disengages first. (overlay) |
+| `BACKSPACE` | Keep your FOV instead of the measured one (overlay, during calibration) |
 | `V` | Toggle model-view / capture-view (overlay) |
 | `M` | Mirror lateral sign (overlay) |
 | `[` `]` `,` `.` `;` `'` | Manual calibration tweaks (overlay) |
@@ -153,7 +154,7 @@ so leave this off unless you're scripting).
 
 ### Active steering probing
 
-During the wizard's Phase B (camera done, steering not yet trusted), SimSteer
+During the calibration's Steering step (camera done, steering not yet trusted), SimSteer
 superimposes a small sinusoidal perturbation (±0.03 axis at ≤12 m/s, scaled
 down at higher speeds) on top of the AI's steering command. This excites the
 rack across its operating range so `LiveParams` gets useful `(axis, wheel)`
@@ -163,7 +164,7 @@ sample). Empirically this converts straight-line driving from 0 useful
 samples to ~80% accepted, cutting steering-fit convergence from "many minutes
 of cornering" to "~15 seconds on a freeway."
 
-Safety: the probe is gated on engaged + wizard Phase B + speed in
+Safety: the probe is gated on engaged + the Steering step + speed in
 `[6, 30] m/s` + no lane change + the AI not already commanding a large
 steer. Once `LiveParams.trusted()` flips True, the probe stops on its own.
 
@@ -176,16 +177,14 @@ If calibration goes bad — symptoms include the truck wandering, lanes
 drawn wrong, or persistent INVALID state in the LIVECALIB HUD line —
 you have three escape hatches:
 
-1. **Press `R`** in the overlay window. Wipes both calibrators and the
-   wizard flag, restarts the first-drive wizard from zero.
-2. **Quit and relaunch with `--reset-calib`**: equivalent to `R` but
-   applied at startup before any state loads.
-3. **Manual**: delete `%LOCALAPPDATA%\SimSteer\livecalib_state_<game>.json`,
-   `liveparams_<game>_<device>.json`, and `first_drive_done_<game>.flag`.
+1. **Press `R`** in the overlay window, or **Recalibrate** in the
+   tuner's Setup section. Both restart calibration at FOV.
+2. **Manual**: delete `%LOCALAPPDATA%\SimSteer\calibflow_<game>_<device>.json`,
+   `livecalib_state_<game>.json` and `liveparams_<game>_<device>.json`.
 
 LiveCalib also auto-recovers if its smoothed estimate goes INVALID for
-3+ consecutive blocks — it resets itself and the wizard hint surfaces
-the reason so you know the bar jumping back to 0% wasn't a glitch.
+3+ consecutive blocks. It resets itself, calibration goes back to the
+Camera step, and the hint says why the bar jumped back to 0%.
 
 ## Troubleshooting
 
@@ -222,12 +221,12 @@ driving are dangerous.
 | | Read-only | Read/write |
 |---|---|---|
 | Models, bundled DLLs | `SimSteer\models\`, `SimSteer\prereqs\` | — |
-| Calibration / steering fits / wizard flags | — | `%LOCALAPPDATA%\SimSteer\` |
+| Calibration / steering fits | — | `%LOCALAPPDATA%\SimSteer\` |
 | Audio | `SimSteer\assets\*.wav` | — |
 
 To start calibration over for a game, delete the matching files in
 `%LOCALAPPDATA%\SimSteer\` (e.g. `livecalib_state_ets2.json`,
-`liveparams_ets2_gamepad.json`, `first_drive_done_ets2.flag`).
+`liveparams_ets2_gamepad.json`, `calibflow_ets2_gamepad.json`).
 
 ## Dev install
 

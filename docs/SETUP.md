@@ -219,13 +219,26 @@ knobs). The console / launcher tells you what's missing if a preflight
 check fails.
 
 ### First drive (calibration)
-1. Drive **manually** on a highway for ~10–15 minutes. A progress banner
-   tracks calibration.
-2. Don't yank the wheel — calibration auto-pauses when it sees human
-   steering input.
-3. When the banner turns green / you hear the ready chime, press
-   **INSERT** to engage.
-4. **INSERT** toggles engage/disengage any time.
+SimSteer walks you through four steps at the top of the overlay, as
+in `CALIBRATE 2/4 Camera 63% ~3 min`. The target is under 10 minutes of
+highway driving.
+1. **FOV.** Drive straight above 30 km/h. SimSteer measures your FOV
+   once and shows it. **INSERT** accepts it, **BACKSPACE** keeps
+   yours. Setting FOV by hand during this step (tuner, `[` `]`) uses
+   that value.
+2. **Camera.** Drive manually on a highway with small steering
+   inputs; big inputs pause it.
+3. **Steering.** Press **INSERT** and let SimSteer drive. It asks for
+   a straight stretch, gentle curves, two lane changes and a slow
+   turn while it fits the steering.
+4. **Check.** Two minutes of engaged highway driving. It ends with
+   `CALIBRATED score 0.86`, or names the step to redo and why and
+   goes back to it.
+
+Progress saves as you go, so quitting resumes where you stopped.
+**R** starts over at FOV.
+
+**INSERT** toggles engage/disengage any time.
 
 See [docs/TUNING.md](TUNING.md) for what every knob does and how to fix
 bad driving, and [docs/ARCHITECTURE.md](ARCHITECTURE.md) for how the
@@ -266,10 +279,9 @@ full release/zip checklist.
 | `--max-width N` | 1600 | Cap overlay window width (px). |
 | `--no-gamepad` | off | Run overlay + model but open no virtual device. Skips ViGEm/vJoy preflight. Dry-run. |
 | `--no-tuner` | off | Don't open the tuner window. (You lose the Setup tab too.) |
-| `--no-probe` | off | Disable the active-steering probe used during the calibration wizard. |
+| `--no-probe` | off | Disable the active-steering probe used during the calibration's Steering step. |
 | `--passive-fit` | off | Allow LiveParams to learn while disengaged in games whose profile does not set `passive_fit_safe`, such as ETS2 (risky — see TUNING.md). `--passive-fit-ets2` still works. |
 | `--force-engage` | off | **Dev only.** Bypass the calibration / FPS / telemetry engage gate. |
-| `--reset-calib` | — | Wipe LiveCalib + LiveParams + wizard flag at startup and recalibrate from zero. |
 | `--record DIR` | — | Record 960 px JPEG frames and telemetry to `DIR` while you drive. Stops after `--seconds` (default 900) or Ctrl+C. |
 | `--source CLIP` | — | Replay a recorded clip folder (or video) through the loop instead of the screen. No device output; starts from the clip's saved state and never touches yours. |
 | `--headless` | off | No window, no tuner, no keys. |
@@ -297,12 +309,12 @@ python tools\replay_bench.py --trunk origin/main --head HEAD --runs 3
 | | Location |
 |---|---|
 | Models, bundled DLLs | `models\`, `prereqs\` (read-only) |
-| Per-user calibration / steering fits / wizard flags | `%LOCALAPPDATA%\SimSteer\` (read/write) |
+| Per-user calibration / steering fits | `%LOCALAPPDATA%\SimSteer\` (read/write) |
 | Audio cues | `assets\*.wav` (optional, read-only) |
 
 To restart calibration for a game, delete its files in
 `%LOCALAPPDATA%\SimSteer\` (`livecalib_state_<game>.json`,
-`liveparams_<game>_<device>.json`, `first_drive_done_<game>.flag`) — or
+`liveparams_<game>_<device>.json`, `calibflow_<game>_<device>.json`), or
 just press `R` in the overlay.
 
 ## Troubleshooting
