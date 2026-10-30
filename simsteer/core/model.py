@@ -13,6 +13,9 @@ Each step:
 
 from __future__ import annotations
 
+import base64
+import io
+import pickle
 from collections import deque
 from pathlib import Path
 
@@ -25,6 +28,9 @@ from simsteer.core.constants import (
     FEATURE_BUFFER_LEN,
     FEATURE_LEN,
     FRAME_SKIP,
+    MODEL_H,
+    MODEL_W,
+    POLICY_SLICES,
     VISION_SLICES,
 )
 from simsteer.paths import model_path
@@ -37,6 +43,8 @@ def _make_session(path: Path, providers: list[str]) -> ort.InferenceSession:
     if not path.exists():
         raise FileNotFoundError(
             f"{path} missing — run `python tools/fetch_model.py`")
+    available = set(ort.get_available_providers())
+    providers = [p for p in providers if p in available] or ["CPUExecutionProvider"]
     return ort.InferenceSession(str(path), providers=providers)
 
 
@@ -122,3 +130,81 @@ class DrivingModel:
         policy_flat = policy_outputs[0].astype(np.float32).reshape(-1)
 
         return vision_flat, policy_flat
+
+
+class _SliceUnpickler(pickle.Unpickler):
+    def find_class(self, module: str, name: str):
+        if (module, name) == ("builtins", "slice"):
+            return slice
+        raise pickle.UnpicklingError(f"refusing {module}.{name} in model metadata")
+
+
+def _output_slices(sess: ort.InferenceSession, total: int
+                   ) -> dict[str, tuple[int, int]] | None:
+    raw = sess.get_modelmeta().custom_metadata_map.get("output_slices")
+    if raw is None:
+        return None
+    slices = _SliceUnpickler(io.BytesIO(base64.b64decode(raw))).load()
+    return {k: (v.start or 0, total if v.stop is None else v.stop)
+            for k, v in slices.items()}
+
+
+def check_contract(vision_path: Path, policy_path: Path) -> list[str]:
+    """Check both models against the layout in `constants.py`: input names,
+    shapes and dtypes, flat output width, the embedded output slices, and a
+    zero-input step through `decode`. Returns a list of problems."""
+    from simsteer.core.postprocess import decode
+
+    img = [1, 2 * 6, MODEL_H, MODEL_W]
+    want_inputs = {
+        "vision": {"img": (img, "tensor(uint8)"),
+                   "big_img": (img, "tensor(uint8)")},
+        "policy": {"desire_pulse": ([1, DESIRE_BUFFER_LEN, DESIRE_LEN], "tensor(float16)"),
+                   "traffic_convention": ([1, 2], "tensor(float16)"),
+                   "features_buffer": ([1, FEATURE_BUFFER_LEN, FEATURE_LEN],
+                                       "tensor(float16)")},
+    }
+    tables = {"vision": VISION_SLICES, "policy": POLICY_SLICES}
+    # The flat outputs end in padding that the slice tables leave out.
+    widths = {"vision": 1576, "policy": 1000}
+    problems: list[str] = []
+    sessions = {}
+    for kind, path in (("vision", vision_path), ("policy", policy_path)):
+        sess = _make_session(path, ["CPUExecutionProvider"])
+        sessions[kind] = sess
+        got = {i.name: (list(i.shape), i.type) for i in sess.get_inputs()}
+        if got != want_inputs[kind]:
+            problems.append(f"{kind} inputs {got} != {want_inputs[kind]}")
+        outs = sess.get_outputs()
+        width = widths[kind]
+        if len(outs) != 1 or outs[0].shape[-1] != width:
+            problems.append(f"{kind} outputs {[(o.name, o.shape) for o in outs]}, "
+                            f"want one output of width {width}")
+            continue
+        slices = _output_slices(sess, width)
+        if slices is not None:
+            slices.pop("pad", None)
+        if slices is not None and slices != tables[kind]:
+            problems.append(f"{kind} output_slices {slices} != {tables[kind]}")
+    if problems:
+        return problems
+
+    vision = sessions["vision"].run(None, {
+        "img": np.zeros(img, np.uint8), "big_img": np.zeros(img, np.uint8)})[0]
+    policy = sessions["policy"].run(None, {
+        k: np.zeros(shape, np.float16)
+        for k, (shape, _) in want_inputs["policy"].items()})[0]
+    d = decode(vision.astype(np.float32).reshape(-1),
+               policy.astype(np.float32).reshape(-1))
+    for name, arr, shape in (("plan", d.plan, (33, 15)),
+                             ("lane_lines", d.lane_lines, (4, 33, 2)),
+                             ("road_edges", d.road_edges, (2, 33, 2)),
+                             ("pose", d.pose, (6,)),
+                             ("road_transform", d.road_transform, (6,)),
+                             ("desire_state", d.desire_state, (DESIRE_LEN,)),
+                             ("leads", d.leads, (3, 6, 4))):
+        if arr.shape != shape:
+            problems.append(f"decoded {name} shape {arr.shape} != {shape}")
+        elif not np.all(np.isfinite(arr)):
+            problems.append(f"decoded {name} is not finite on a zero input")
+    return problems

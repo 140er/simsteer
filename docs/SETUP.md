@@ -72,9 +72,12 @@ repo). Fetch them once:
 python tools\fetch_model.py
 ```
 
-This sparse-clones openpilot, LFS-pulls `driving_vision.onnx` (~45 MB)
-and `driving_policy.onnx` (~14 MB) into `models\`, then cleans up the
-temp clone. Verify:
+This downloads `driving_vision.onnx` (~47 MB) and `driving_policy.onnx`
+(~14 MB) over HTTPS from one pinned openpilot commit, checks their SHA256
+in a cache (`~\.cache\simsteer\models`), then copies them into
+`models\`. A cached file with the wrong hash is refused and downloaded
+again. Add `--check` to also check the models' inputs and outputs against
+`simsteer\core\constants.py`. Verify:
 
 ```powershell
 Get-ChildItem models\*.onnx
@@ -266,9 +269,25 @@ full release/zip checklist.
 | `--passive-fit-ets2` | off | Allow LiveParams to learn while disengaged on ETS2 (risky — see TUNING.md). |
 | `--force-engage` | off | **Dev only.** Bypass the calibration / FPS / telemetry engage gate. |
 | `--reset-calib` | — | Wipe LiveCalib + LiveParams + wizard flag at startup and recalibrate from zero. |
+| `--record DIR` | — | Record 960 px JPEG frames and telemetry to `DIR` while you drive. Stops after `--seconds` (default 900) or Ctrl+C. |
+| `--source CLIP` | — | Replay a recorded clip folder (or video) through the loop instead of the screen. No device output; starts from the clip's saved state and never touches yours. |
+| `--headless` | off | No window, no tuner, no keys. |
+| `--max-frames N` | — | Stop after N frames. |
+| `--log-jsonl PATH` | — | One JSON line per frame: `t`, `v_ego`, `steer_axis`, `curvature`, throttle, brake, engaged, telemetry state. Two replays of one clip write identical files. |
+| `--log-timing` | off | Add per-stage `cap_ms`, `warp_ms`, `model_ms`, `ctrl_ms`, `frame_ms` to the log lines (these differ run to run). |
 
 CLI flags override saved settings for that run only;
 `%LOCALAPPDATA%\SimSteer\settings.json` holds the persistent defaults.
+
+Replay a drive headless, for example to compare a change against a
+recorded clip or to time the loop:
+
+```powershell
+python -m simsteer --record clips\drive1 --seconds 900
+python -m simsteer --source clips\drive1 --headless --log-jsonl out.jsonl
+python tools\make_synthetic_clip.py        # a clip without a game
+python tools\replay_bench.py --trunk origin/main --head HEAD --runs 3
+```
 
 ---
 
