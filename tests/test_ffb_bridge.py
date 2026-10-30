@@ -112,7 +112,7 @@ def test_forwards_and_renews_while_the_game_plays():
     constant_game(src)
     run_until(b, clock, 0.35)
     ops = [c.op for c in sink.calls]
-    assert ops[:5] == ["SetGain", "SetGain", "CreateEffect", "SetParameters", "SetParameters"]
+    assert ops[:6] == ["SetGain", "Command", "SetGain", "CreateEffect", "SetParameters", "SetParameters"]
     renewals = [c for c in sink.calls if c.op == "SetParameters" and c.flags & fm.DIEP_START]
     assert len(renewals) == 3
     assert b.status == "FFB pass 0 unknown"
@@ -123,7 +123,7 @@ def test_unknown_packets_reach_the_hud_and_not_the_wheel():
     b, src, sink, clock = make()
     src.push(0.01, fx.raw(fm.IOCTL_HID_WRITE_REPORT, [0x17, 1, 0, 0]))
     run_until(b, clock, 0.05)
-    assert [c.op for c in sink.calls] == ["SetGain"]
+    assert [c.op for c in sink.calls] == ["SetGain", "Command"]  # only what opening the wheel sends
     assert b.status == "FFB pass 1 unknown"
 
 
@@ -148,7 +148,7 @@ def test_waits_without_a_wheel_then_rebuilds_it():
     sink.present = True
     run_until(b, clock, 1.2)
     assert b.device_open
-    assert [c.op for c in sink.calls][:5] == ["SetGain", "CreateEffect", "SetParameters", "Start", "SetParameters"]
+    assert [c.op for c in sink.calls][:5] == ["SetGain", "Command", "CreateEffect", "SetParameters", "Start"]
     assert sink.calls[0].value == 500
 
 
@@ -163,7 +163,7 @@ def test_lost_wheel_is_reopened_and_replayed():
     sink.calls.clear()
     run_until(b, clock, 1.3)
     assert b.device_open and sink.opened == 2
-    assert [c.op for c in sink.calls][:4] == ["SetGain", "CreateEffect", "SetParameters", "Start"]
+    assert [c.op for c in sink.calls][:5] == ["SetGain", "Command", "CreateEffect", "SetParameters", "Start"]
 
 
 def test_unattended_never_opens_a_wheel():

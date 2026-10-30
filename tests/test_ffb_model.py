@@ -401,10 +401,11 @@ def test_replay_rebuilds_the_wheel():
     start_constant(model, ebi=1)
     start_constant(model, ebi=2, duration=100)
     calls = model.replay(5.0)
-    assert [c.op for c in calls] == ["SetGain", "CreateEffect", "SetParameters", "Start", "CreateEffect", "SetParameters"]
-    assert calls[0].value == 5020
-    assert calls[2].params == fm.DiParams(duration=200_000, gain=10000, type_specific=fm.DiConstant(3000))
-    assert not calls[2].flags & fm.DIEP_NODOWNLOAD
+    assert [c.op for c in calls] == ["SetGain", "Command", "CreateEffect", "SetParameters", "Start",
+                                     "CreateEffect", "SetParameters"]
+    assert calls[0].value == 5020 and calls[1].text() == "Command SETACTUATORSON"
+    assert calls[3].params == fm.DiParams(duration=200_000, gain=10000, type_specific=fm.DiConstant(3000))
+    assert not calls[3].flags & fm.DIEP_NODOWNLOAD
     assert model.next_rearm() == pytest.approx(5.1)
 
 

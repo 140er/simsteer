@@ -939,12 +939,12 @@ class FfbModel:
 
     def replay(self, now: float) -> list[DiCall]:
         """Calls that put the current effect table on a freshly opened wheel:
-        device gain, every effect with its parameters, and the effects that
+        device gain, actuator state, every effect with its parameters, and the effects that
         play without end restarted where they were. Finite effects that were
         playing are not restarted; they would replay from their beginning."""
-        calls = [DiCall("SetGain", value=self.device_gain)]
-        if not self.actuators_on:
-            calls.append(DiCall("Command", flags=DISFFC_SETACTUATORSOFF))
+        # The game turned the actuators on long before this wheel was opened.
+        actuators = DISFFC_SETACTUATORSON if self.actuators_on else DISFFC_SETACTUATORSOFF
+        calls = [DiCall("SetGain", value=self.device_gain), DiCall("Command", flags=actuators)]
         for ebi in sorted(self.slots):
             s = self.slots[ebi]
             calls.append(DiCall("CreateEffect", ebi, s.kind))
