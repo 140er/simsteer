@@ -261,6 +261,7 @@ class _Persisted:
     b: float = B_INIT
     c: float = C_INIT
     samples: int = 0
+    axis_sign: int | None = None
 
 
 class LiveParams:
@@ -302,6 +303,7 @@ class LiveParams:
                   f"a={loaded.a:.3f} b={loaded.b:.4f} c={loaded.c:+.4f}")
         # State vector x = [a, b, c]: axis = a·wheel + b·wheel·v² + c.
         self.x = np.array([loaded.a, loaded.b, loaded.c], dtype=np.float64)
+        self.axis_sign = loaded.axis_sign
         # Initial state-covariance diagonal (P0). Per-game — Forza/AC
         # use bigger values to converge from defaults faster, ETS2
         # uses the tighter values that worked there. The b prior is
@@ -769,6 +771,9 @@ class LiveParams:
         point a fresh cold start would use, not the universal
         A_INIT/B_INIT/C_INIT."""
         a, b, c = _seed_for(self.seeds, self.device_kind)
+        if self.axis_sign is not None:
+            a = self.axis_sign * max(abs(a), A_ABS_MIN_RUNTIME)
+            b = self.axis_sign * abs(b)
         self.x = np.array([a, b, c], dtype=np.float64)
         self.P = np.diag(self._gates["P_init"])
         self.samples = 0
@@ -813,6 +818,16 @@ class LiveParams:
         lifetime activity."""
         self.P = np.diag(self._gates["P_init"])
         self._consecutive_bad_fit = 0
+
+    def set_axis_sign(self, sign: int) -> None:
+        """Use the independently measured input direction as the seed.
+        A trusted fit otherwise cannot promptly escape an inverted axis."""
+        if sign not in (-1, 1):
+            raise ValueError("axis sign must be -1 or 1")
+        self.axis_sign = sign
+        if self.a_linear * sign <= 0:
+            self.reset(wipe_disk=True)
+        self.save()
 
     # ----- persistence -----
 
@@ -910,7 +925,10 @@ class LiveParams:
                      and abs(c) <= _GATES_DEFAULT["c_abs_max"])
         if not in_bounds:
             return _seeded()
-        return _Persisted(a=a, b=b, c=c, samples=samples)
+        axis_sign = data.get("axis_sign")
+        if axis_sign not in (-1, 1):
+            axis_sign = None
+        return _Persisted(a=a, b=b, c=c, samples=samples, axis_sign=axis_sign)
 
     def save(self, path: Path | None = None) -> None:
         if path is None:
@@ -926,6 +944,7 @@ class LiveParams:
                 "b": self.b_quad,
                 "c": self.c_bias,
                 "samples": self.samples,
+                "axis_sign": self.axis_sign,
             }, indent=2))
         except OSError:
             pass
@@ -958,6 +977,7 @@ class LiveParams:
                   f"seeded for game={self.game!r}: "
                   f"a={loaded.a:.3f} b={loaded.b:.4f} c={loaded.c:+.4f}")
         self.x = np.array([loaded.a, loaded.b, loaded.c], dtype=np.float64)
+        self.axis_sign = loaded.axis_sign
         self.P = np.diag(self._gates["P_init"])
         self.samples = loaded.samples
         self.session_samples = 0

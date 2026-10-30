@@ -321,6 +321,12 @@ def run(settings: Settings, game: GameProfile | str, *,
                 restart_reason = flow.take_restart_request()
                 if restart_reason:
                     restart_calibration(restart_reason)
+                if live_params.device_kind != flow.device:
+                    if pad is not None and pad.engaged:
+                        pad.disengage()
+                    flow.switch_device(live_params.device_kind)
+                    lat_ctrl.reset()
+                    long_ctrl.reset()
                 if not headless and not window_open:
                     h, w = frame.shape[:2]
                     win_w = min(w, settings.max_width)
@@ -390,8 +396,10 @@ def run(settings: Settings, game: GameProfile | str, *,
                 # --- Lateral + longitudinal control ---
                 ai_steer = lat_ctrl.compute(
                     decoded, v_ego, actual_wheel_angle=wheel_angle,
-                    lane_change_command_active=lane_change_active, dt=dt)
-                ai_steer *= calib.lateral_sign
+                    lane_change_command_active=lane_change_active, dt=dt,
+                    wheel_sign=flow.steering_sign)
+                if flow.steering_fit and not flow.direction.ready:
+                    ai_steer = 0.0
                 steer = manual.steer if manual.steer_override else ai_steer
                 if pad is not None and not manual.steer_override:
                     steer += probe.tick(
@@ -449,14 +457,24 @@ def run(settings: Settings, game: GameProfile | str, *,
                     audio.play("disengage")
                     set_banner("DISENGAGED", COL_ACCENT_BLUE, 2.0)
                 was_engaged_last_frame = engaged_now
+                direction_was_ready = flow.direction.ready
                 flow.tick(Obs(
                     now=now, dt=dt, v=v_real, yaw_rate=actual_yaw,
                     wheel=wheel_angle, vx_model=vx,
+                    observed_axis=game_steer,
+                    model_curvature=lat_ctrl.last_curvature,
                     lane_offset=_lane_offset(decoded), axis=float(steer),
                     driving=engaged_now or pad is None, engaged=engaged_now,
                     lane_change=(lane_change_active
                                  or lat_ctrl.last_in_lane_change),
                     telemetry_ok=tel.available))
+                if flow.direction.ready and not direction_was_ready:
+                    lat_ctrl.reset()
+                if (flow.steering_fit and not flow.direction.ready
+                        and pad is not None and pad.engaged):
+                    pad.disengage()
+                    lat_ctrl.reset()
+                    long_ctrl.reset()
                 allowed, blocked_reason = engage_check()
                 t_render = time.perf_counter()
 
@@ -562,6 +580,9 @@ def run(settings: Settings, game: GameProfile | str, *,
                         "v_ego": round(float(v_ego), 4),
                         "steer_axis": round(float(steer), 6),
                         "curvature": round(float(lat_ctrl.last_curvature), 7),
+                        "target_wheel": round(float(lat_ctrl.last_target_wheel), 7),
+                        "wheel_angle": wheel_angle,
+                        "observed_axis": game_steer,
                         "throttle": round(float(throttle_out), 4),
                         "brake": round(float(brake_out), 4),
                         "engaged": engaged_now,

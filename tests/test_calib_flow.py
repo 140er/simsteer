@@ -54,6 +54,8 @@ class FakeLiveParams:
     a_linear, b_quad, c_bias = 3.5, 0.0015, 0.0
 
     def __init__(self, samples: int = 0) -> None:
+        self.lag_frames = 1
+        self.axis_sign = None
         self.samples = samples
         self.session_samples = 0
         self.predictions = 0
@@ -70,6 +72,9 @@ class FakeLiveParams:
 
     def reset_covariance_only(self) -> None:
         pass
+
+    def set_axis_sign(self, sign: int) -> None:
+        self.axis_sign = sign
 
     def predict(self, error: float, actual: float = 0.1) -> None:
         self.predictions += 1
@@ -118,6 +123,15 @@ class Driver:
                                    model_vx(self.flow.calib.fov_h_deg), o["v"], 0.0)
             self.flow.tick(Obs(now=self.t, dt=0.05, **o))
 
+    def verify_direction(self) -> None:
+        # A real manual drive through both bends, independent of AI output.
+        for i in range(180):
+            if self.flow.direction.ready:
+                return
+            wheel = 0.015 * math.sin(2 * math.pi * i / 90)
+            self.frames(1, wheel=wheel, observed_axis=4.0 * wheel,
+                        model_curvature=wheel / 2.65, engaged=False)
+
     def until(self, step: Step, limit: int = 20000, **obs) -> None:
         for _ in range(limit):
             if self.flow.step is step:
@@ -142,6 +156,8 @@ def steps_seen(flow: CalibFlow, lc: FakeLiveCalib, lp: FakeLiveParams) -> list[S
         if flow.step is Step.CAMERA:
             lc.converge()
         if flow.step is Step.STEERING:
+            if not flow.direction.ready:
+                d.verify_direction()
             lp.samples = TRUSTED_MIN_SAMPLES
         if flow.step in (Step.DONE, Step.FAILED):
             break
@@ -168,12 +184,14 @@ def test_generic_profile_skips_steering_and_keeps_its_seed():
     assert lp.wipes == 0
 
 
-def test_converged_learners_pass_their_steps_at_once():
+def test_converged_learners_still_require_manual_direction_evidence():
     lc, lp = FakeLiveCalib(), FakeLiveParams(samples=500)
     lc.converge()
     flow = new_flow(lc, lp, cal=Calibration(fov_h_deg=75.5),
                     fov_config=lambda aspect: 75.0)
     Driver(flow).frames(1)
+    assert flow.step is Step.STEERING and flow.engage_block()
+    Driver(flow).verify_direction()
     assert flow.step is Step.CHECK
     assert lc.resets == []
 
@@ -200,7 +218,9 @@ def test_engage_is_blocked_until_the_camera_is_calibrated():
     assert flow.step is Step.CAMERA and flow.engage_block()
     lc.converge()
     d.frames(1)
-    assert flow.step is Step.STEERING and flow.engage_block() == ""
+    assert flow.step is Step.STEERING and flow.engage_block()
+    d.verify_direction()
+    assert flow.engage_block() == ""
     assert flow.probe_wanted and flow.gate_override is not None
 
 
@@ -405,6 +425,7 @@ def test_resume_mid_camera_and_mid_check(tmp_path):
     lc.converge()
     lp.samples = TRUSTED_MIN_SAMPLES
     d = Driver(again)
+    d.verify_direction()
     d.until(Step.CHECK)
     d.frames(1000)
     seconds = again.check.seconds
@@ -449,6 +470,9 @@ def _to_check(flow, lc, lp) -> Driver:
             flow.accept_fov()
         if flow.step is Step.CAMERA:
             lc.converge()
+        if flow.step is Step.STEERING and not flow.direction.ready:
+            d.verify_direction()
+            continue
         d.frames(1)
     raise AssertionError(f"stuck at {flow.step}")
 
@@ -467,6 +491,8 @@ def test_failed_check_redoes_steering_with_a_fresh_fit_then_stops():
     assert "mispredicts" in flow.redo_note
 
     lp.samples = TRUSTED_MIN_SAMPLES
+    assert flow.engage_block()
+    d.verify_direction()
     d.until(Step.CHECK)
     for _ in range(3000):
         lp.predict(error=0.9)
@@ -530,6 +556,8 @@ def test_hud_panel_shows_step_percent_and_eta():
 
     lc.converge()
     d.frames(1)
+    assert flow.panel(22.0, engaged=False).hint == "Drive gentle left and right bends manually"
+    d.verify_direction()
     assert flow.panel(22.0, engaged=False).hint == "Press INSERT and let SimSteer drive"
     lp.samples = TRUSTED_MIN_SAMPLES
     d.until(Step.DONE)

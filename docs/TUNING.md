@@ -23,7 +23,8 @@ A fresh setup, in order:
    two minute Check. The FOV step measures your FOV once and asks you
    to accept it; wrong FOV means wrong geometry and a plan that veers
    off the road. Camera converges LiveCalib (pitch/yaw/height) and
-   Steering converges LiveParams (the rack fit). Don't fight the wheel.
+   Steering first verifies direction from manual left and right bends,
+   then converges LiveParams (the rack fit) while SimSteer drives.
 2. The Check scores the drive. It passes, or names the step to redo:
    weaving, full-lock steering or a steering model that mispredicts the
    wheel point at Steering; model speed that disagrees with the game
@@ -41,7 +42,7 @@ A fresh setup, in order:
 | **Pitch / Yaw** | Camera mount angles. Auto-written by LiveCalib; only override if the cyan horizon line visibly drifts off the real horizon. |
 | **Camera height** | Height above road (m). Auto-refined by LiveCalib. |
 | **Crop top / bottom** | Hide cab roof / hood from the model input. |
-| **Mirror lateral sign** | Flip steering direction if the truck steers the wrong way. |
+| **Mirror lateral sign** | Mirror the road projection. With wheel telemetry, calibration learns steering direction separately. |
 | **Simple warp** | Crop+resize (default) vs full perspective warp. Leave on. |
 
 **FOV health check** (HUD `FOV` line, dev HUD): drive straight at highway
@@ -124,7 +125,14 @@ wash out when you're back on the highway.
 steer or wildly oversteers): hit **Reset RLS**, then drive highway until
 trusted again.
 
-The guided flow's **Steering** step prompts for a straight stretch,
+The guided flow's **Steering** step first asks for manual left and right
+bends. It compares model curvature and the observed input axis with
+measured wheel angle, including the input delay. Both directions and
+strong correlation are required before engagement. Inverted input
+reseeds the rack fit with the measured sign. The correction saves per
+game and device; restarting calibration verifies it again.
+
+After direction is verified, the step prompts for a straight stretch,
 gentle curves, lane changes and slow turns until the fit is trusted.
 It widens the RLS gates with a per-call override during this step;
 the profile's gates stay unchanged. **Recalibrate** restarts the whole

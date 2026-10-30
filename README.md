@@ -96,7 +96,11 @@ There are two ways to run SimSteer:
       that value.
    2. **Camera.** Drive manually on a highway with small steering
       inputs; big inputs pause it.
-   3. **Steering.** Press **INSERT** and let SimSteer drive. It asks for
+   3. **Steering.** First drive gentle left and right bends manually.
+      SimSteer compares the model, input axis and measured wheel angle
+      to detect and correct inverted steering. It saves the correction
+      for this game and device. Then press **INSERT** and let SimSteer
+      drive. It asks for
       a straight stretch, gentle curves, two lane changes and a slow
       turn while it fits the steering.
    4. **Check.** Two minutes of engaged highway driving. It ends with
