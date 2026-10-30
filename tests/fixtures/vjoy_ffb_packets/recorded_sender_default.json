@@ -1,0 +1,1462 @@
+{
+ "source": {
+  "kind": "recorded",
+  "note": "Recorded on the simrig: tools/ffb_sender.py --device vjoy (default script, DirectInput on vJoy device 1 only, nothing sent to the DD2) while python -m simsteer.runtime.ffb.vjoy_ffb --record ran. Each packet keeps its raw bytes and the DLL Ffb_h_* reading. The sender log is recorded_sender_default.sender.txt.",
+  "host": "simrig",
+  "windows": "Windows-10-10.0.26200-SP0",
+  "vjoy": "0x222",
+  "recorded_at": "2026-10-30T17:30:13+0100",
+  "head": "af13abb"
+ },
+ "packets": [
+  {
+   "t": 0.0,
+   "cmd": 720911,
+   "data": "1c04",
+   "dll": {
+    "rc": 0,
+    "type": 12,
+    "Control": 4
+   }
+  },
+  {
+   "t": 0.000109,
+   "cmd": 720911,
+   "data": "1c03",
+   "dll": {
+    "rc": 0,
+    "type": 12,
+    "Control": 3
+   }
+  },
+  {
+   "t": 0.000165,
+   "cmd": 720911,
+   "data": "1dff",
+   "dll": {
+    "rc": 0,
+    "type": 13,
+    "Gain": 255
+   }
+  },
+  {
+   "t": 0.001875,
+   "cmd": 720911,
+   "data": "1dff",
+   "dll": {
+    "rc": 0,
+    "type": 13,
+    "Gain": 255
+   }
+  },
+  {
+   "t": 0.012448,
+   "cmd": 720911,
+   "data": "1c01",
+   "dll": {
+    "rc": 0,
+    "type": 12,
+    "Control": 1
+   }
+  },
+  {
+   "t": 0.044074,
+   "cmd": 721297,
+   "data": "11010100",
+   "dll": {
+    "rc": 0,
+    "type": 17,
+    "EffectType": 1,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 0.04418,
+   "cmd": 720911,
+   "data": "1501b80b",
+   "dll": {
+    "rc": 0,
+    "type": 5,
+    "EffectBlockIndex": 1,
+    "Magnitude": 3000
+   }
+  },
+  {
+   "t": 0.04425,
+   "cmd": 720911,
+   "data": "1101019001000000000000ffff04ff1f000000000000",
+   "dll": {
+    "rc": 0,
+    "type": 1,
+    "EffectBlockIndex": 1,
+    "EffectType": 1,
+    "Duration": 400,
+    "TrigerRpt": 0,
+    "SamplePrd": 0,
+    "StartDelay": 0,
+    "Gain": 255,
+    "TrigerBtn": 255,
+    "AxesEnabledDirection": 4,
+    "Polar": 1,
+    "DirX": 8191,
+    "DirY": 0
+   }
+  },
+  {
+   "t": 0.052428,
+   "cmd": 720911,
+   "data": "1a010101",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 1,
+    "LoopCount": 1
+   }
+  },
+  {
+   "t": 0.102362,
+   "cmd": 720911,
+   "data": "15013cf6",
+   "dll": {
+    "rc": 0,
+    "type": 5,
+    "EffectBlockIndex": 1,
+    "Magnitude": 63036
+   }
+  },
+  {
+   "t": 0.152231,
+   "cmd": 720911,
+   "data": "1501dc05",
+   "dll": {
+    "rc": 0,
+    "type": 5,
+    "EffectBlockIndex": 1,
+    "Magnitude": 1500
+   }
+  },
+  {
+   "t": 0.202037,
+   "cmd": 720911,
+   "data": "1501f0d8",
+   "dll": {
+    "rc": 0,
+    "type": 5,
+    "EffectBlockIndex": 1,
+    "Magnitude": 55536
+   }
+  },
+  {
+   "t": 0.252314,
+   "cmd": 720911,
+   "data": "15011027",
+   "dll": {
+    "rc": 0,
+    "type": 5,
+    "EffectBlockIndex": 1,
+    "Magnitude": 10000
+   }
+  },
+  {
+   "t": 0.402086,
+   "cmd": 720911,
+   "data": "1a010300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 0.412318,
+   "cmd": 720911,
+   "data": "1a010300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 0.412414,
+   "cmd": 720911,
+   "data": "1b01",
+   "dll": {
+    "rc": 0,
+    "type": 11,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 0.442444,
+   "cmd": 721297,
+   "data": "11010100",
+   "dll": {
+    "rc": 0,
+    "type": 17,
+    "EffectType": 1,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 0.442538,
+   "cmd": 720911,
+   "data": "150160f0",
+   "dll": {
+    "rc": 0,
+    "type": 5,
+    "EffectBlockIndex": 1,
+    "Magnitude": 61536
+   }
+  },
+  {
+   "t": 0.44259,
+   "cmd": 720911,
+   "data": "12010000e8032c01000064000000",
+   "dll": {
+    "rc": 0,
+    "type": 2,
+    "EffectBlockIndex": 1,
+    "AttackLevel": 0,
+    "FadeLevel": 1000,
+    "AttackTime": 300,
+    "FadeTime": 100
+   }
+  },
+  {
+   "t": 0.442659,
+   "cmd": 720911,
+   "data": "110101ffff000000000000bfff04ff1f000000000000",
+   "dll": {
+    "rc": 0,
+    "type": 1,
+    "EffectBlockIndex": 1,
+    "EffectType": 1,
+    "Duration": 65535,
+    "TrigerRpt": 0,
+    "SamplePrd": 0,
+    "StartDelay": 0,
+    "Gain": 191,
+    "TrigerBtn": 255,
+    "AxesEnabledDirection": 4,
+    "Polar": 1,
+    "DirX": 8191,
+    "DirY": 0
+   }
+  },
+  {
+   "t": 0.452095,
+   "cmd": 720911,
+   "data": "1a010101",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 1,
+    "LoopCount": 1
+   }
+  },
+  {
+   "t": 0.752221,
+   "cmd": 720911,
+   "data": "110101ffff0000000000007fff04ff1f000000000000",
+   "dll": {
+    "rc": 0,
+    "type": 1,
+    "EffectBlockIndex": 1,
+    "EffectType": 1,
+    "Duration": 65535,
+    "TrigerRpt": 0,
+    "SamplePrd": 0,
+    "StartDelay": 0,
+    "Gain": 127,
+    "TrigerBtn": 255,
+    "AxesEnabledDirection": 4,
+    "Polar": 1,
+    "DirX": 8191,
+    "DirY": 0
+   }
+  },
+  {
+   "t": 1.052082,
+   "cmd": 720911,
+   "data": "1a010300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 1.062443,
+   "cmd": 720911,
+   "data": "1a010300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 1.062574,
+   "cmd": 720911,
+   "data": "1b01",
+   "dll": {
+    "rc": 0,
+    "type": 11,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 1.092584,
+   "cmd": 721297,
+   "data": "11020100",
+   "dll": {
+    "rc": 0,
+    "type": 17,
+    "EffectType": 2,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 1.092722,
+   "cmd": 720911,
+   "data": "160130f8d007",
+   "dll": {
+    "rc": 0,
+    "type": 6,
+    "EffectBlockIndex": 1,
+    "Start": 63536,
+    "End": 2000
+   }
+  },
+  {
+   "t": 1.092807,
+   "cmd": 720911,
+   "data": "1101029600000000003200ffff04ff1f000000000000",
+   "dll": {
+    "rc": 0,
+    "type": 1,
+    "EffectBlockIndex": 1,
+    "EffectType": 2,
+    "Duration": 150,
+    "TrigerRpt": 0,
+    "SamplePrd": 0,
+    "StartDelay": 50,
+    "Gain": 255,
+    "TrigerBtn": 255,
+    "AxesEnabledDirection": 4,
+    "Polar": 1,
+    "DirX": 8191,
+    "DirY": 0
+   }
+  },
+  {
+   "t": 1.102115,
+   "cmd": 720911,
+   "data": "1a010102",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 1,
+    "LoopCount": 2
+   }
+  },
+  {
+   "t": 1.502477,
+   "cmd": 720911,
+   "data": "1a010300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 1.502576,
+   "cmd": 720911,
+   "data": "1b01",
+   "dll": {
+    "rc": 0,
+    "type": 11,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 1.532404,
+   "cmd": 721297,
+   "data": "11030100",
+   "dll": {
+    "rc": 0,
+    "type": 17,
+    "EffectType": 3,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 1.532507,
+   "cmd": 720911,
+   "data": "1401d0070000000032000000",
+   "dll": {
+    "rc": 0,
+    "type": 4,
+    "EffectBlockIndex": 1,
+    "Magnitude": 2000,
+    "Offset": 0,
+    "Phase": 0,
+    "Period": 50
+   }
+  },
+  {
+   "t": 1.532575,
+   "cmd": 720911,
+   "data": "110103fa00000000000000ffff04ff1f000000000000",
+   "dll": {
+    "rc": 0,
+    "type": 1,
+    "EffectBlockIndex": 1,
+    "EffectType": 3,
+    "Duration": 250,
+    "TrigerRpt": 0,
+    "SamplePrd": 0,
+    "StartDelay": 0,
+    "Gain": 255,
+    "TrigerBtn": 255,
+    "AxesEnabledDirection": 4,
+    "Polar": 1,
+    "DirX": 8191,
+    "DirY": 0
+   }
+  },
+  {
+   "t": 1.541954,
+   "cmd": 720911,
+   "data": "1a010101",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 1,
+    "LoopCount": 1
+   }
+  },
+  {
+   "t": 1.822449,
+   "cmd": 720911,
+   "data": "1a010300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 1.822537,
+   "cmd": 720911,
+   "data": "1b01",
+   "dll": {
+    "rc": 0,
+    "type": 11,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 1.85233,
+   "cmd": 721297,
+   "data": "11040100",
+   "dll": {
+    "rc": 0,
+    "type": 17,
+    "EffectType": 4,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 1.852431,
+   "cmd": 720911,
+   "data": "1401c409f401282328000000",
+   "dll": {
+    "rc": 0,
+    "type": 4,
+    "EffectBlockIndex": 1,
+    "Magnitude": 2500,
+    "Offset": 500,
+    "Phase": 9000,
+    "Period": 40
+   }
+  },
+  {
+   "t": 1.852497,
+   "cmd": 720911,
+   "data": "1201f40100003200000032000000",
+   "dll": {
+    "rc": 0,
+    "type": 2,
+    "EffectBlockIndex": 1,
+    "AttackLevel": 500,
+    "FadeLevel": 0,
+    "AttackTime": 50,
+    "FadeTime": 50
+   }
+  },
+  {
+   "t": 1.852557,
+   "cmd": 720911,
+   "data": "110104fa00000000000000ffff04ff1f000000000000",
+   "dll": {
+    "rc": 0,
+    "type": 1,
+    "EffectBlockIndex": 1,
+    "EffectType": 4,
+    "Duration": 250,
+    "TrigerRpt": 0,
+    "SamplePrd": 0,
+    "StartDelay": 0,
+    "Gain": 255,
+    "TrigerBtn": 255,
+    "AxesEnabledDirection": 4,
+    "Polar": 1,
+    "DirX": 8191,
+    "DirY": 0
+   }
+  },
+  {
+   "t": 1.862152,
+   "cmd": 720911,
+   "data": "1a010101",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 1,
+    "LoopCount": 1
+   }
+  },
+  {
+   "t": 2.14208,
+   "cmd": 720911,
+   "data": "1a010300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 2.142189,
+   "cmd": 720911,
+   "data": "1b01",
+   "dll": {
+    "rc": 0,
+    "type": 11,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 2.172032,
+   "cmd": 721297,
+   "data": "11050100",
+   "dll": {
+    "rc": 0,
+    "type": 17,
+    "EffectType": 5,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 2.172163,
+   "cmd": 720911,
+   "data": "1401dc05d4fe50463c000000",
+   "dll": {
+    "rc": 0,
+    "type": 4,
+    "EffectBlockIndex": 1,
+    "Magnitude": 1500,
+    "Offset": 65236,
+    "Phase": 18000,
+    "Period": 60
+   }
+  },
+  {
+   "t": 2.172241,
+   "cmd": 720911,
+   "data": "110105fa00000000000000ffff04ff1f000000000000",
+   "dll": {
+    "rc": 0,
+    "type": 1,
+    "EffectBlockIndex": 1,
+    "EffectType": 5,
+    "Duration": 250,
+    "TrigerRpt": 0,
+    "SamplePrd": 0,
+    "StartDelay": 0,
+    "Gain": 255,
+    "TrigerBtn": 255,
+    "AxesEnabledDirection": 4,
+    "Polar": 1,
+    "DirX": 8191,
+    "DirY": 0
+   }
+  },
+  {
+   "t": 2.182173,
+   "cmd": 720911,
+   "data": "1a010101",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 1,
+    "LoopCount": 1
+   }
+  },
+  {
+   "t": 2.462251,
+   "cmd": 720911,
+   "data": "1a010300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 2.462365,
+   "cmd": 720911,
+   "data": "1b01",
+   "dll": {
+    "rc": 0,
+    "type": 11,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 2.492082,
+   "cmd": 721297,
+   "data": "11060100",
+   "dll": {
+    "rc": 0,
+    "type": 17,
+    "EffectType": 6,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 2.492169,
+   "cmd": 720911,
+   "data": "14010807000000001e000000",
+   "dll": {
+    "rc": 0,
+    "type": 4,
+    "EffectBlockIndex": 1,
+    "Magnitude": 1800,
+    "Offset": 0,
+    "Phase": 0,
+    "Period": 30
+   }
+  },
+  {
+   "t": 2.492224,
+   "cmd": 720911,
+   "data": "110106fa00000000000000ffff04ff1f000000000000",
+   "dll": {
+    "rc": 0,
+    "type": 1,
+    "EffectBlockIndex": 1,
+    "EffectType": 6,
+    "Duration": 250,
+    "TrigerRpt": 0,
+    "SamplePrd": 0,
+    "StartDelay": 0,
+    "Gain": 255,
+    "TrigerBtn": 255,
+    "AxesEnabledDirection": 4,
+    "Polar": 1,
+    "DirX": 8191,
+    "DirY": 0
+   }
+  },
+  {
+   "t": 2.50224,
+   "cmd": 720911,
+   "data": "1a010101",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 1,
+    "LoopCount": 1
+   }
+  },
+  {
+   "t": 2.782395,
+   "cmd": 720911,
+   "data": "1a010300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 2.782509,
+   "cmd": 720911,
+   "data": "1b01",
+   "dll": {
+    "rc": 0,
+    "type": 11,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 2.812483,
+   "cmd": 721297,
+   "data": "11070100",
+   "dll": {
+    "rc": 0,
+    "type": 17,
+    "EffectType": 7,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 2.812583,
+   "cmd": 720911,
+   "data": "14010807000078691e000000",
+   "dll": {
+    "rc": 0,
+    "type": 4,
+    "EffectBlockIndex": 1,
+    "Magnitude": 1800,
+    "Offset": 0,
+    "Phase": 27000,
+    "Period": 30
+   }
+  },
+  {
+   "t": 2.81266,
+   "cmd": 720911,
+   "data": "110107fa00000000000000ffff04ff1f000000000000",
+   "dll": {
+    "rc": 0,
+    "type": 1,
+    "EffectBlockIndex": 1,
+    "EffectType": 7,
+    "Duration": 250,
+    "TrigerRpt": 0,
+    "SamplePrd": 0,
+    "StartDelay": 0,
+    "Gain": 255,
+    "TrigerBtn": 255,
+    "AxesEnabledDirection": 4,
+    "Polar": 1,
+    "DirX": 8191,
+    "DirY": 0
+   }
+  },
+  {
+   "t": 2.822136,
+   "cmd": 720911,
+   "data": "1a010101",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 1,
+    "LoopCount": 1
+   }
+  },
+  {
+   "t": 3.102018,
+   "cmd": 720911,
+   "data": "1a010300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 3.102126,
+   "cmd": 720911,
+   "data": "1b01",
+   "dll": {
+    "rc": 0,
+    "type": 11,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 3.132086,
+   "cmd": 721297,
+   "data": "11040100",
+   "dll": {
+    "rc": 0,
+    "type": 17,
+    "EffectType": 4,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 3.132205,
+   "cmd": 720911,
+   "data": "1401e8030000000019000000",
+   "dll": {
+    "rc": 0,
+    "type": 4,
+    "EffectBlockIndex": 1,
+    "Magnitude": 1000,
+    "Offset": 0,
+    "Phase": 0,
+    "Period": 25
+   }
+  },
+  {
+   "t": 3.132274,
+   "cmd": 720911,
+   "data": "1101046400000000000000ffff04ff1f000000000000",
+   "dll": {
+    "rc": 0,
+    "type": 1,
+    "EffectBlockIndex": 1,
+    "EffectType": 4,
+    "Duration": 100,
+    "TrigerRpt": 0,
+    "SamplePrd": 0,
+    "StartDelay": 0,
+    "Gain": 255,
+    "TrigerBtn": 255,
+    "AxesEnabledDirection": 4,
+    "Polar": 1,
+    "DirX": 8191,
+    "DirY": 0
+   }
+  },
+  {
+   "t": 3.142087,
+   "cmd": 720911,
+   "data": "1a0101ff",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 1,
+    "LoopCount": 255
+   }
+  },
+  {
+   "t": 3.64233,
+   "cmd": 720911,
+   "data": "1a010300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 3.652189,
+   "cmd": 720911,
+   "data": "1a010300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 3.652349,
+   "cmd": 720911,
+   "data": "1b01",
+   "dll": {
+    "rc": 0,
+    "type": 11,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 3.682306,
+   "cmd": 721297,
+   "data": "11080100",
+   "dll": {
+    "rc": 0,
+    "type": 17,
+    "EffectType": 8,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 3.682409,
+   "cmd": 720911,
+   "data": "1301000000b80bb80b881388136400",
+   "dll": {
+    "rc": 0,
+    "type": 3,
+    "EffectBlockIndex": 1,
+    "isY": 0,
+    "CenterPointOffset": 0,
+    "PosCoeff": 3000,
+    "NegCoeff": 3000,
+    "PosSatur": 5000,
+    "NegSatur": 5000,
+    "DeadBand": 100
+   }
+  },
+  {
+   "t": 3.68248,
+   "cmd": 720911,
+   "data": "110108ffff000000000000ffff04ff1f000000000000",
+   "dll": {
+    "rc": 0,
+    "type": 1,
+    "EffectBlockIndex": 1,
+    "EffectType": 8,
+    "Duration": 65535,
+    "TrigerRpt": 0,
+    "SamplePrd": 0,
+    "StartDelay": 0,
+    "Gain": 255,
+    "TrigerBtn": 255,
+    "AxesEnabledDirection": 4,
+    "Polar": 1,
+    "DirX": 8191,
+    "DirY": 0
+   }
+  },
+  {
+   "t": 3.692099,
+   "cmd": 720911,
+   "data": "1a010101",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 1,
+    "LoopCount": 1
+   }
+  },
+  {
+   "t": 3.722097,
+   "cmd": 721297,
+   "data": "11090200",
+   "dll": {
+    "rc": 0,
+    "type": 17,
+    "EffectType": 9,
+    "EffectId": 2
+   }
+  },
+  {
+   "t": 3.72221,
+   "cmd": 720911,
+   "data": "1302000000d007d007102710270000",
+   "dll": {
+    "rc": 0,
+    "type": 3,
+    "EffectBlockIndex": 2,
+    "isY": 0,
+    "CenterPointOffset": 0,
+    "PosCoeff": 2000,
+    "NegCoeff": 2000,
+    "PosSatur": 10000,
+    "NegSatur": 10000,
+    "DeadBand": 0
+   }
+  },
+  {
+   "t": 3.72229,
+   "cmd": 720911,
+   "data": "110209ffff000000000000ffff04ff1f000000000000",
+   "dll": {
+    "rc": 0,
+    "type": 1,
+    "EffectBlockIndex": 2,
+    "EffectType": 9,
+    "Duration": 65535,
+    "TrigerRpt": 0,
+    "SamplePrd": 0,
+    "StartDelay": 0,
+    "Gain": 255,
+    "TrigerBtn": 255,
+    "AxesEnabledDirection": 4,
+    "Polar": 1,
+    "DirX": 8191,
+    "DirY": 0
+   }
+  },
+  {
+   "t": 3.732195,
+   "cmd": 720911,
+   "data": "1a020101",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 2,
+    "EffectOp": 1,
+    "LoopCount": 1
+   }
+  },
+  {
+   "t": 3.762451,
+   "cmd": 721297,
+   "data": "110a0300",
+   "dll": {
+    "rc": 0,
+    "type": 17,
+    "EffectType": 10,
+    "EffectId": 3
+   }
+  },
+  {
+   "t": 3.762604,
+   "cmd": 720911,
+   "data": "1303000000e803e803102710270000",
+   "dll": {
+    "rc": 0,
+    "type": 3,
+    "EffectBlockIndex": 3,
+    "isY": 0,
+    "CenterPointOffset": 0,
+    "PosCoeff": 1000,
+    "NegCoeff": 1000,
+    "PosSatur": 10000,
+    "NegSatur": 10000,
+    "DeadBand": 0
+   }
+  },
+  {
+   "t": 3.762674,
+   "cmd": 720911,
+   "data": "11030affff000000000000ffff04ff1f000000000000",
+   "dll": {
+    "rc": 0,
+    "type": 1,
+    "EffectBlockIndex": 3,
+    "EffectType": 10,
+    "Duration": 65535,
+    "TrigerRpt": 0,
+    "SamplePrd": 0,
+    "StartDelay": 0,
+    "Gain": 255,
+    "TrigerBtn": 255,
+    "AxesEnabledDirection": 4,
+    "Polar": 1,
+    "DirX": 8191,
+    "DirY": 0
+   }
+  },
+  {
+   "t": 3.772186,
+   "cmd": 720911,
+   "data": "1a030101",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 3,
+    "EffectOp": 1,
+    "LoopCount": 1
+   }
+  },
+  {
+   "t": 3.802054,
+   "cmd": 721297,
+   "data": "110b0400",
+   "dll": {
+    "rc": 0,
+    "type": 17,
+    "EffectType": 11,
+    "EffectId": 4
+   }
+  },
+  {
+   "t": 3.802217,
+   "cmd": 720911,
+   "data": "1304000000dc05dc05102710270000",
+   "dll": {
+    "rc": 0,
+    "type": 3,
+    "EffectBlockIndex": 4,
+    "isY": 0,
+    "CenterPointOffset": 0,
+    "PosCoeff": 1500,
+    "NegCoeff": 1500,
+    "PosSatur": 10000,
+    "NegSatur": 10000,
+    "DeadBand": 0
+   }
+  },
+  {
+   "t": 3.802394,
+   "cmd": 720911,
+   "data": "11040bffff000000000000ffff04ff1f000000000000",
+   "dll": {
+    "rc": 0,
+    "type": 1,
+    "EffectBlockIndex": 4,
+    "EffectType": 11,
+    "Duration": 65535,
+    "TrigerRpt": 0,
+    "SamplePrd": 0,
+    "StartDelay": 0,
+    "Gain": 255,
+    "TrigerBtn": 255,
+    "AxesEnabledDirection": 4,
+    "Polar": 1,
+    "DirX": 8191,
+    "DirY": 0
+   }
+  },
+  {
+   "t": 3.812192,
+   "cmd": 720911,
+   "data": "1a040101",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 4,
+    "EffectOp": 1,
+    "LoopCount": 1
+   }
+  },
+  {
+   "t": 4.012177,
+   "cmd": 720911,
+   "data": "1301000cfe94119411881388136400",
+   "dll": {
+    "rc": 0,
+    "type": 3,
+    "EffectBlockIndex": 1,
+    "isY": 0,
+    "CenterPointOffset": 65036,
+    "PosCoeff": 4500,
+    "NegCoeff": 4500,
+    "PosSatur": 5000,
+    "NegSatur": 5000,
+    "DeadBand": 100
+   }
+  },
+  {
+   "t": 4.212291,
+   "cmd": 720911,
+   "data": "1dcc",
+   "dll": {
+    "rc": 0,
+    "type": 13,
+    "Gain": 204
+   }
+  },
+  {
+   "t": 4.312244,
+   "cmd": 720911,
+   "data": "1c05",
+   "dll": {
+    "rc": 0,
+    "type": 12,
+    "Control": 5
+   }
+  },
+  {
+   "t": 4.512512,
+   "cmd": 720911,
+   "data": "1c06",
+   "dll": {
+    "rc": 0,
+    "type": 12,
+    "Control": 6
+   }
+  },
+  {
+   "t": 4.612226,
+   "cmd": 720911,
+   "data": "1c02",
+   "dll": {
+    "rc": 0,
+    "type": 12,
+    "Control": 2
+   }
+  },
+  {
+   "t": 4.712068,
+   "cmd": 720911,
+   "data": "1c01",
+   "dll": {
+    "rc": 0,
+    "type": 12,
+    "Control": 1
+   }
+  },
+  {
+   "t": 4.812518,
+   "cmd": 720911,
+   "data": "1dff",
+   "dll": {
+    "rc": 0,
+    "type": 13,
+    "Gain": 255
+   }
+  },
+  {
+   "t": 4.912254,
+   "cmd": 720911,
+   "data": "1a020201",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 2,
+    "EffectOp": 2,
+    "LoopCount": 1
+   }
+  },
+  {
+   "t": 5.111983,
+   "cmd": 720911,
+   "data": "1c03",
+   "dll": {
+    "rc": 0,
+    "type": 12,
+    "Control": 3
+   }
+  },
+  {
+   "t": 5.122112,
+   "cmd": 720911,
+   "data": "1a010300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 1,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 5.122247,
+   "cmd": 720911,
+   "data": "1b01",
+   "dll": {
+    "rc": 0,
+    "type": 11,
+    "EffectId": 1
+   }
+  },
+  {
+   "t": 5.132302,
+   "cmd": 720911,
+   "data": "1a020300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 2,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 5.132457,
+   "cmd": 720911,
+   "data": "1b02",
+   "dll": {
+    "rc": 0,
+    "type": 11,
+    "EffectId": 2
+   }
+  },
+  {
+   "t": 5.142075,
+   "cmd": 720911,
+   "data": "1a030300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 3,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 5.142148,
+   "cmd": 720911,
+   "data": "1b03",
+   "dll": {
+    "rc": 0,
+    "type": 11,
+    "EffectId": 3
+   }
+  },
+  {
+   "t": 5.152167,
+   "cmd": 720911,
+   "data": "1a040300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 4,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 5.152251,
+   "cmd": 720911,
+   "data": "1b04",
+   "dll": {
+    "rc": 0,
+    "type": 11,
+    "EffectId": 4
+   }
+  },
+  {
+   "t": 5.182303,
+   "cmd": 721297,
+   "data": "11010400",
+   "dll": {
+    "rc": 0,
+    "type": 17,
+    "EffectType": 1,
+    "EffectId": 4
+   }
+  },
+  {
+   "t": 5.182411,
+   "cmd": 720911,
+   "data": "1504d007",
+   "dll": {
+    "rc": 0,
+    "type": 5,
+    "EffectBlockIndex": 4,
+    "Magnitude": 2000
+   }
+  },
+  {
+   "t": 5.182466,
+   "cmd": 720911,
+   "data": "110401ffff000000000000ffff04ff1f000000000000",
+   "dll": {
+    "rc": 0,
+    "type": 1,
+    "EffectBlockIndex": 4,
+    "EffectType": 1,
+    "Duration": 65535,
+    "TrigerRpt": 0,
+    "SamplePrd": 0,
+    "StartDelay": 0,
+    "Gain": 255,
+    "TrigerBtn": 255,
+    "AxesEnabledDirection": 4,
+    "Polar": 1,
+    "DirX": 8191,
+    "DirY": 0
+   }
+  },
+  {
+   "t": 5.192065,
+   "cmd": 720911,
+   "data": "1a040101",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 4,
+    "EffectOp": 1,
+    "LoopCount": 1
+   }
+  },
+  {
+   "t": 5.492137,
+   "cmd": 720911,
+   "data": "1a040300",
+   "dll": {
+    "rc": 0,
+    "type": 10,
+    "EffectBlockIndex": 4,
+    "EffectOp": 3,
+    "LoopCount": 0
+   }
+  },
+  {
+   "t": 5.492244,
+   "cmd": 720911,
+   "data": "1b04",
+   "dll": {
+    "rc": 0,
+    "type": 11,
+    "EffectId": 4
+   }
+  },
+  {
+   "t": 5.49229,
+   "cmd": 720911,
+   "data": "1c04",
+   "dll": {
+    "rc": 0,
+    "type": 12,
+    "Control": 4
+   }
+  },
+  {
+   "t": 5.492363,
+   "cmd": 720911,
+   "data": "1dff",
+   "dll": {
+    "rc": 0,
+    "type": 13,
+    "Gain": 255
+   }
+  },
+  {
+   "t": 5.502558,
+   "cmd": 720911,
+   "data": "1c03",
+   "dll": {
+    "rc": 0,
+    "type": 12,
+    "Control": 3
+   }
+  },
+  {
+   "t": 5.503175,
+   "cmd": 720911,
+   "data": "1c03",
+   "dll": {
+    "rc": 0,
+    "type": 12,
+    "Control": 3
+   }
+  },
+  {
+   "t": 5.50324,
+   "cmd": 720911,
+   "data": "1c04",
+   "dll": {
+    "rc": 0,
+    "type": 12,
+    "Control": 4
+   }
+  }
+ ]
+}

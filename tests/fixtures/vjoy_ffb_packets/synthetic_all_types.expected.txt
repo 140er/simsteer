@@ -13,7 +13,7 @@
 0.360 CreateEffect ebi=2 type=Sine
 0.361 SetParameters ebi=2 flags=AXES|DIRECTION|ENVELOPE|NODOWNLOAD axes=1 direction=CARTESIAN{0} envelope(attack_level=1000 attack_time=100000 fade_level=0 fade_time=50000)
 0.362 SetParameters ebi=2 flags=TYPESPECIFICPARAMS|NODOWNLOAD periodic(magnitude=2000 offset=-500 phase=9000 period=40000)
-0.363 SetParameters ebi=2 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|STARTDELAY duration=300000 sample_period=0 gain=7490 trigger_button=NONE trigger_repeat=0 start_delay=0
+0.363 SetParameters ebi=2 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|ENVELOPE|STARTDELAY duration=300000 sample_period=0 gain=7491 trigger_button=NONE trigger_repeat=0 envelope(attack_level=1000 attack_time=100000 fade_level=0 fade_time=50000) start_delay=0
 0.364 Start ebi=2 iterations=2 flags=SOLO
 0.400 CreateEffect ebi=3 type=Spring
 0.401 SetParameters ebi=3 flags=AXES|DIRECTION|TYPESPECIFICPARAMS|NODOWNLOAD axes=1 direction=CARTESIAN{0} condition(offset=0 positive_coefficient=3000 negative_coefficient=3000 positive_saturation=5000 negative_saturation=5000 dead_band=100)

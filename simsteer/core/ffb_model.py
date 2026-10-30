@@ -24,7 +24,7 @@ Unit conversions, vJoy PID -> DirectInput:
 
     duration, trigger repeat,      u16 ms, 0..32767       x 1000 -> us
       sample period, start delay   duration > 32767 (HID null, 0xFFFF) -> INFINITE
-    effect gain, device gain       u8 0..255              round(g * 10000 / 255)
+    effect gain, device gain       u8 0..255              ceil(g * 10000 / 255)
     constant magnitude, ramp       s16 -10000..10000      identity
       start and end, periodic
       offset, condition offset
@@ -183,8 +183,10 @@ def hid_duration_to_us(ms: int) -> int:
 
 
 def gain_to_di(gain: int) -> int:
-    """u8 0..255 to DirectInput 0..10000, rounded half up."""
-    return (gain * DI_FFNOMINALMAX * 2 + 255) // (255 * 2)
+    """u8 0..255 to DirectInput 0..10000. Windows' PID driver truncates on
+    the way in (recorded: 5000 arrives as 127), so this is the smallest
+    DirectInput gain it encodes back to the same byte for the wheel."""
+    return -(-gain * DI_FFNOMINALMAX // 255)
 
 
 def direction_to_centidegrees(logical: int) -> int:
@@ -823,7 +825,10 @@ class FfbModel:
         s.trigger_repeat = ms_to_us(rec.trigger_repeat_ms)
         s.start_delay = ms_to_us(rec.start_delay_ms)
         s.factor = factor
-        if old is not None and (old.duration_ms > HID_TIME_MAX) != (rec.duration_ms > HID_TIME_MAX) and s.envelope:
+        endless_changed = old is None or (old.duration_ms > HID_TIME_MAX) != (rec.duration_ms > HID_TIME_MAX)
+        if endless_changed and s.envelope is not None:
+            # Windows sends the envelope before the effect report, so the fade
+            # went out before we knew the effect never ends.
             flags |= DIEP_ENVELOPE
         if s.active(now) and flags & DIEP_DURATION:
             s.set_end()

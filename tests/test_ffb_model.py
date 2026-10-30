@@ -180,10 +180,11 @@ def test_unknown_packets_are_counted_and_never_forwarded(pkt, reason):
 def test_gain_conversion():
     assert fm.gain_to_di(0) == 0
     assert fm.gain_to_di(255) == 10000
-    assert fm.gain_to_di(128) == 5020
+    assert fm.gain_to_di(127) == 4981  # the sender's 5000, truncated to 127 by Windows
     values = [fm.gain_to_di(g) for g in range(256)]
-    assert values == sorted(values)
-    assert all(abs(v - g * 10000 / 255) <= 0.5 for g, v in enumerate(values))
+    assert all(0 <= v - g * 10000 / 255 < 1 for g, v in enumerate(values))
+    # Windows truncates DirectInput gain to the byte, so the wheel gets the game's byte back.
+    assert all(v * 255 // 10000 == g for g, v in enumerate(values))
 
 
 def test_time_conversion():
@@ -345,6 +346,17 @@ def test_rearm_continues_the_attack_and_never_fades():
     model.rearm(0.3)
     (call,) = model.rearm(0.4)
     assert call.params.envelope == fm.DiEnvelope(3000, 0, 1000, 0)
+
+
+def test_envelope_sent_before_the_report_loses_its_fade_once_the_effect_is_endless():
+    """Windows sends Envelope before the Effect Report (recorded fixture)."""
+    model = fm.FfbModel()
+    feed(model, 0.0, fx.new_effect(1, 1))
+    feed(model, 0.0, fx.constant(1, -4000))
+    (early,) = feed(model, 0.0, fx.envelope(1, 0, 1000, 300, 100))
+    assert early.params.envelope.fade_time == 100_000 and early.flags & fm.DIEP_NODOWNLOAD
+    (report,) = feed(model, 0.0, fx.effect_report(1, 1))
+    assert report.flags & fm.DIEP_ENVELOPE and report.params.envelope.fade_time == 0
 
 
 def test_rearm_counts_down_the_start_delay():

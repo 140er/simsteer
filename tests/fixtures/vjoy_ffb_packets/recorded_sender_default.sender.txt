@@ -1,0 +1,77 @@
+t_ms	call	result	call_us
+0.092	SetGain 10000	DI_OK	26
+10.559	Command SETACTUATORSON	DI_OK	132
+30.153	CreateEffect ebi=1 type=ConstantForce	DI_OK	114
+40.434	SetParameters ebi=1 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|AXES|DIRECTION|TYPESPECIFICPARAMS|STARTDELAY duration=400000 sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 axes=1 direction=CARTESIAN{0} constant(magnitude=3000) start_delay=0	DI_OK	2100
+50.561	Start ebi=1 iterations=1 flags=0	DI_OK	120
+100.425	SetParameters ebi=1 flags=TYPESPECIFICPARAMS constant(magnitude=-2500)	DI_OK	102
+150.322	SetParameters ebi=1 flags=TYPESPECIFICPARAMS constant(magnitude=1500)	DI_OK	88
+200.134	SetParameters ebi=1 flags=TYPESPECIFICPARAMS constant(magnitude=-10000)	DI_OK	92
+250.368	SetParameters ebi=1 flags=TYPESPECIFICPARAMS constant(magnitude=10000)	DI_OK	110
+400.208	Stop ebi=1	DI_OK	100
+410.489	Release ebi=1	DI_OK	255
+430.301	CreateEffect ebi=2 type=ConstantForce	DI_OK	77
+440.549	SetParameters ebi=2 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|AXES|DIRECTION|ENVELOPE|TYPESPECIFICPARAMS|STARTDELAY duration=INFINITE sample_period=0 gain=7500 trigger_button=NONE trigger_repeat=0 axes=1 direction=CARTESIAN{0} envelope(attack_level=0 attack_time=300000 fade_level=1000 fade_time=100000) constant(magnitude=-4000) start_delay=0	DI_OK	396
+450.306	Start ebi=2 iterations=1 flags=0	DI_OK	51
+750.290	SetParameters ebi=2 flags=GAIN gain=5000	DI_OK	93
+1050.251	Stop ebi=2	DI_OK	76
+1060.551	Release ebi=2	DI_OK	321
+1080.144	CreateEffect ebi=3 type=RampForce	DI_OK	83
+1090.568	SetParameters ebi=3 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|AXES|DIRECTION|TYPESPECIFICPARAMS|STARTDELAY duration=150000 sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 axes=1 direction=CARTESIAN{0} ramp(start=-2000 end=2000) start_delay=50000	DI_OK	519
+1100.317	Start ebi=3 iterations=2 flags=0	DI_OK	43
+1500.634	Release ebi=3	DI_OK	324
+1520.416	CreateEffect ebi=4 type=Square	DI_OK	88
+1530.489	SetParameters ebi=4 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|AXES|DIRECTION|TYPESPECIFICPARAMS|STARTDELAY duration=250000 sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 axes=1 direction=CARTESIAN{0} periodic(magnitude=2000 offset=0 phase=0 period=50000) start_delay=0	DI_OK	369
+1540.123	Start ebi=4 iterations=1 flags=0	DI_OK	77
+1820.607	Release ebi=4	DI_OK	224
+1840.530	CreateEffect ebi=5 type=Sine	DI_OK	120
+1850.468	SetParameters ebi=5 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|AXES|DIRECTION|ENVELOPE|TYPESPECIFICPARAMS|STARTDELAY duration=250000 sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 axes=1 direction=CARTESIAN{0} envelope(attack_level=500 attack_time=50000 fade_level=0 fade_time=50000) periodic(magnitude=2500 offset=500 phase=9000 period=40000) start_delay=0	DI_OK	368
+1860.303	Start ebi=5 iterations=1 flags=0	DI_OK	73
+2140.238	Release ebi=5	DI_OK	249
+2160.441	CreateEffect ebi=6 type=Triangle	DI_OK	84
+2170.150	SetParameters ebi=6 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|AXES|DIRECTION|TYPESPECIFICPARAMS|STARTDELAY duration=250000 sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 axes=1 direction=CARTESIAN{0} periodic(magnitude=1500 offset=-300 phase=18000 period=60000) start_delay=0	DI_OK	372
+2180.357	Start ebi=6 iterations=1 flags=0	DI_OK	75
+2460.409	Release ebi=6	DI_OK	243
+2480.455	CreateEffect ebi=7 type=SawtoothUp	DI_OK	88
+2490.211	SetParameters ebi=7 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|AXES|DIRECTION|TYPESPECIFICPARAMS|STARTDELAY duration=250000 sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 axes=1 direction=CARTESIAN{0} periodic(magnitude=1800 offset=0 phase=0 period=30000) start_delay=0	DI_OK	294
+2500.451	Start ebi=7 iterations=1 flags=0	DI_OK	51
+2780.553	Release ebi=7	DI_OK	245
+2800.511	CreateEffect ebi=8 type=SawtoothDown	DI_OK	81
+2810.589	SetParameters ebi=8 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|AXES|DIRECTION|TYPESPECIFICPARAMS|STARTDELAY duration=250000 sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 axes=1 direction=CARTESIAN{0} periodic(magnitude=1800 offset=0 phase=27000 period=30000) start_delay=0	DI_OK	344
+2820.326	Start ebi=8 iterations=1 flags=0	DI_OK	49
+3100.167	Release ebi=8	DI_OK	256
+3120.135	CreateEffect ebi=9 type=Sine	DI_OK	87
+3130.160	SetParameters ebi=9 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|AXES|DIRECTION|TYPESPECIFICPARAMS|STARTDELAY duration=100000 sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 axes=1 direction=CARTESIAN{0} periodic(magnitude=1000 offset=0 phase=0 period=25000) start_delay=0	DI_OK	395
+3140.241	Start ebi=9 iterations=INFINITE flags=0	DI_OK	91
+3640.488	Stop ebi=9	DI_OK	88
+3650.229	Release ebi=9	DI_OK	346
+3670.371	CreateEffect ebi=10 type=Spring	DI_OK	103
+3680.377	SetParameters ebi=10 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|AXES|DIRECTION|TYPESPECIFICPARAMS|STARTDELAY duration=INFINITE sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 axes=1 direction=CARTESIAN{0} condition(offset=0 positive_coefficient=3000 negative_coefficient=3000 positive_saturation=5000 negative_saturation=5000 dead_band=100) start_delay=0	DI_OK	375
+3690.260	Start ebi=10 iterations=1 flags=0	DI_OK	81
+3710.135	CreateEffect ebi=11 type=Damper	DI_OK	84
+3720.192	SetParameters ebi=11 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|AXES|DIRECTION|TYPESPECIFICPARAMS|STARTDELAY duration=INFINITE sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 axes=1 direction=CARTESIAN{0} condition(offset=0 positive_coefficient=2000 negative_coefficient=2000 positive_saturation=10000 negative_saturation=10000 dead_band=0) start_delay=0	DI_OK	363
+3730.365	Start ebi=11 iterations=1 flags=0	DI_OK	74
+3750.240	CreateEffect ebi=12 type=Inertia	DI_OK	110
+3760.562	SetParameters ebi=12 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|AXES|DIRECTION|TYPESPECIFICPARAMS|STARTDELAY duration=INFINITE sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 axes=1 direction=CARTESIAN{0} condition(offset=0 positive_coefficient=1000 negative_coefficient=1000 positive_saturation=10000 negative_saturation=10000 dead_band=0) start_delay=0	DI_OK	389
+3770.390	Start ebi=12 iterations=1 flags=0	DI_OK	44
+3790.614	CreateEffect ebi=13 type=Friction	DI_OK	85
+3800.126	SetParameters ebi=13 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|AXES|DIRECTION|TYPESPECIFICPARAMS|STARTDELAY duration=INFINITE sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 axes=1 direction=CARTESIAN{0} condition(offset=0 positive_coefficient=1500 negative_coefficient=1500 positive_saturation=10000 negative_saturation=10000 dead_band=0) start_delay=0	DI_OK	503
+3810.350	Start ebi=13 iterations=1 flags=0	DI_OK	79
+4010.237	SetParameters ebi=10 flags=TYPESPECIFICPARAMS condition(offset=-500 positive_coefficient=4500 negative_coefficient=4500 positive_saturation=5000 negative_saturation=5000 dead_band=100)	DI_OK	96
+4210.377	SetGain 8000	DI_OK	81
+4310.406	Command PAUSE	DI_OK	79
+4510.610	Command CONTINUE	DI_OK	111
+4610.377	Command SETACTUATORSOFF	DI_OK	80
+4710.222	Command SETACTUATORSON	DI_OK	85
+4810.557	SetGain 10000	DI_OK	125
+4910.401	Start ebi=11 iterations=1 flags=SOLO	DI_OK	87
+5110.130	Command STOPALL	DI_OK	88
+5120.217	Release ebi=10	DI_OK	303
+5130.455	Release ebi=11	DI_OK	308
+5140.252	Release ebi=12	DI_OK	199
+5150.385	Release ebi=13	DI_OK	156
+5170.431	CreateEffect ebi=14 type=ConstantForce	DI_OK	86
+5180.416	SetParameters ebi=14 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|AXES|DIRECTION|TYPESPECIFICPARAMS|STARTDELAY duration=INFINITE sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 axes=1 direction=CARTESIAN{0} constant(magnitude=2000) start_delay=0	DI_OK	333
+5190.271	Start ebi=14 iterations=1 flags=0	DI_OK	55
+5490.266	Command RESET	DI_OK	351
+5500.613	Release ebi=14	DI_OK	5

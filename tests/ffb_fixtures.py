@@ -223,7 +223,6 @@ def parse_call(text: str) -> tuple[str, int, dict[str, str]]:
         if block:
             for k, v in re.findall(r"(\w+)=(\S+)", inner):
                 fields[f"{block}.{k}"] = v
-            fields["kind"] = block
         else:
             fields[key] = value
     return op, int(fields.pop("ebi", 0)), fields
@@ -233,11 +232,14 @@ def starts(calls: list[str]) -> list[tuple[int, dict[str, str]]]:
     """(creation index, accumulated parameters) at every Start, in order."""
     state: dict[int, dict[str, str]] = {}
     order: dict[int, int] = {}
+    created = 0
     out = []
     for text in calls:
         op, ebi, fields = parse_call(text)
         if op == "CreateEffect":
-            order[ebi] = len(order)
+            # vJoy hands a freed block index to the next effect, so count creations.
+            order[ebi] = created
+            created += 1
             state[ebi] = {"type": fields["type"]}
         elif op == "SetParameters" and ebi in state:
             fields.pop("flags", None)
