@@ -23,6 +23,10 @@ rem installers need to be next to SimSteer.exe so users can find/run
 rem them, so surface them to the bundle root.
 if not %BUILD_RC%==0 goto after_surface
 for %%F in (install-drivers.bat uninstall-drivers.bat install_drivers.ps1 uninstall_drivers.ps1) do if exist "dist\SimSteer\_internal\%%F" move /y "dist\SimSteer\_internal\%%F" "dist\SimSteer\%%F" >nul
+
+rem Code-sign the exes when SIMSTEER_SIGN_CERT_SHA1 is set (RELEASE.md).
+".venv\Scripts\python.exe" tools\sign_build.py
+set BUILD_RC=%ERRORLEVEL%
 :after_surface
 popd
 
