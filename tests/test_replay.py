@@ -172,6 +172,34 @@ def test_writer_refuses_to_overwrite_a_clip(clip):
         ClipWriter(clip, game="ets2")
 
 
+def test_writer_failure_raises_instead_of_blocking(tmp_path, monkeypatch):
+    import threading
+
+    w = ClipWriter(tmp_path / "rec", game="ets2", threaded=True)
+
+    def disk_full(i, img):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(w, "_encode", disk_full)
+    outcome = {}
+
+    def record():
+        frame = np.zeros((90, 160, 3), np.uint8)
+        try:
+            for i in range(500):
+                w.write_frame(i * 0.05, frame)
+        except RuntimeError as e:
+            outcome["raised"] = str(e)
+        outcome["meta"] = w.close(source="test")
+
+    t = threading.Thread(target=record, daemon=True)
+    t.start()
+    t.join(10)
+    assert not t.is_alive(), "recorder blocked after a write failure"
+    assert "No space left" in outcome["raised"]
+    assert "No space left" in outcome["meta"]["error"]
+
+
 def test_record_writes_a_replayable_clip(tmp_path, monkeypatch, fake_model, data_dir):
     import time
 

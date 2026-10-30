@@ -277,6 +277,7 @@ class ClipWriter:
         self._tel_f = (self.out / "telemetry.jsonl").open("w", encoding="utf-8")
         self._q: queue.Queue | None = None
         self._thread: threading.Thread | None = None
+        self._error: BaseException | None = None
         if threaded:
             self._q = queue.Queue(maxsize=64)
             self._thread = threading.Thread(target=self._drain, daemon=True,
@@ -290,9 +291,15 @@ class ClipWriter:
         buf.tofile(str(self.out / "frames" / f"{i:06d}.jpg"))
 
     def _drain(self) -> None:
+        # After a failed write (disk full) keep emptying the queue, so the
+        # capture thread never blocks forever in put().
         assert self._q is not None
         while (item := self._q.get()) is not None:
-            self._encode(*item)
+            if self._error is None:
+                try:
+                    self._encode(*item)
+                except Exception as e:
+                    self._error = e
 
     def write_frame(self, t: float, bgr: np.ndarray) -> None:
         h, w = bgr.shape[:2]
@@ -300,6 +307,8 @@ class ClipWriter:
             bgr = cv2.resize(bgr, (self.width, round(h * self.width / w)),
                              interpolation=cv2.INTER_AREA)
         self.size = (bgr.shape[1], bgr.shape[0])
+        if self._error is not None:
+            raise RuntimeError(f"recording stopped, frame write failed: {self._error}")
         if self._q is not None:
             self._q.put((self.frames, bgr))
         else:
@@ -338,6 +347,8 @@ class ClipWriter:
             "width": self.size[0] if self.size else None,
             "height": self.size[1] if self.size else None,
         }
+        if self._error is not None:
+            meta["error"] = f"frame write failed: {self._error}"
         if models_dir is not None:
             meta["models"] = {p.name: _sha256(p)
                               for p in sorted(models_dir.glob("*.onnx"))}

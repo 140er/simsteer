@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         for run in range(args.runs):
             for label, tree in trees.items():
                 log = tmp / f"{label}-{run}.jsonl"
-                rows[label] += replay(tree, args.clip.expanduser(), args.frames, log)
+                rows[label] += replay(tree, args.clip.expanduser().resolve(), args.frames, log)
                 print(f"run {run + 1}/{args.runs} {label}: done", flush=True)
 
         print(f"clip {args.clip}  frames {args.frames} x {args.runs} runs "
