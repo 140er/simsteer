@@ -359,6 +359,42 @@ def test_remembered_game_does_not_persist_cli_overrides(data_dir):
     assert (saved.game, saved.device, saved.forza_port) == ("auto", "gamepad", 9000)
 
 
+def test_live_game_stays_remembered_after_settings_save(games, monkeypatch):
+    import simsteer.runtime.loop as loop
+
+    Settings(game="auto", last_game="ets2").save()
+
+    def save_during_session(settings, game, **kwargs):
+        assert game.id == "fh5"
+        settings.save()
+        return 0
+
+    monkeypatch.setattr(loop, "run", save_during_session)
+    monkeypatch.setattr("simsteer.games.processes.running_process_names", lambda: set())
+    assert main(["--game", "fh5", "--headless"]) == 0
+    saved = Settings.load()
+    assert saved.game == "auto"
+    assert saved.last_game == "fh5"
+    assert _pick_game(games, None, saved.game, None, saved.last_game).id == "fh5"
+
+
+@pytest.mark.parametrize("port", [0, -1, 65536, 70000])
+def test_bad_forza_port_profile_is_skipped(data_dir, capsys, port):
+    text = MINIMAL.replace('kind = "none"', f'kind = "forza_udp", port = {port}')
+    path = _write(data_dir / "games", "bad-port.toml", text)
+    reload()
+    assert main(["--list-games"]) == 0
+    out, err = capsys.readouterr()
+    assert f"{path}: telemetry.port: must be between 1 and 65535" in err
+    assert "mygame" not in out
+
+
+@pytest.mark.parametrize("port", [1, 65535])
+def test_forza_port_profile_accepts_bounds(port):
+    text = MINIMAL.replace('kind = "none"', f'kind = "forza_udp", port = {port}')
+    assert parse_profile(text, "valid-port.toml").telemetry.params["port"] == port
+
+
 def test_forza_port_override_leaves_the_profile_unchanged(games):
     fh5 = games.get("fh5")
     assert _apply_settings(fh5, Settings()).telemetry.params["port"] == 7777

@@ -231,6 +231,7 @@ def _main(args: argparse.Namespace, games: Registry, clip: Path | None,
         return 2
     game = _apply_settings(game, telemetry_settings or settings)
     if clip is None:
+        settings.last_game = game.id
         _remember_game(game.id)
 
     if args.record:

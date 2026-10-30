@@ -194,6 +194,8 @@ def _telemetry(t: _Table) -> TelemetrySpec:
     for name, typ in spec.params.items():
         if t.has(name):
             params[name] = typ(_check_type(t, name, t.raw(name), typ.__name__))
+    if kind == "forza_udp" and "port" in params and not 1 <= params["port"] <= 65535:
+        raise t.error("port", "must be between 1 and 65535")
     t.finish()
     return TelemetrySpec(kind, MappingProxyType(params))
 
