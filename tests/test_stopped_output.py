@@ -18,7 +18,8 @@ from test_steering_direction import _bends, _flow, _plan, _probe_output
 def run_plant(monkeypatch, tmp_path, *, polarity=-1, convention=1, inversion=1,
               fps=20, lag_s=0.25, smoothing_s=0.0, moving=False,
               interrupt=None, no_probe=False, drive_s=0.0, flip=False,
-              correction=False, no_response=False):
+              correction=False, no_response=False, raw_lag_frames=0,
+              raw_gain=1.0, deadzone=0.0, player_axis=0.3):
     import simsteer.runtime.loop as loop
 
     dt = 1 / fps
@@ -30,6 +31,7 @@ def run_plant(monkeypatch, tmp_path, *, polarity=-1, convention=1, inversion=1,
                          first_verified=None, first_engaged=None, tripped=None,
                          inserts=set(), smooth=0.0, frame=0)
     history = deque([0.0] * max(1, round(lag_s * fps)))
+    raw_history = deque([0.0] * raw_lag_frames)
 
     class Flow(CalibFlow):
         def __init__(self, *args, **kwargs):
@@ -93,14 +95,17 @@ def run_plant(monkeypatch, tmp_path, *, polarity=-1, convention=1, inversion=1,
                 st.speed = 22.0 if moving or st.engaged else 0.0
                 if interrupt == "speed" and st.t >= 19:
                     st.speed = 2.0
-                human = 0.3 if interrupt == "player" and 19 <= st.t < 20 else 0.0
+                human = player_axis if interrupt == "player" and 19 <= st.t < 20 else 0.0
                 if correction and st.first_engaged and 8 <= st.t - st.first_engaged < 10:
                     human = -inversion * convention * 0.3
                 binding = polarity
                 if flip and st.first_engaged and st.t - st.first_engaged >= 10:
                     binding = -polarity
-                st.raw = binding * st.pad + human
-                history.append(binding * st.pad)
+                target = math.copysign(max(0.0, abs(st.pad) - deadzone)
+                                       / (1 - deadzone), binding * st.pad)
+                raw_history.append(target)
+                st.raw = raw_gain * raw_history.popleft() + human
+                history.append(target)
                 delayed = history.popleft()
                 alpha = 1 if smoothing_s == 0 else 1 - math.exp(-dt / smoothing_s)
                 st.smooth += alpha * (delayed - st.smooth)
@@ -218,6 +223,95 @@ def test_stopped_check_handles_lag_and_heavy_smoothing(monkeypatch, tmp_path, fp
                               lag_s=0.5, smoothing_s=0.8)
     assert flow.output_direction.sign == polarity
     assert st.first_verified < 31 and not any(r["engaged"] for r in rows)
+
+
+@pytest.mark.parametrize("fps", [10, 20, 60])
+@pytest.mark.parametrize("raw_lag_frames", [1, 2])
+@pytest.mark.parametrize("polarity", [-1, 1])
+def test_stopped_check_tolerates_delayed_raw_input(monkeypatch, tmp_path, fps,
+                                                 raw_lag_frames, polarity):
+    flow, st, rows = run_plant(monkeypatch, tmp_path, fps=fps, polarity=polarity,
+                              raw_lag_frames=raw_lag_frames, drive_s=5)
+    assert flow.output_direction.sign == polarity, flow.output_direction.reason
+    assert st.first_verified < 31 and st.first_engaged >= st.first_verified
+    assert not any(r["engaged"] for r in rows if r["steering_output_sign"] is None)
+
+
+@pytest.mark.parametrize("raw_gain", [0.5, 0.55, 0.7, 1.3, 1.5, 1.6])
+@pytest.mark.parametrize("polarity", [-1, 1])
+def test_stopped_check_tolerates_scaled_raw_input(monkeypatch, tmp_path, raw_gain, polarity):
+    flow, st, _ = run_plant(monkeypatch, tmp_path, polarity=polarity, raw_gain=raw_gain)
+    assert flow.output_direction.sign == polarity, flow.output_direction.reason
+    assert st.first_verified < 31
+
+
+@pytest.mark.parametrize("fps", [10, 20, 60])
+@pytest.mark.parametrize("raw_gain", [0.55, 1.5])
+def test_stopped_check_tolerates_raw_lag_scale_and_small_deadzone(monkeypatch, tmp_path,
+                                                                fps, raw_gain):
+    flow, st, _ = run_plant(monkeypatch, tmp_path, fps=fps, raw_lag_frames=2,
+                            raw_gain=raw_gain, deadzone=0.02,
+                            lag_s=0.5, smoothing_s=0.8)
+    assert flow.output_direction.sign == -1, flow.output_direction.reason
+    assert st.first_verified < 31
+
+
+@pytest.mark.parametrize("fps", [10, 20, 60])
+@pytest.mark.parametrize("no_response", [False, True])
+@pytest.mark.parametrize("raw_gain", [0.0, 0.02])
+def test_zero_raw_response_gets_no_response_reason(monkeypatch, tmp_path, fps,
+                                                  no_response, raw_gain):
+    flow, st, _ = run_plant(monkeypatch, tmp_path, fps=fps, raw_gain=raw_gain,
+                            no_response=no_response)
+    output = flow.output_direction
+    assert not output.ready and not output.active
+    assert "No steering response" in flow.hint(0)
+    assert "\n" not in flow.hint(0) and "Release steering" not in flow.hint(0)
+    pulses = [t for t, _, value, _, _ in st.writes if value]
+    assert max(pulses) - min(pulses) == pytest.approx(3 - 1 / fps, abs=1e-8)
+    assert st.pad == 0 and st.first_engaged is None
+
+
+@pytest.mark.parametrize("polarity", [-1, 1])
+@pytest.mark.parametrize("takeover", ["opposite", "excessive"])
+def test_stopped_check_still_aborts_for_player_takeover(monkeypatch, tmp_path,
+                                                        polarity, takeover):
+    human = -2 * polarity * OutputDirection.AMPLITUDE if takeover == "opposite" else 0.4
+    flow, st, rows = run_plant(monkeypatch, tmp_path, polarity=polarity,
+                              raw_lag_frames=2, interrupt="player", player_axis=human)
+    assert not flow.output_direction.ready and not flow.output_direction.active
+    assert "Release steering" in flow.hint(0)
+    assert max(t for t, _, value, _, _ in st.writes if value) >= 18.9
+    assert not any(value for t, _, value, _, _ in st.writes if t >= 19)
+    assert st.pad == 0 and not any(r["engaged"] for r in rows)
+
+
+@pytest.mark.parametrize("raw", [-1.0, 1.0])
+def test_player_takeover_aborts_even_during_pulse_settle(raw):
+    output = OutputDirection(lag_frames=5)
+    assert output.start(speed=0, observed=0, user_axis=0)
+    assert output.tick_stopped(speed=0, observed=0, user_axis=0, dt=0.05)
+    assert output.tick_stopped(speed=0, observed=0, user_axis=raw, dt=0.05) == 0
+    assert not output.active and not output.ready
+    assert "Release steering" in output.reason
+
+
+def test_stopped_check_progress_moves_during_first_pulse():
+    flow = _flow(LiveParams(game="ets2", device_kind="gamepad"))
+    _bends(flow, 1, 1)
+    output = flow.output_direction
+    assert output.start(speed=0, observed=0, user_axis=0)
+    assert flow.progress == 0
+    command = 0.0
+    progress = []
+    for _ in range(21):
+        command = flow.measure_output(speed=0, observed=-command,
+                                      user_axis=-command, dt=0.05)
+        progress.append(flow.progress)
+    assert not output.evidence.pairs, "the first pulse is still running"
+    assert 0 < progress[1] < progress[-1] < 0.25
+    assert progress == sorted(progress)
+    assert 0 < flow.panel(0).progress < 0.25
 
 
 def test_moving_vehicle_never_receives_measurement_pulses(monkeypatch, tmp_path):

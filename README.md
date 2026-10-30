@@ -100,9 +100,10 @@ If Smart App Control blocks `SimSteer.exe`, [run from source](#run-from-source).
       inputs; big inputs pause it.
    3. **Steering.** First drive gentle left and right bends manually.
       SimSteer compares the model, input axis and measured wheel angle
-      to detect inverted input. Then stop, release steering and press
-      **INSERT**: four small symmetric steering pulses check device-to-game
-      direction while SimSteer stays disengaged. Movement or player steering
+      to detect inverted input. Then stop on level ground with the parking
+      brake on, release steering and press **INSERT**: four small symmetric
+      steering pulses check device-to-game direction while SimSteer stays
+      disengaged. Movement or player steering
       aborts the check. After verification, press **INSERT** again to drive.
       Both mappings save for this game and device. It asks for
       a straight stretch, gentle curves, two lane changes and a slow
@@ -162,9 +163,10 @@ so leave this off unless you're scripting).
 
 ### Active steering probing
 
-Output direction is checked below 0.5 m/s with four alternating ±0.10
-steering holds of three seconds each. Only the final second of each hold
-counts, allowing game input lag and smoothing. The check ends within 14
+Stop on level ground with the parking brake on. Output direction is checked
+below 0.5 m/s with four alternating ±0.10 steering holds of three seconds
+each. Only the final second of each hold counts, allowing game input lag
+and smoothing. The check ends within 14
 seconds or shows a one-line reason. It sends steering only, with AI
 disengaged, and remains available with `--no-probe`.
 

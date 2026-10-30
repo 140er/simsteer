@@ -331,6 +331,8 @@ class CalibFlow:
             return min(1.0, (self.lc.blocks * BLOCK_SIZE + self.lc._block_n)
                        / float(INPUTS_NEEDED * BLOCK_SIZE))
         if self.step is Step.STEERING:
+            if self.output_direction.active:
+                return min(self.direction.progress, self.output_direction.progress)
             return min(self.direction.progress,
                        self.output_direction.evidence.progress,
                        self._lp_samples() / float(TRUSTED_MIN_SAMPLES), 1.0)

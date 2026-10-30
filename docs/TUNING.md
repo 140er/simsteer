@@ -132,10 +132,11 @@ strong correlation are required before engagement. Inverted input
 reseeds the rack fit with the measured sign. The correction saves per
 game and device; restarting calibration verifies it again.
 
-After those manual measurements, stop below 0.5 m/s, release steering and
-press **INSERT**. While disengaged, four alternating ±0.10 steering pulses
-measure device-to-game polarity; no throttle is sent. Each holds for three
-seconds, averaging the final second to allow input lag and smoothing.
+After those manual measurements, stop on level ground with the parking brake
+on (below 0.5 m/s), release steering and press **INSERT**. While disengaged,
+four alternating ±0.10 steering pulses measure device-to-game polarity;
+no throttle is sent. Each holds for three seconds, averaging the final second
+to allow input lag and smoothing.
 Movement or player steering aborts the check. No response, unclear evidence
 or a timeout produces a one-line reason; AI remains disengaged. This check
 also works with `--no-probe`. The profile convention (−1 for SCS) is only a

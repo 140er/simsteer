@@ -142,6 +142,8 @@ class OutputDirection:
     STOP_SPEED_MPS = 0.5
     PLAYER_THRESHOLD = 0.04
     AMPLITUDE = 0.10
+    RAW_MAX_GAIN = 1.6
+    RAW_SETTLE_S = 0.3
     PULSE_S = 3.0
     SETTLE_S = 2.0
     TIMEOUT_S = 14.0
@@ -158,11 +160,21 @@ class OutputDirection:
         self.elapsed = self._pulse_s = 0.0
         self._pulse = 0
         self._response = self._sample_s = 0.0
+        self._raw_response = self._raw_sample_s = 0.0
+        self._raw_sign: int | None = None
         self._command = 0.0
 
     @property
     def ready(self) -> bool:
         return self.sign is not None
+
+    @property
+    def progress(self) -> float:
+        if self.ready:
+            return 1.0
+        if self.active:
+            return min(0.95, (self._pulse + self._pulse_s / self.PULSE_S) / 4)
+        return 0.0
 
     def _hold_reason(self, speed, observed, user_axis, manual_override) -> str:
         if speed is None or not math.isfinite(speed):
@@ -173,18 +185,20 @@ class OutputDirection:
             return "Steering check needs steering telemetry"
         if manual_override:
             return "Release steering to check direction"
-        # Raw game input includes the virtual device. Either polarity is
-        # still possible here; only a residual beyond both is player input.
+        # Raw game input includes the virtual device, possibly delayed or
+        # scaled by the game. Its polarity is unknown until a settled sample.
         raw = observed if user_axis is None else user_axis
         if not math.isfinite(raw):
             return "Steering check needs steering telemetry"
-        if user_axis is not None or not self.active:
-            residual = min(abs(raw - self._command), abs(raw + self._command))
-        else:
-            # With no raw input signal, allow the filtered pulse to settle.
-            residual = max(0.0, abs(raw) - self.AMPLITUDE)
-        if residual > self.PLAYER_THRESHOLD:
+        limit = max(self.PLAYER_THRESHOLD, self.RAW_MAX_GAIN * abs(self._command))
+        if abs(raw) > limit:
             return "Release steering to check direction"
+        if (self.active and user_axis is not None and self._command
+                and self._pulse_s >= self.RAW_SETTLE_S and abs(raw) >= self.MIN_AXIS):
+            raw_sign = 1 if raw * self._command > 0 else -1
+            if self._raw_sign is not None and raw_sign != self._raw_sign:
+                return "Release steering to check direction"
+            self._raw_sign = raw_sign
         return ""
 
     def start(self, *, speed, observed, user_axis=None, manual_override=False) -> bool:
@@ -196,6 +210,8 @@ class OutputDirection:
         self.elapsed = self._pulse_s = 0.0
         self._pulse = 0
         self._response = self._sample_s = 0.0
+        self._raw_response = self._raw_sample_s = 0.0
+        self._raw_sign = None
         self.active = True
         return True
 
@@ -227,15 +243,20 @@ class OutputDirection:
                            - max(self._pulse_s, self.SETTLE_S))
             self._response += observed * sample_s
             self._sample_s += sample_s
+            if user_axis is not None:
+                self._raw_response += abs(user_axis) * sample_s
+                self._raw_sample_s += sample_s
             self._pulse_s = end
             if end + 1e-9 >= self.PULSE_S:
                 response = self._response / max(self._sample_s, 1e-9)
-                if abs(response) < self.MIN_AXIS:
-                    self.cancel("No steering response: check binding, then INSERT")
+                if (abs(response) < self.MIN_AXIS or (self._raw_sample_s > 0
+                        and self._raw_response < self.MIN_AXIS * self._raw_sample_s)):
+                    self.cancel("No steering response: check binding/deadzone")
                     return 0.0
                 self.evidence.add(self._command, response)
                 self._pulse += 1
                 self._pulse_s = self._response = self._sample_s = 0.0
+                self._raw_response = self._raw_sample_s = 0.0
                 if self._pulse == 4:
                     self.sign = self.evidence.sign
                     if self.ready:
