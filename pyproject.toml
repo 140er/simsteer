@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "simsteer"
+dynamic = ["version"]
+description = "Drive sim-racing games with comma.ai's openpilot model."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26,<2.0",
+    "opencv-python>=4.9; sys_platform == 'win32'",
+    "opencv-python-headless>=4.9; sys_platform != 'win32'",
+    "onnxruntime-directml>=1.17; sys_platform == 'win32'",
+    "onnxruntime>=1.17; sys_platform != 'win32'",
+    "dxcam>=0.0.5; sys_platform == 'win32'",
+    "vgamepad>=0.1.0; sys_platform == 'win32'",
+    "mss>=9.0",
+    "customtkinter>=5.2,<6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+simsteer = "simsteer.app.main:main"
+
+[tool.hatch.version]
+path = "simsteer/version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["simsteer"]
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = [".openpilot_*.py", "openpilot", ".scs-sdk-plugin"]
+
+[tool.ruff.lint]
+# Syntax errors and undefined names only, so the legacy tree stays green
+# until it is cleaned up module by module.
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

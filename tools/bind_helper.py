@@ -19,6 +19,10 @@ from __future__ import annotations
 
 import sys
 import time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import vgamepad as vg
 
 # NOTE: vgamepad is NOT imported at module top on purpose. `import
 # vgamepad` connects to the ViGEm bus as a side effect and raises
