@@ -1,0 +1,42 @@
+# American Truck Simulator. Same engine and telemetry plugin as ETS2.
+id = "ats"
+display_name = "American Truck Simulator"
+process_names = ["amtrucks.exe"]
+steam_app_id = 270880
+tested = false
+
+[telemetry]
+kind = "scs_shm"
+
+[controller]
+# US conventional tractors are about 5 to 6.5 m.
+wheelbase_m = 5.5
+steer_authority = 1.0
+lookahead_s = 0.3
+curvature_anticipation_s = 0.0
+
+[camera]
+fov_h_deg = 90.0
+hint = "Interior cab view"
+
+[capabilities]
+longitudinal = true
+speed_source = "telemetry"
+synth_wheel_angle = false
+passive_fit_safe = false
+
+[liveparams.gates]
+profile = "strict"
+
+[liveparams.gamepad]
+seed = [3.5, 0.0015, 0.0]
+
+[liveparams.wheel]
+seed = [4.0, 0.0, 0.0]
+
+[[setup]]
+check = "scs_plugin"
+
+[[setup]]
+check = "camera_fov"
+where = "Options > Gameplay > Camera"

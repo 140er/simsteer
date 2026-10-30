@@ -39,7 +39,7 @@ from simsteer.core.calibration import Calibration
 from simsteer.core.model import DrivingModel
 from simsteer.core.postprocess import decode
 from simsteer.core.preprocess import FrameQueue
-from simsteer.games.ets2 import ETS2Telemetry
+from simsteer.runtime.telemetry.scs_shm import ScsTelemetry
 from simsteer.runtime.capture import Capture, CaptureConfig
 
 GAME = "ets2"
@@ -57,13 +57,13 @@ def main() -> int:
     print(f"current FOV: {calib.fov_h_deg:.1f}deg  "
           f"(image {calib.image_w}x{calib.image_h})")
 
-    tel = ETS2Telemetry()
+    tel = ScsTelemetry()
     if not tel.available:
         print("waiting for ETS2 telemetry (load into an active drive)...")
         for _ in range(40):           # ~20 s; handshake is one-shot per reader
             tel.close()
             time.sleep(0.5)
-            tel = ETS2Telemetry()
+            tel = ScsTelemetry()
             if tel.available:
                 break
         if not tel.available:

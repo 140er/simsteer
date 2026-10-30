@@ -203,8 +203,8 @@ def test_writer_failure_raises_instead_of_blocking(tmp_path, monkeypatch):
 def test_record_writes_a_replayable_clip(tmp_path, monkeypatch, fake_model, data_dir):
     import time
 
-    import simsteer.games.base as games_base
     import simsteer.runtime.capture as capture
+    import simsteer.runtime.telemetry as telemetry
     from simsteer.runtime.replay import clip_meta
 
     class FakeCapture:
@@ -252,15 +252,13 @@ def test_record_writes_a_replayable_clip(tmp_path, monkeypatch, fake_model, data
         def close(self):
             pass
 
-    profile = games_base.get_profile("ets2")
-    monkeypatch.setattr(profile, "make_telemetry", FakeTelemetry)
-    monkeypatch.setattr(games_base, "get_profile", lambda game_id: profile)
+    monkeypatch.setitem(telemetry.KINDS, "scs_shm", telemetry.Kind({}, FakeTelemetry))
     monkeypatch.setattr(capture, "Capture", FakeCapture)
     (data_dir / "calibration_ets2.json").write_text("{}")
 
     from simsteer.app.main import main
     out = tmp_path / "rec"
-    assert main(["--record", str(out), "--seconds", "0.5"]) == 0
+    assert main(["--record", str(out), "--seconds", "0.5", "--game", "ets2"]) == 0
 
     meta = clip_meta(out)
     frames = sorted((out / "frames").glob("*.jpg"))

@@ -1,11 +1,9 @@
-"""Euro Truck Simulator 2 — the reference game profile.
+"""SCS shared-memory telemetry, for Euro Truck Simulator 2 and American
+Truck Simulator.
 
-Everything ETS2-specific lives here: the process name used to detect
-it, the SCS shared-memory telemetry reader, and the physical/control
-seeds. Telemetry comes from RenCloud's scs-telemetry plugin, which
-publishes a `scsTelemetryMap_t` struct at `Local\\SCSTelemetry` when
-ETS2 loads it. The camera FOV is read from ETS2's `config.cfg` — wired
-up in Phase 3 via `resolve_fov()`.
+RenCloud's scs-telemetry plugin publishes a `scsTelemetryMap_t` struct at
+`Local\\SCSTelemetry` when the game loads it. Both SCS games use the same
+plugin and layout.
 
 The telemetry field offsets are ported verbatim from v1's proven
 reader (PLUGIN_REVID 12 layout); do not "tidy" them — they are
@@ -21,12 +19,7 @@ from __future__ import annotations
 import math
 import mmap
 import struct
-from typing import TYPE_CHECKING
-
-from simsteer.games.base import GameDefaults, GameProfile, register
-
-if TYPE_CHECKING:
-    from simsteer.runtime.telemetry import Telemetry
+import sys
 
 
 SHARED_MEM_NAME = "Local\\SCSTelemetry"
@@ -57,11 +50,13 @@ OFF_TRUCK_WHEEL_STEERING = 1200   # float[16] radians, per wheel
 OFF_CABIN_AV_Y = 1920             # float rad/s, yaw rate of the cabin (z-axis)
 
 
-class ETS2Telemetry:
+class ScsTelemetry:
     """Optional live source of v_ego (and later: current steering, heading)."""
 
     def __init__(self) -> None:
         self._mm: mmap.mmap | None = None
+        if sys.platform != "win32":  # named mappings are a Windows API
+            return
         try:
             self._mm = mmap.mmap(-1, SHARED_MEM_SIZE, SHARED_MEM_NAME,
                                  access=mmap.ACCESS_READ)
@@ -147,17 +142,3 @@ class ETS2Telemetry:
             self._mm.close()
             self._mm = None
 
-
-@register
-class ETS2Profile(GameProfile):
-    id = "ets2"
-    display_name = "Euro Truck Simulator 2"
-    process_names = ("eurotrucks2.exe",)
-    # Wheelbase matches v1's controller default — EU tractors are
-    # ~3.5-4.2 m and a constant error here just rolls into LiveParams'
-    # scale, so the exact value isn't load-bearing. The true camera FOV
-    # is read from config.cfg in Phase 3; `fov_h_deg` stays at its seed.
-    defaults = GameDefaults(wheelbase_m=4.0, camera_hint="hood/dash view")
-
-    def make_telemetry(self) -> "Telemetry":
-        return ETS2Telemetry()

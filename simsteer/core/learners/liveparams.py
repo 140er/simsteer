@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -104,17 +105,15 @@ INTERVENTION_MIN_WHEEL = 0.005
 # the well-known under-steer feedback-loop trigger.
 SATURATION_AXIS = 0.9
 
-# Per-game gate profiles. ETS2 was working well with the original
-# strict values; Forza / AC need looser ones because:
+# Gate profiles, picked by a game profile's `liveparams.gates.profile`.
+# "strict" is what worked on ETS2. "loose" is for games whose wheel angle
+# is synthesized (Forza, AC), because:
 #   - they synthesize wheel angle from yaw rate via bicycle model
 #     (instead of reading it directly), so the (axis, wheel) pair has
 #     less independent variation;
 #   - Forza's signed-byte steer field quantizes to ~0.008 per step;
 #   - the player keeps the stick swinging more in racy games — there's
 #     no ETS2-style rack smoothing forcing input quiescence.
-#
-# `_gates_for(game)` below picks the right profile per LiveParams
-# instance based on `self.game`.
 
 # ETS2 defaults — the values that worked. KEEP THESE; do not touch
 # without per-game opt-in. `lag_frames` is also per-game because the
@@ -167,12 +166,7 @@ _GATES_SYNTH_WHEEL = {
 }
 
 
-def _gates_for(game: str | None) -> dict:
-    """Return the gate profile for a game. ETS2 (and unknown) → strict;
-    Forza / AC (synthesized wheel angles) → loose."""
-    if game in ("forza", "ac"):
-        return dict(_GATES_SYNTH_WHEEL)
-    return dict(_GATES_DEFAULT)
+GATE_PROFILES = {"strict": _GATES_DEFAULT, "loose": _GATES_SYNTH_WHEEL}
 
 
 # Back-compat shims — old code reads these as module constants. They
@@ -194,7 +188,7 @@ MAX_WHEEL_FOR_FIT = 0.3
 # filter once the fit is trusted). Cold value is per-game — ETS2's
 # strict 0.60 worked there, Forza/AC need 2.0 because the initial
 # `a=10` is far from their true rack ratio (~3) and 0.60 rejected
-# every cold sample. See `_gates_for`.
+# every cold sample. See `GATE_PROFILES`.
 MAX_INNOVATION_WARM = 0.30
 MAX_INNOVATION_COLD = _GATES_DEFAULT["max_innovation_cold"]
 
@@ -222,55 +216,30 @@ B_ABS_MAX = 0.10
 # `c` is a small TRIM bias. Per-game profile decides the clamp —
 # ETS2's 0.10 worked, Forza/AC need 0.02 (otherwise c absorbs the
 # rack-gain mismatch instead of pushing it into `a`). See
-# `_gates_for`. Module-level shim points at the ETS2 value.
+# `GATE_PROFILES`. Module-level shim points at the ETS2 value.
 C_ABS_MAX = _GATES_DEFAULT["c_abs_max"]
 
 # Initial guess. a=10 ≈ 1 rad of wheel needs 10 units of axis at low
 # speed (so effective scale ≈ 0.1 wheel/axis). b=0 lets RLS discover
-# the speed term. c=0. Used as final fallback when no per-(game, device)
-# seed exists in _INITIAL_SEEDS below.
+# the speed term. c=0. Used when the game profile has no seed for the
+# device.
 A_INIT = 10.0
 B_INIT = 0.0
 C_INIT = 0.0
 
-# Per-(game, device) cold-start seeds. Applied only when no persisted
-# liveparams_*.json file exists yet — first launch ever for that
-# (game, device) combo. The universal a=10 fallback is far from real
-# game racks (typically 3-5), so the cold filter spends thousands of
-# samples migrating before useful, AND a/c are collinear in near-
-# straight driving so it can converge to a wrong local minimum. Per-
-# game seeds get the filter close enough that first-session driving
-# is already reasonable.
-#
-# Numbers below are best-guess starting points based on the rack
-# model `axis = a·wheel + b·wheel·v² + c`:
-#  - ETS2 gamepad: a≈3.5 (axis per rad at parking), b≈0.0015 — at
-#    22 m/s gives effective ≈ 4.2 axis/rad (variable-ratio assist).
-#  - ETS2 wheel (vJoy): a≈4.0, b≈0 — vJoy bypasses ETS2's gamepad
-#    rack assist so the relationship is linear in speed.
-#  - Forza / AC: a≈3.0, b≈0.0010 — synthesized wheel angle from yaw
-#    rate, looser overall but similar magnitude.
-# Adjust if your fits converge somewhere very different.
+# Cold-start seeds come from the game profile, one per device kind
+# (`[liveparams.<device>] seed`), and apply only while no
+# liveparams_*.json exists for that (game, device). The universal a=10
+# fallback is far from real game racks (typically 3-5), so the cold
+# filter spends thousands of samples migrating before useful, AND a/c
+# are collinear in near-straight driving so it can converge to a wrong
+# local minimum.
 DEFAULT_SEED: tuple[float, float, float] = (A_INIT, B_INIT, C_INIT)
-_INITIAL_SEEDS: dict[tuple[str | None, str | None], tuple[float, float, float]] = {
-    ("ets2", "gamepad"): (3.5, 0.0015, 0.0),
-    ("ets2", "wheel"):   (4.0, 0.0,    0.0),
-    ("forza", None):     (3.0, 0.0010, 0.0),
-    ("ac", None):        (3.0, 0.0010, 0.0),
-}
+Seeds = Mapping[str, tuple[float, float, float]]
 
 
-def _seed_for(game: str | None,
-              device_kind: str | None) -> tuple[float, float, float]:
-    """Resolve the cold-start seed for (game, device_kind). Falls back
-    (game, device_kind) → (game, None) → DEFAULT_SEED so a game with no
-    device-specific seed still gets a per-game one, and an unknown game
-    falls all the way back to the universal default."""
-    if (game, device_kind) in _INITIAL_SEEDS:
-        return _INITIAL_SEEDS[(game, device_kind)]
-    if (game, None) in _INITIAL_SEEDS:
-        return _INITIAL_SEEDS[(game, None)]
-    return DEFAULT_SEED
+def _seed_for(seeds: Seeds, device_kind: str | None) -> tuple[float, float, float]:
+    return seeds.get(device_kind, DEFAULT_SEED) if device_kind else DEFAULT_SEED
 
 
 # Trust gates — either the lifetime persisted samples or the fresh
@@ -297,8 +266,11 @@ class _Persisted:
 class LiveParams:
     def __init__(self, lag_frames: int | None = None,
                  game: str | None = None,
-                 device_kind: str | None = None) -> None:
+                 device_kind: str | None = None,
+                 seeds: Seeds | None = None,
+                 gates: str = "strict") -> None:
         self.game = game
+        self.seeds: Seeds = seeds or {}
         # Per-device persistence: the rack response (and especially
         # the AXIS->WHEEL sign) differs between the ViGEm gamepad and
         # the vJoy wheel in the same game — ETS2 treats them as
@@ -306,13 +278,10 @@ class LiveParams:
         # switching devices reloads the correct fit instead of using
         # a value that was right for the OTHER device.
         self.device_kind = device_kind
-        # Per-game gate profile. ETS2 uses strict defaults (the values
-        # that worked in testing); Forza/AC use loosened gates because
-        # they synthesize wheel from yaw rate and the rack response
-        # has different signal characteristics. `lag_frames` is also
-        # part of the profile — Forza/AC have a fast rack and need
-        # `lag_frames=1`, ETS2 needs the full 5 (= 250 ms smoothing).
-        self._gates = _gates_for(game)
+        # Gate profile from the game profile. `lag_frames` is part of
+        # it: Forza/AC have a fast rack and need `lag_frames=1`, ETS2
+        # needs the full 5 (= 250 ms smoothing).
+        self._gates = dict(GATE_PROFILES[gates])
         if lag_frames is None:
             lag_frames = int(self._gates["lag_frames"])
         # Detect cold start (no persisted file) so the startup print
@@ -322,7 +291,7 @@ class LiveParams:
         resolved = self._resolve_path(game=game, device_kind=device_kind)
         self._was_seeded = (resolved is None)
         loaded = self._load(game=game, device_kind=device_kind,
-                            path=resolved)
+                            path=resolved, seeds=self.seeds)
         if self._was_seeded:
             print(f"liveparams [{device_kind or 'no device'}]: "
                   f"cold start — seeded for game={game!r}: "
@@ -791,7 +760,7 @@ class LiveParams:
         Uses the per-(game, device) seed for x — the same starting
         point a fresh cold start would use, not the universal
         A_INIT/B_INIT/C_INIT."""
-        a, b, c = _seed_for(self.game, self.device_kind)
+        a, b, c = _seed_for(self.seeds, self.device_kind)
         self.x = np.array([a, b, c], dtype=np.float64)
         self.P = np.diag(self._gates["P_init"])
         self.samples = 0
@@ -867,12 +836,13 @@ class LiveParams:
     @classmethod
     def _load(cls, game: str | None = None,
               device_kind: str | None = None,
-              path: Path | None = None) -> _Persisted:
+              path: Path | None = None,
+              seeds: Seeds | None = None) -> _Persisted:
         # The "no good data" return value is the per-(game, device)
         # seed, not the universal A_INIT/B_INIT/C_INIT — cold start
         # converges much faster from a per-game ballpark than from a=10.
         def _seeded() -> _Persisted:
-            a, b, c = _seed_for(game, device_kind)
+            a, b, c = _seed_for(seeds or {}, device_kind)
             return _Persisted(a=a, b=b, c=c, samples=0)
 
         if path is None:
@@ -974,7 +944,7 @@ class LiveParams:
                                       device_kind=new_device_kind)
         self._was_seeded = (resolved is None)
         loaded = self._load(game=self.game, device_kind=new_device_kind,
-                            path=resolved)
+                            path=resolved, seeds=self.seeds)
         if self._was_seeded:
             print(f"liveparams [{new_device_kind}]: cold start — "
                   f"seeded for game={self.game!r}: "

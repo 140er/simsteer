@@ -137,7 +137,7 @@ def _setup_window_or_exit(w: int, h: int) -> None:
             f"Run with --headless or install opencv-python. ({e.err})") from None
 
 
-def run(settings: Settings, game_id: str = "ets2", *,
+def run(settings: Settings, game: GameProfile | str, *,
         source=None,
         make_telemetry: Callable[[], Telemetry] | None = None,
         clock=None,
@@ -159,10 +159,11 @@ def run(settings: Settings, game_id: str = "ets2", *,
     hot-swap arrives in Phase 2. Per-game state (calibration, controller
     config, liveparams, livecalib) is read from the same files v1 uses,
     so an existing v1 calibration carries over."""
-    profile: GameProfile | None = get_profile(game_id)
+    profile = get_profile(game) if isinstance(game, str) else game
     if profile is None:
-        print(f"unknown game: {game_id!r}")
+        print(f"unknown game: {game!r}")
         return 2
+    game_id = profile.id
     if source is None:
         source = Capture(CaptureConfig(target_fps=20))
     if make_telemetry is None:
@@ -171,9 +172,11 @@ def run(settings: Settings, game_id: str = "ets2", *,
         clock = LiveClock()
 
     # --- Per-game state (keyed by game/device, shared with v1) ---
-    calib = Calibration.load(game_id)
-    ctrl_cfg = ControllerConfig.load(game_id)
-    live_params = LiveParams(game=game_id, device_kind=settings.device)
+    calib = Calibration.load(game_id, fov_h_deg=profile.camera.fov_h_deg)
+    ctrl_cfg = ControllerConfig.load(game_id, seed=profile.controller)
+    live_params = LiveParams(game=game_id, device_kind=settings.device,
+                             seeds=profile.liveparams.seeds,
+                             gates=profile.liveparams.gates)
     lat_ctrl = LateralController(ctrl_cfg, live_params)
     long_ctrl = LongitudinalController(ctrl_cfg)
     live_calib = LiveCalib(game=game_id)
@@ -387,9 +390,8 @@ def run(settings: Settings, game_id: str = "ets2", *,
 
                 # --- Feed LiveParams (after the command is known) ---
                 cal_routine.tick(v_real, wheel_angle, dt)
-                allow_passive = (game_id in ("ac", "forza")
-                                 or (game_id == "ets2"
-                                     and settings.passive_fit_ets2)
+                allow_passive = (profile.capabilities.passive_fit_safe
+                                 or settings.passive_fit
                                  or wizard.in_camera_phase)
                 if pad is not None and (pad.engaged or allow_passive):
                     cmd = steer if pad.engaged else game_steer

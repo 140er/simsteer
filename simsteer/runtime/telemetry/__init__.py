@@ -1,15 +1,15 @@
-"""The telemetry contract every game profile's reader satisfies.
+"""Telemetry: the reader contract and the adapter kinds a profile can name.
 
 A `Telemetry` is the loop's live window into the game world: forward
 speed, the cabin yaw rate, the front-wheel angle, and the steering
 input the game actually applied. The loop reads these every frame to
 drive longitudinal control, feed LiveCalib, and fit LiveParams.
 
-This is a `Protocol`, not a base class: each game's reader (ETS2's
-shared-memory map, AC's UDP packet, Forza's Data Out) implements the
-methods structurally and does **not** import or subclass anything here.
-That keeps the games package free of a runtime dependency on the
-loop — no circular import between the registry and the frame loop.
+This is a `Protocol`, not a base class: each adapter (the SCS shared
+memory map, later AC's and Forza's) implements the methods structurally.
+A profile's `telemetry.kind` picks the adapter from `KINDS`, and the other
+keys of its `[telemetry]` table become the adapter's keyword arguments.
+Adapters are imported only when opened, so loading profiles stays cheap.
 
 The units are fixed across games so the control math stays game-
 agnostic: speed in m/s, angles in radians, yaw rate in rad/s, steering
@@ -20,7 +20,11 @@ from yaw rate) converts at this boundary.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, NamedTuple, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from simsteer.games.profile import TelemetrySpec
 
 
 @runtime_checkable
@@ -64,3 +68,48 @@ class Telemetry(Protocol):
     def close(self) -> None:
         """Release the underlying handle (shared memory, socket)."""
         ...
+
+
+class NoTelemetry:
+    """For games without a telemetry source."""
+
+    available = False
+
+    def speed_mps(self) -> float | None:
+        return None
+
+    def game_steer(self) -> float | None:
+        return None
+
+    def user_steer(self) -> float | None:
+        return None
+
+    def wheel_angle_rad(self, wheelbase_m: float = 1.0) -> float | None:
+        return None
+
+    def yaw_rate_rad_s(self) -> float | None:
+        return None
+
+    def close(self) -> None:
+        pass
+
+
+def _scs_shm() -> Telemetry:
+    from simsteer.runtime.telemetry.scs_shm import ScsTelemetry
+    return ScsTelemetry()
+
+
+class Kind(NamedTuple):
+    # Keys a profile may set in `[telemetry]` next to `kind`, with types.
+    params: Mapping[str, type]
+    open: Callable[..., Telemetry]
+
+
+KINDS: dict[str, Kind] = {
+    "scs_shm": Kind({}, _scs_shm),
+    "none": Kind({}, NoTelemetry),
+}
+
+
+def open_telemetry(spec: TelemetrySpec) -> Telemetry:
+    return KINDS[spec.kind].open(**spec.params)
