@@ -8,9 +8,12 @@ restrict to a specific window region, pass `region=(x1, y1, x2, y2)`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-import dxcam
 import numpy as np
+
+if TYPE_CHECKING:
+    import dxcam
 
 
 @dataclass
@@ -30,7 +33,9 @@ class Capture:
 
     def __init__(self, cfg: CaptureConfig | None = None) -> None:
         self.cfg = cfg or CaptureConfig()
-        self._cam: dxcam.DXCamera | None = None
+        self._cam: "dxcam.DXCamera | None" = None
+        # A screen never runs out; `ReplaySource` sets this at clip end.
+        self.done = False
 
     def __enter__(self) -> "Capture":
         self.start()
@@ -42,6 +47,8 @@ class Capture:
     def start(self) -> None:
         if self._cam is not None:
             return
+        # Imported here so the loop and replay import on hosts without dxcam.
+        import dxcam
         self._cam = dxcam.create(output_color=self.cfg.output_color)
         self._cam.start(region=self.cfg.region, target_fps=self.cfg.target_fps,
                         video_mode=True)
