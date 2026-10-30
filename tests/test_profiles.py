@@ -315,9 +315,9 @@ def test_schema_names_match_the_code():
     assert set(GATE_PROFILES) == {"strict", "loose"}
 
 
-@pytest.mark.skipif(not Path("/proc/self/comm").exists(), reason="needs /proc")
 def test_running_process_names_sees_this_process():
     from simsteer.games.processes import running_process_names
-    comm = Path("/proc/self/comm").read_text().strip().lower()
-    assert comm in running_process_names()
-    assert Path(sys.executable).name.lower() in running_process_names()
+    names = running_process_names()
+    assert Path(sys.executable).name.lower() in names
+    if Path("/proc/self/comm").exists():
+        assert Path("/proc/self/comm").read_text().strip().lower() in names
