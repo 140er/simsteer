@@ -39,7 +39,7 @@ from enum import Enum
 from simsteer.app import audio
 from simsteer.calib.fov_source import FovReader
 from simsteer.calib.score import CheckStats, Verdict, evaluate
-from simsteer.calib.steering import SteeringDirection
+from simsteer.calib.steering import OutputDirection, SteeringDirection
 from simsteer.core.learners.livecalib import (
     BLOCK_SIZE, INPUTS_NEEDED, MIN_SPEED_FILTER_MPS, CalStatus,
 )
@@ -49,7 +49,7 @@ from simsteer.runtime.fov import (
     CANDIDATE_OFFSETS, CANDIDATE_SAMPLES, ESTIMATE_SAMPLES, FovSolver,
 )
 
-CALIB_VERSION = 2
+CALIB_VERSION = 3
 
 
 class Step(str, Enum):
@@ -203,6 +203,8 @@ class CalibFlow:
         self.fov_source = ""
         self._fov_reference = float(self.calib.fov_h_deg)
         self.direction = SteeringDirection(self.lp.lag_frames)
+        self.output_direction = OutputDirection(self.lp.lag_frames,
+                                                int(self.calib.lateral_sign))
         self.prompt_idx = 0
         self.prompt_s = 0.0
         self.regime_s = 0.0
@@ -224,6 +226,14 @@ class CalibFlow:
         self._reset_state()
         if not self._load():
             self._enter(Step.FOV)
+        # A device swap can also change the game's active binding. Recheck
+        # output even when returning to a device with a saved calibration.
+        self.output_direction = OutputDirection(self.lp.lag_frames,
+                                                int(self.calib.lateral_sign))
+        if self.steering_fit and self.step in (Step.CHECK, Step.DONE):
+            self.result = None
+            self._enter(Step.STEERING)
+        self.save()
 
     # ----- state -----
 
@@ -269,6 +279,35 @@ class CalibFlow:
         return self.step is Step.STEERING and self.direction.ready
 
     @property
+    def ai_steering_ready(self) -> bool:
+        return not self.steering_fit or (self.direction.ready and self.output_direction.ready)
+
+    def device_axis(self, game_axis: float) -> float:
+        """Map the desired game input to the device only after measurement."""
+        if not self.ai_steering_ready:
+            return 0.0
+        return game_axis * self.output_direction.sign if self.steering_fit else game_axis
+
+    def observe_output(self, **observation) -> bool:
+        if not self.steering_fit or not self.direction.ready:
+            return False
+        was_ready = self.output_direction.ready
+        if self.output_direction.update(**observation):
+            print("calib: output direction contradicted; disengaging")
+            self._reset_steering()
+            self.result = None
+            self.redo_note = "Output direction changed; verify steering again"
+            self._enter(Step.STEERING)
+            return True
+        if self.output_direction.ready and not was_ready:
+            print(f"calib: output direction verified "
+                  f"(output={self.output_direction.sign:+d}, "
+                  f"prior={self.output_direction.prior:+d}, "
+                  f"r={self.output_direction.evidence.correlation:+.3f})")
+            self.save()
+        return False
+
+    @property
     def steering_sign(self) -> float:
         """Model curvature to game wheel; independent of HUD projection."""
         if self.steering_fit:
@@ -285,6 +324,7 @@ class CalibFlow:
                        / float(INPUTS_NEEDED * BLOCK_SIZE))
         if self.step is Step.STEERING:
             return min(self.direction.progress,
+                       self.output_direction.evidence.progress,
                        self._lp_samples() / float(TRUSTED_MIN_SAMPLES), 1.0)
         if self.step is Step.CHECK:
             return min(1.0, self.check.seconds / CHECK_SECONDS)
@@ -300,7 +340,7 @@ class CalibFlow:
         if self.step is Step.CAMERA:
             return self.lc.eta_to_calibrated_s()
         if self.step is Step.STEERING:
-            if not self.direction.ready or rate <= 0:
+            if not self.ai_steering_ready or rate <= 0:
                 return None
             return max(0.0, TRUSTED_MIN_SAMPLES - self._lp_samples()) / rate
         if self.step is Step.CHECK:
@@ -320,6 +360,8 @@ class CalibFlow:
             return "calibrating camera: drive manually"
         if self.steering_fit and not self.direction.ready:
             return "checking steering direction: drive both left and right bends manually"
+        if self.steering_fit and not self.output_direction.ready and self.step is not Step.STEERING:
+            return "output direction unverified: recalibrate steering"
         return ""
 
     # ----- per frame -----
@@ -428,6 +470,8 @@ class CalibFlow:
                 self.save()
             else:
                 return
+        if not self.output_direction.ready:
+            return
         samples = self._lp_samples()
         self._rate.add(o.now, samples)
         if self.lp.trusted():
@@ -502,8 +546,7 @@ class CalibFlow:
         self.redo_note = verdict.reason
         redo = Step(verdict.redo) if verdict.redo in Step._value2member_map_ else Step.CHECK
         if redo is Step.STEERING:
-            self.lp.reset(wipe_disk=True)
-            self.direction = SteeringDirection(self.lp.lag_frames)
+            self._reset_steering()
         self._enter(redo)
 
     # ----- transitions -----
@@ -542,7 +585,7 @@ class CalibFlow:
             self.prompt_s = self.regime_s = 0.0
             self.lane_changes = 0
             self._set_step(step)
-            if self.lp.trusted() and self.direction.ready:
+            if self.lp.trusted() and self.ai_steering_ready:
                 self._advance()
             return
         if step is Step.CHECK:
@@ -565,14 +608,19 @@ class CalibFlow:
     def restart(self, reason: str) -> None:
         """Wipe the camera pose and steering fit and start over at FOV."""
         self.lc.reset(reason=reason)
-        self.lp.reset(wipe_disk=True)
-        self.direction = SteeringDirection(self.lp.lag_frames)
+        self._reset_steering()
         self.attempts = 0
         self.result = None
         self.redo_note = ""
         self.fov_source = ""
         print(f"calib: restart ({reason})")
         self._enter(Step.FOV)
+
+    def _reset_steering(self) -> None:
+        self.lp.reset(wipe_disk=True, clear_axis_sign=True)
+        self.direction = SteeringDirection(self.lp.lag_frames)
+        self.output_direction = OutputDirection(self.lp.lag_frames,
+                                                int(self.calib.lateral_sign))
 
     # ----- HUD -----
 
@@ -596,6 +644,9 @@ class CalibFlow:
         if self.step is Step.STEERING:
             if not self.direction.ready:
                 return "Drive gentle left and right bends manually"
+            if not self.output_direction.ready:
+                return ("Checking output direction" if engaged else
+                        "Press INSERT to check output direction")
             if self.redo_note and self.prompt_idx == 0 and self.prompt_s < 10.0:
                 return f"Redo: {self.redo_note}"
             if not self.passive_fit and not engaged:
@@ -638,7 +689,8 @@ class CalibFlow:
     def log_fields(self) -> dict:
         return {"calib": self.step.value, "calib_pct": round(self.progress * 100, 1),
                 "steering_model_sign": self.direction.model_sign,
-                "steering_input_sign": self.direction.axis_sign}
+                "steering_input_sign": self.direction.axis_sign,
+                "steering_output_sign": self.output_direction.sign}
 
     # ----- persistence -----
 
@@ -658,7 +710,8 @@ class CalibFlow:
                          "prompt_s": round(self.prompt_s, 3),
                          "regime_s": round(self.regime_s, 3),
                          "lane_changes": self.lane_changes,
-                         "direction": self.direction.to_dict()},
+                         "direction": self.direction.to_dict(),
+                         "output_direction": self.output_direction.to_dict()},
             "check": self.check.to_dict(),
         }
 
@@ -680,7 +733,7 @@ class CalibFlow:
             d = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return False
-        if (d.get("version") != CALIB_VERSION or d.get("game") != self.game
+        if (d.get("version") not in (2, CALIB_VERSION) or d.get("game") != self.game
                 or d.get("device") != self.device):
             return False
         try:
@@ -698,6 +751,7 @@ class CalibFlow:
             self.regime_s = float(st.get("regime_s", 0.0))
             self.lane_changes = int(st.get("lane_changes", 0))
             self.direction.load_dict(st.get("direction", {}))
+            self.output_direction.load_dict(st.get("output_direction", {}))
             self.check = CheckStats.from_dict(d.get("check"))
         except (KeyError, ValueError, TypeError):
             return False
@@ -708,7 +762,7 @@ class CalibFlow:
         elif self.steering_fit:
             if self.direction.ready:
                 self.lp.set_axis_sign(self.direction.axis_sign)
-            elif self.step in (Step.CHECK, Step.DONE):
+            if not self.ai_steering_ready and self.step in (Step.CHECK, Step.DONE):
                 self.result = None
                 self._enter(Step.STEERING)
         return True

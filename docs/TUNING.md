@@ -42,7 +42,7 @@ A fresh setup, in order:
 | **Pitch / Yaw** | Camera mount angles. Auto-written by LiveCalib; only override if the cyan horizon line visibly drifts off the real horizon. |
 | **Camera height** | Height above road (m). Auto-refined by LiveCalib. |
 | **Crop top / bottom** | Hide cab roof / hood from the model input. |
-| **Mirror lateral sign** | Mirror the road projection. With wheel telemetry, calibration learns steering direction separately. |
+| **Mirror road overlay** | Mirror the road projection. With wheel telemetry, steering direction is measured automatically. Without it, also flip steering. |
 | **Simple warp** | Crop+resize (default) vs full perspective warp. Leave on. |
 
 **FOV health check** (HUD `FOV` line, dev HUD): drive straight at highway
@@ -108,7 +108,7 @@ are stored separately.
 |---|---|
 | **a / b / c sliders** | Manually seed the fit. RLS keeps refining unless locked. |
 | **Lock fit** | Freeze a/b/c — both RLS and intervention learning stop. |
-| **Flip sign** | Negate a and b. Use if the truck steers the wrong way (alternative to mirror lateral sign). |
+| **Flip sign** | Negate a and b for rack diagnostics. Recalibrate to measure steering direction; verification replaces an inconsistent fit sign. |
 | **Reset RLS** | Back to the per-(game, device) **seed** (e.g. ETS2 gamepad a=3.5). |
 | **Save liveparams** | Persist current a/b/c. |
 
@@ -132,7 +132,18 @@ strong correlation are required before engagement. Inverted input
 reseeds the rack fit with the measured sign. The correction saves per
 game and device; restarting calibration verifies it again.
 
-After direction is verified, the step prompts for a straight stretch,
+After those manual measurements, press **INSERT** on a straight road.
+AI steering stays at zero while the small symmetric probe measures the
+device-to-game input polarity. The profile convention (−1 for SCS) is
+only a prior: both probe directions, enough samples and strong correlation
+are required before AI steering is enabled. No response or ambiguous
+evidence leaves AI steering at zero. The measured output polarity saves
+per game and device; recalibration and device swaps clear it. A sustained
+contradiction while driving disengages and requires fresh verification,
+without changing the output sign mid-drive. A replay has no device response
+and therefore stops at this measurement.
+
+After output direction is verified, the step prompts for a straight stretch,
 gentle curves, lane changes and slow turns until the fit is trusted.
 It widens the RLS gates with a per-call override during this step;
 the profile's gates stay unchanged. **Recalibrate** restarts the whole

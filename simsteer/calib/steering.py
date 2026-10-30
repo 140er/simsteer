@@ -123,3 +123,68 @@ class SteeringDirection:
         model_sign, axis_sign = d.get("model_sign"), d.get("axis_sign")
         if model_sign in (-1, 1) and axis_sign in (-1, 1):
             self.model_sign, self.axis_sign = int(model_sign), int(axis_sign)
+
+
+class OutputDirection:
+    """Device command -> observed game input, independent of wheel telemetry.
+
+    Only the symmetric probe can establish this mapping. The profile sign
+    is a prior, never permission to steer. A short command history admits
+    either immediate or delayed game input without mistaking a zero
+    crossing for inverted output. Once measured, a contradiction revokes
+    authority; it never changes the sign while driving.
+    """
+
+    MIN_AXIS = 0.004
+    CONTRADICTION_S = 0.75
+
+    def __init__(self, lag_frames: int, prior: int = -1) -> None:
+        self.prior = prior
+        self.sign: int | None = None
+        self.evidence = _Evidence(0.003)
+        self._commands: deque[float] = deque(maxlen=max(1, lag_frames + 1))
+        self._bad_s = 0.0
+
+    @property
+    def ready(self) -> bool:
+        return self.sign is not None
+
+    def update(self, *, command: float | None, observed: float | None,
+               speed: float | None, engaged: bool, probing: bool,
+               lane_change: bool, dt: float) -> bool:
+        """Observe a previously emitted command. True requests disengagement."""
+        if (not engaged or lane_change or command is None or observed is None
+                or speed is None
+                or not all(math.isfinite(x) for x in (command, observed, speed))
+                or speed < 6.0 or (not self.ready and (not probing or speed > 30.0))):
+            self._commands.clear()
+            self._bad_s = 0.0
+            return False
+        self._commands.append(command)
+        if len(self._commands) < self._commands.maxlen:
+            return False
+        # All plausible delayed commands must have the same nontrivial sign.
+        lo, hi = min(self._commands), max(self._commands)
+        if (lo < self.MIN_AXIS and hi > -self.MIN_AXIS
+                or abs(observed) < self.MIN_AXIS):
+            self._bad_s = 0.0
+            return False
+        expected = sum(self._commands) / len(self._commands)
+        if not self.ready:
+            self.evidence.add(expected, observed)
+            self.sign = self.evidence.sign
+            return False
+        if expected * observed * self.sign < 0:
+            self._bad_s += min(max(dt, 0.0), 0.25)
+        else:
+            self._bad_s = 0.0
+        return self._bad_s >= self.CONTRADICTION_S
+
+    def to_dict(self) -> dict:
+        return {"sign": self.sign, "pairs": list(self.evidence.pairs)}
+
+    def load_dict(self, d: dict) -> None:
+        self.evidence.load(d.get("pairs", []))
+        sign = d.get("sign")
+        if sign in (-1, 1) and self.evidence.sign == sign:
+            self.sign = int(sign)

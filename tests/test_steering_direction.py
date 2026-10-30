@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import deque
 from types import SimpleNamespace
 
 import numpy as np
@@ -11,6 +12,7 @@ import pytest
 
 from simsteer.calib.flow import CalibFlow, Obs, Step, flow_path
 from simsteer.calib.steering import SteeringDirection
+from simsteer.app.probe import SteeringProbe
 from simsteer.core.calibration import Calibration
 from simsteer.core.constants import IDX_N, PLAN_WIDTH, T_IDXS
 from simsteer.core.control import ControllerConfig, LateralController
@@ -54,6 +56,21 @@ def _plan(curvature, speed=22.0):
     return SimpleNamespace(plan=plan, desire_state=np.zeros(8))
 
 
+def _probe_output(flow, sign):
+    probe = SteeringProbe()
+    commands = deque([0.0] * (flow.lp.lag_frames + 1),
+                     maxlen=flow.lp.lag_frames + 1)
+    for _ in range(240):
+        command = probe.tick(0.05, 0.0, 22.0, False, True, False, True)
+        commands.append(command)
+        flow.observe_output(command=command, observed=sign * commands[0],
+                            speed=22.0, engaged=True, probing=True,
+                            lane_change=False, dt=0.05)
+        if flow.output_direction.ready:
+            return
+    raise AssertionError("symmetric output probe did not establish direction")
+
+
 @pytest.mark.parametrize("model_sign", [1, -1])
 @pytest.mark.parametrize("axis_sign", [1, -1], ids=["normal-input", "inverted-input"])
 def test_manual_calibration_corrects_actual_output_and_persists(model_sign, axis_sign):
@@ -69,6 +86,9 @@ def test_manual_calibration_corrects_actual_output_and_persists(model_sign, axis
     assert flow.direction.model_sign == model_sign
     assert flow.direction.axis_sign == axis_sign
     assert not flow.engage_block()
+    assert not flow.ai_steering_ready
+    _probe_output(flow, -1)
+    assert flow.ai_steering_ready
     assert lp.a_linear * axis_sign > 0
     if axis_sign == -1:
         assert not lp.trusted()  # Wrong trusted gain was cleared, not cosmetically flipped.
@@ -91,6 +111,7 @@ def test_manual_calibration_corrects_actual_output_and_persists(model_sign, axis
     again = CalibFlow("ets2", "gamepad", live_calib=flow.lc,
                       live_params=again_lp, calib=flow.calib)
     assert again.direction.ready and again.steering_sign == model_sign
+    assert again.output_direction.sign == -1
     assert again_lp.axis_sign == axis_sign
     again_lp.reset()
     assert again_lp.a_linear * axis_sign > 0

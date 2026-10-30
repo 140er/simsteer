@@ -239,6 +239,9 @@ def main(argv: list[str] | None = None) -> int:
                 key = flow.step.value
                 if getattr(flow, "fov_proposal", None) is not None:
                     key += "-proposal"
+                elif (key == "steering" and flow.direction.ready
+                      and not flow.output_direction.ready):
+                    key += "-output-direction"
                 elif flow.calibrating and flow.progress >= 0.5:
                     key += "-mid"
                 if key not in seen:

@@ -18,6 +18,7 @@ from simsteer.core.learners.livecalib import BLOCK_SIZE, INPUTS_NEEDED, CalStatu
 from simsteer.core.learners.liveparams import TRUSTED_MIN_SAMPLES, LiveParams
 from simsteer.runtime import fov
 from simsteer.runtime.fov import FovSolver, solve_from_ratio
+from test_steering_direction import _probe_output
 
 FIXTURE = Path(__file__).parent / "fixtures" / "ets2_config.cfg"
 TRUE_FOV = 75.0
@@ -66,8 +67,10 @@ class FakeLiveParams:
     def trusted(self) -> bool:
         return max(self.samples, self.session_samples) >= TRUSTED_MIN_SAMPLES
 
-    def reset(self, wipe_disk: bool = False) -> None:
+    def reset(self, wipe_disk: bool = False, clear_axis_sign: bool = False) -> None:
         self.samples = self.session_samples = 0
+        if clear_axis_sign:
+            self.axis_sign = None
         self.wipes += int(wipe_disk)
 
     def reset_covariance_only(self) -> None:
@@ -127,10 +130,12 @@ class Driver:
         # A real manual drive through both bends, independent of AI output.
         for i in range(180):
             if self.flow.direction.ready:
-                return
+                break
             wheel = 0.015 * math.sin(2 * math.pi * i / 90)
             self.frames(1, wheel=wheel, observed_axis=4.0 * wheel,
                         model_curvature=wheel / 2.65, engaged=False)
+        _probe_output(self.flow, -1)
+        self.frames(1)
 
     def until(self, step: Step, limit: int = 20000, **obs) -> None:
         for _ in range(limit):
@@ -488,6 +493,8 @@ def test_failed_check_redoes_steering_with_a_fresh_fit_then_stops():
             break
     assert flow.step is Step.STEERING
     assert lp.wipes == 1
+    assert lp.axis_sign is None
+    assert not flow.output_direction.ready
     assert "mispredicts" in flow.redo_note
 
     lp.samples = TRUSTED_MIN_SAMPLES

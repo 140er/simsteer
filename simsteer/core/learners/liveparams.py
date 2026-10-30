@@ -758,7 +758,7 @@ class LiveParams:
             self.save()
             self._dirty = 0
 
-    def reset(self, wipe_disk: bool = False) -> None:
+    def reset(self, wipe_disk: bool = False, clear_axis_sign: bool = False) -> None:
         """Wipe in-memory RLS state to the per-(game, device) seed.
         With `wipe_disk=True`, also remove the persisted JSON so the
         next session starts fresh — used by the overlay `R` hotkey
@@ -767,9 +767,14 @@ class LiveParams:
         it (useful for tuner-triggered resets that want a known-good
         backup on disk).
 
+        `clear_axis_sign` also discards direction evidence for a new
+        calibration; ordinary fit resets retain the measured input sign.
+
         Uses the per-(game, device) seed for x — the same starting
         point a fresh cold start would use, not the universal
         A_INIT/B_INIT/C_INIT."""
+        if clear_axis_sign:
+            self.axis_sign = None
         a, b, c = _seed_for(self.seeds, self.device_kind)
         if self.axis_sign is not None:
             a = self.axis_sign * max(abs(a), A_ABS_MIN_RUNTIME)

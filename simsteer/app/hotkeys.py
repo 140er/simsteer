@@ -85,9 +85,9 @@ HOTKEYS: list[Hotkey] = [
            "View", "overlay"),
 
     # Calibration
-    Hotkey("mirror_sign", "M", "Mirror lateral sign",
-           "Flip the steering / overlay convention if everything is "
-           "left-right inverted on a fresh install.",
+    Hotkey("mirror_sign", "M", "Mirror road overlay",
+           "Mirror the road projection. With wheel telemetry, steering "
+           "direction is measured automatically. Without it, also flip steering.",
            "Calibration", "overlay"),
     Hotkey("save_calib", "C", "Save calibration.json",
            "Persists the current camera pose + lateral_sign immediately.",

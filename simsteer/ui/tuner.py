@@ -405,7 +405,7 @@ class Tuner:
                         0.0, 0.45, 0.01, "{:.2f}"),
         ]:
             self._add_slider(sec.body, spec)
-        self._add_switch(sec.body, "Mirror lateral sign",
+        self._add_switch(sec.body, "Mirror road overlay",
                          get=lambda: self.calib.lateral_sign < 0,
                          set_=lambda v: setattr(
                              self.calib, "lateral_sign",
