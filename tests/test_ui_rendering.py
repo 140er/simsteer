@@ -109,7 +109,7 @@ def test_runtime_h_key_and_tuner_switch_share_state(monkeypatch, tmp_path):
 
     class Keys:
         def __init__(self):
-            self.frames = iter([[ord("h")], [], [ord("q")]])
+            self.frames = iter([[], [ord("h")], [], [ord("q")]])
 
         def poll(self):
             return next(self.frames)

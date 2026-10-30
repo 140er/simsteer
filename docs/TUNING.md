@@ -19,15 +19,18 @@ persist to disk.
 
 A fresh setup, in order:
 
-1. **Set FOV** (Camera section) to match your in-game FOV. Verify with
-   the HUD `vx_model/v_ego` ratio ≈ 1.0. Non-negotiable — wrong FOV =
-   wrong geometry = the plan veers off the road.
-2. **Drive the first-drive wizard** (~10–15 min manual highway). This
-   converges LiveCalib (camera pitch/yaw/height) and LiveParams (the
-   steering rack fit). Don't fight the wheel.
-3. **Engage** (INSERT) once the banner goes green.
-4. If driving feels off, reach for the knobs below — but change **one at
-   a time** and watch the HUD.
+1. **Calibrate** in one guided drive: FOV, Camera, Steering, then a
+   two minute Check. The FOV step measures your FOV once and asks you
+   to accept it; wrong FOV means wrong geometry and a plan that veers
+   off the road. Camera converges LiveCalib (pitch/yaw/height) and
+   Steering first verifies direction from manual left and right bends,
+   then converges LiveParams (the rack fit) while SimSteer drives.
+2. The Check scores the drive. It passes, or names the step to redo:
+   weaving, full-lock steering or a steering model that mispredicts the
+   wheel point at Steering; model speed that disagrees with the game
+   points at FOV.
+3. If driving feels off after that, reach for the knobs below, but
+   change **one at a time** and watch the HUD.
 
 ---
 
@@ -35,22 +38,22 @@ A fresh setup, in order:
 
 | Knob | What it does |
 |---|---|
-| **Capture VFOV** | Vertical FOV of your capture. Set to match the game. HFOV is derived from aspect. **Static — no auto-FOV.** |
+| **Capture VFOV** | Vertical FOV of your capture. Set by the calibration's FOV step; change it here to enter it by hand. HFOV is derived from aspect. Never tuned continuously. |
 | **Pitch / Yaw** | Camera mount angles. Auto-written by LiveCalib; only override if the cyan horizon line visibly drifts off the real horizon. |
 | **Camera height** | Height above road (m). Auto-refined by LiveCalib. |
 | **Crop top / bottom** | Hide cab roof / hood from the model input. |
-| **Mirror lateral sign** | Flip steering direction if the truck steers the wrong way. |
+| **Mirror road overlay** | Mirror the road projection. With wheel telemetry, steering direction is measured automatically. Without it, also flip steering. |
 | **Simple warp** | Crop+resize (default) vs full perspective warp. Leave on. |
 
 **FOV health check** (HUD `FOV` line, dev HUD): drive straight at highway
 speed and read `ratio vx_model/v_ego`:
 - `~1.00` → correct.
-- `> 1.05` → FOV set too high → narrow VFOV.
-- `< 0.95` → FOV set too low → widen VFOV.
+- `> 1.05` → FOV set too low → widen VFOV.
+- `< 0.95` → FOV set too high → narrow VFOV.
 
-This ratio is the same signal the old auto-FOV used internally; it's
-shown for you to tune by hand instead of being applied in a feedback
-loop.
+The FOV step measures this ratio at fixed candidate warps and asks you
+to accept the answer. It never adjusts FOV continuously. A known
+in-game setting can also be entered by hand.
 
 ---
 
@@ -105,7 +108,7 @@ are stored separately.
 |---|---|
 | **a / b / c sliders** | Manually seed the fit. RLS keeps refining unless locked. |
 | **Lock fit** | Freeze a/b/c — both RLS and intervention learning stop. |
-| **Flip sign** | Negate a and b. Use if the truck steers the wrong way (alternative to mirror lateral sign). |
+| **Flip sign** | Negate a and b. In telemetry games this mirrors AI steering immediately; Recalibrate to undo. |
 | **Reset RLS** | Back to the per-(game, device) **seed** (e.g. ETS2 gamepad a=3.5). |
 | **Save liveparams** | Persist current a/b/c. |
 
@@ -122,11 +125,33 @@ wash out when you're back on the highway.
 steer or wildly oversteers): hit **Reset RLS**, then drive highway until
 trusted again.
 
-**Guided calibration** (sub-block): a 4-step routine (straight → slalom
-→ corner → highway, ~90 s) that widens the RLS gates so the fit
-converges fast. Press **Start guided calibration** and follow the HUD
-prompts. ETS2's strict gates are untouched — the routine passes a
-per-call override only while it's running.
+The guided flow's **Steering** step first asks for manual left and right
+bends. It compares model curvature and the observed input axis with
+measured wheel angle, including the input delay. Both directions and
+strong correlation are required before engagement. Inverted input
+reseeds the rack fit with the measured sign. The correction saves per
+game and device; restarting calibration verifies it again.
+
+After those manual measurements, stop on level ground with the parking brake
+on (below 0.5 m/s), release steering and press **INSERT**. While disengaged,
+four alternating ±0.10 steering pulses measure device-to-game polarity;
+no throttle is sent. Each holds for three seconds, averaging the final second
+to allow input lag and smoothing.
+Movement or player steering aborts the check. No response, unclear evidence
+or a timeout produces a one-line reason; AI remains disengaged. This check
+also works with `--no-probe`. The profile convention (−1 for SCS) is only a
+prior. Press **INSERT** again after verification to drive. Output polarity saves
+per game and device; recalibration and device swaps clear it. A sustained
+contradiction while driving disengages and clears only output verification;
+the rack fit and manual direction remain. Driver corrections are excluded
+from this guard. A replay has no device response
+and therefore stops at this measurement.
+
+After output direction is verified, the step prompts for a straight stretch,
+gentle curves, lane changes and slow turns until the fit is trusted.
+It widens the RLS gates with a per-call override during this step;
+the profile's gates stay unchanged. **Recalibrate** restarts the whole
+flow, including camera calibration and the scored Check.
 
 ---
 
@@ -201,11 +226,10 @@ wizard can detect it. Disengage first.
 If calibration goes bad (truck wandering, lanes drawn wrong, persistent
 INVALID in the LIVECALIB HUD line):
 
-1. **Press `R`** in the overlay — wipes LiveCalib + LiveParams + the
-   wizard flag and restarts the first-drive wizard.
-2. **Relaunch with `--reset-calib`** — same, applied at startup.
-3. **Manual** — delete `%LOCALAPPDATA%\SimSteer\livecalib_state_<game>.json`,
-   `liveparams_<game>_<device>.json`, and `first_drive_done_<game>.flag`.
+1. **Press `R`** in the overlay, or **Recalibrate** in the tuner, to
+   wipe LiveCalib and LiveParams and restart calibration at FOV.
+2. **Manual**: delete `%LOCALAPPDATA%\SimSteer\calibflow_<game>_<device>.json`,
+   `livecalib_state_<game>.json` and `liveparams_<game>_<device>.json`.
 
 LiveCalib also self-recovers if its estimate goes INVALID for 3+
 consecutive blocks.

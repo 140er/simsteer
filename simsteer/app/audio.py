@@ -1,4 +1,4 @@
-"""Tiny audio helper for engagement chimes and the wizard-complete sound.
+"""Tiny audio helper for engagement chimes and the calibration-complete sound.
 
 Files live in `bundle_dir()/assets/<name>.wav`. They're NOT shipped in v1 —
 the user can drop in their own later. This module no-ops gracefully when a

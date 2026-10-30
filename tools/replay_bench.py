@@ -9,6 +9,14 @@ of each stage. A revision without replay mode is reported and skipped.
     python tools/replay_bench.py --head HEAD --runs 3
     python tools/replay_bench.py --head .          # the working tree as is
     python tools/replay_bench.py --trunk origin/main --head HEAD --max-p95 8
+    python tools/replay_bench.py --trunk origin/main --head HEAD --from-fresh-data \
+        --clip ~/.cache/simsteer/clips/synthetic-calib
+
+`--from-fresh-data` replays without the clip's saved `state/`, so every
+revision calibrates from scratch, and also reports each revision's time
+to calibrated: clip seconds until the calibration flow reaches Check, or
+until the old first-drive wizard reports done. Both fit steering from
+the recorded drive, as a replay cannot steer.
 """
 
 from __future__ import annotations
@@ -63,6 +71,30 @@ def replay(tree: Path, clip: Path, frames: int, log: Path) -> list[dict]:
         return [json.loads(line) for line in f][WARMUP:]
 
 
+def fresh_clip(clip: Path, tmp: Path) -> Path:
+    """The clip without its saved state, by symlink."""
+    out = tmp / "fresh-clip"
+    out.mkdir(exist_ok=True)
+    for p in clip.iterdir():
+        if p.name != "state" and not (out / p.name).exists():
+            (out / p.name).symlink_to(p)
+    return out
+
+
+def time_to_calibrated(tree: Path, clip: Path) -> tuple[float | None, dict]:
+    """Clip seconds to calibrated at this revision, and the run summary."""
+    flow = (tree / "simsteer" / "calib" / "flow.py").exists()
+    cmd = [sys.executable, str(ROOT / "tools" / "calib_replay.py"), "--tree", str(tree),
+           "--clip", str(clip), "--passive"]
+    cmd += ["--accept-fov"] if flow else ["--fake-pad"]
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    out = subprocess.run(cmd, cwd=tree, env=env, check=True, capture_output=True,
+                         text=True).stdout.strip().splitlines()[-1]
+    summary = json.loads(out)
+    marks = summary.get("marks", {})
+    return marks.get("check_start" if flow else "wizard_done"), summary
+
+
 def summarize(rows: list[dict]) -> dict[str, tuple[float, float]]:
     cols = {k: np.array([r[k] for r in rows]) for k in STAGES}
     cols["non_model_ms"] = cols["frame_ms"] - cols["model_ms"]
@@ -79,6 +111,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--frames", type=int, default=600)
     ap.add_argument("--max-p95", type=float, default=None,
                     help="exit 1 when head's non-model p95 exceeds this (ms)")
+    ap.add_argument("--from-fresh-data", action="store_true",
+                    help="ignore the clip's saved state and report time to "
+                         "calibrated per revision")
     args = ap.parse_args(argv)
 
     if not any((ROOT / "models").glob("*.onnx")):
@@ -99,12 +134,19 @@ def main(argv: list[str] | None = None) -> int:
         if "head" not in trees:
             return 2
 
+        clip = args.clip.expanduser().resolve()
+        if args.from_fresh_data:
+            clip = fresh_clip(clip, tmp)
         rows: dict[str, list[dict]] = {label: [] for label in trees}
         for run in range(args.runs):
             for label, tree in trees.items():
                 log = tmp / f"{label}-{run}.jsonl"
-                rows[label] += replay(tree, args.clip.expanduser().resolve(), args.frames, log)
+                rows[label] += replay(tree, clip, args.frames, log)
                 print(f"run {run + 1}/{args.runs} {label}: done", flush=True)
+        calibrated: dict[str, float | None] = {}
+        if args.from_fresh_data:
+            for label, tree in trees.items():
+                calibrated[label], _ = time_to_calibrated(tree, clip)
 
         print(f"clip {args.clip}  frames {args.frames} x {args.runs} runs "
               f"(first {WARMUP} of each run dropped)")
@@ -117,6 +159,10 @@ def main(argv: list[str] | None = None) -> int:
             stats = summarize(rows[label])
             for k, (p50, p95) in stats.items():
                 print(f"  {k:13s} p50 {p50:7.2f}  p95 {p95:7.2f}")
+            if label in calibrated:
+                t = calibrated[label]
+                print(f"  time to calibrated: "
+                      f"{'not reached' if t is None else f'{t:.1f} s of clip'}")
             if (label == "head" and args.max_p95 is not None
                     and stats["non_model_ms"][1] > args.max_p95):
                 print(f"  FAIL: non-model p95 {stats['non_model_ms'][1]:.2f} ms "

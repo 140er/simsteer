@@ -74,6 +74,12 @@ def _softmax(x: np.ndarray) -> np.ndarray:
     return e / e.sum()
 
 
+def decode_pose(vision_flat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Ego-motion mean and linear std from a vision output alone."""
+    mu, log_std = _split_mu_std(_slice(vision_flat, "pose", VISION_SLICES))
+    return mu, np.exp(log_std)
+
+
 def decode(vision_flat: np.ndarray, policy_flat: np.ndarray) -> Decoded:
     # --- Vision ---
     pose_raw = _slice(vision_flat, "pose", VISION_SLICES)         # 12 = mu(6) + std(6)

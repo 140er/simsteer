@@ -149,7 +149,7 @@ class HudRenderer:
     @staticmethod
     def _calibration_line(img, cal: CalibrationView) -> None:
         w = img.shape[1]
-        track_w = min(480, max(100, w // 2 - 24))
+        track_w = min(660, max(100, w // 2 - 24))
         count = max(1, len(cal.steps))
         gap = 6
         segment = (track_w - (count - 1) * gap) // count
@@ -161,9 +161,11 @@ class HudRenderer:
             if frac:
                 color = COL_FG_MUTED if i < cal.step_index else COL_ACCENT_BLUE
                 cv2.rectangle(img, (x, y), (x + int(segment * frac), y + 3), color, -1)
-            name = f"{i + 1} {name}"
+            name = f"{i + 1} {name}" if count <= 4 else name
             if i == cal.step_index:
-                name += f" {cal.progress:.0%}"
+                percent = f" {cal.progress:.0%}"
+                if text_width(name + percent, 11, True) <= segment:
+                    name += percent
             draw_text(
                 img,
                 name,

@@ -3,7 +3,7 @@
 LATERAL — feed-forward + slow steady-state trim:
 
     desired_k    = desired_curvature_from_plan(v_ego, lookahead_s)
-    target_wheel = atan(desired_k * wheelbase * authority)   # bicycle model
+    target_wheel = wheel_sign * atan(desired_k * wheelbase * authority)
     axis_ff      = LiveParams.axis_for_wheel_angle(target_wheel, v_ego)
     axis_trim    = leaky_integrator(LPF(target_wheel - actual_wheel))
     axis         = clip(axis_ff + axis_trim + axis_bias, ±steer_max)
@@ -19,9 +19,10 @@ this knob.
 b*wheel*v² + c` from telemetry (with a speed-stiffness term so the
 same axis produces a different wheel angle at parking vs highway,
 matching ETS2's variable-ratio rack). `axis_for_wheel_angle(target,
-v_ego)` returns the FF axis directly. `lateral_sign` is NOT applied
-here — LiveParams absorbs whatever sign exists between gamepad axis
-and the truck's actual wheel response.
+v_ego)` returns the FF axis directly. Calibration supplies `wheel_sign`
+from model curvature versus measured wheel angle. LiveParams absorbs
+the separate sign between input axis and actual wheel response. The
+display's projection sign does not multiply either control output.
 
 The `axis_trim` term is a leaky integrator on the LPF'd wheel-angle
 error. It corrects steady-state offsets that the FF stack alone
@@ -51,7 +52,6 @@ from __future__ import annotations
 
 import json
 import math
-import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -328,7 +328,7 @@ class LateralController:
     def compute(self, decoded: Decoded, v_ego: float,
                 actual_wheel_angle: float | None = None,
                 lane_change_command_active: bool = False,
-                dt: float = 0.05) -> float:
+                dt: float = 0.05, wheel_sign: float = 1.0) -> float:
         """Plan -> gamepad axis. `actual_wheel_angle` (rad) feeds the
         closed-loop trim integrator; pass None to disable feedback
         for this frame. `dt` (s) is used by the integrator + leak —
@@ -380,7 +380,9 @@ class LateralController:
         self.last_curvature = k_total
         self.last_authority = authority
 
-        target_wheel = math.atan(k_total * cfg.wheelbase_m)
+        # Convert the model target before the rack fit and feedback, so
+        # bias and measured wheel angle stay in the game's convention.
+        target_wheel = wheel_sign * math.atan(k_total * cfg.wheelbase_m)
         self.last_target_wheel = target_wheel
 
         # FF axis from LiveParams inversion. v_ego enters the speed-
@@ -405,7 +407,7 @@ class LateralController:
             # dominated by lag, not by the steady-state offset the
             # trim is meant to correct.
             intervened_recently = (
-                time.monotonic() - self.live_params.last_intervened_ts < 1.0)
+                self.live_params.clock() - self.live_params.last_intervened_ts < 1.0)
             if v_ego < 8.0:
                 freeze_reason = "slow"
             elif abs(target_wheel) > 0.05:
@@ -424,8 +426,10 @@ class LateralController:
                 freeze_reason = ""
 
             if not freeze_reason:
+                axis_sign = (1.0 if self.live_params.effective_scale_at(v_ego) >= 0
+                             else -1.0)
                 self.axis_trim_state += (
-                    dt * cfg.wheel_trim_gain * self.lpf_wheel_error)
+                    dt * cfg.wheel_trim_gain * self.lpf_wheel_error * axis_sign)
                 # Exponential leak — forgets stale trim over
                 # wheel_trim_leak_s if the gate stays open.
                 self.axis_trim_state *= math.exp(-dt / cfg.wheel_trim_leak_s)

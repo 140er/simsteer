@@ -472,6 +472,7 @@ class Tuner:
             ("camera", "Camera"),
             ("steering", "Steering fit"),
             ("fov", "FOV"),
+            ("direction", "Output direction"),
             ("calibration", "Calibration"),
         ]:
             self._readout(group, key, name, "—")
@@ -745,7 +746,22 @@ class Tuner:
                 ),
             }
             if self.calib_flow and self.calib_flow.result:
-                values["calibration"] = f"Score {self.calib_flow.result.get('score', 0):.2f}"
+                result = self.calib_flow.result
+                values["calibration"] = (
+                    f"Score {result.get('score', 0):.2f}  {result.get('date', '')}"
+                ).strip()
+            if self.calib_flow:
+                flow = self.calib_flow
+                output = flow.output_direction
+                values["fov"] += f"  {flow.fov_source or 'saved'}"
+                values["direction"] = (
+                    "Not required" if not flow.steering_fit
+                    else "Verified" if output.ready
+                    else f"Checking {output.progress:.0%}" if output.active
+                    else "No steering response" if output.reason.startswith("No steering response")
+                    else "Stop to check" if flow.direction.ready
+                    else "Drive both bends"
+                )
             for key, value in values.items():
                 if key in self._status_rows:
                     self._status_rows[key].configure(text=value)

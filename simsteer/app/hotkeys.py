@@ -84,9 +84,9 @@ HOTKEYS: list[Hotkey] = [
            "View", "overlay"),
 
     # Calibration
-    Hotkey("mirror_sign", "M", "Mirror lateral sign",
-           "Flip the steering / overlay convention if everything is "
-           "left-right inverted on a fresh install.",
+    Hotkey("mirror_sign", "M", "Mirror road overlay",
+           "Mirror the road projection. With wheel telemetry, steering "
+           "direction is measured automatically. Without it, also flip steering.",
            "Calibration", "overlay"),
     Hotkey("save_calib", "C", "Save calibration.json",
            "Persists the current camera pose + lateral_sign immediately.",
@@ -95,9 +95,13 @@ HOTKEYS: list[Hotkey] = [
            "Restores pitch / yaw / FOV / height to dataclass defaults.",
            "Calibration", "overlay", danger=True),
     Hotkey("recalibrate", "R", "Recalibrate",
-           "Wipe LiveCalib + LiveParams + first-drive flag and restart "
-           "the wizard. Force-disengages first.",
+           "Wipe the camera pose and steering fit and restart the "
+           "calibration at FOV. Force-disengages first.",
            "Calibration", "overlay", danger=True),
+    Hotkey("keep_fov", "Backspace", "Keep current FOV",
+           "During calibration, keep your FOV instead of the measured "
+           "one. INSERT accepts the measured one.",
+           "Calibration", "overlay"),
     Hotkey("fov_minus", "[", "FOV −1°",
            "Narrow capture FOV by 1°. FOV is static — set it to match "
            "your in-game horizontal FOV.",
