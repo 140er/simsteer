@@ -16,7 +16,8 @@ The approved scope is:
   inversion, and finish with a scored check drive.
 - Read physical Fanatec inputs, pass them through vJoy, and hand control
   back safely. Preserve the game's force feedback while disengaged;
-  allow optional, capped rim following and force mixing while engaged.
+  make the rim follow the AI within torque caps while engaged, with optional
+  force mixing.
 - Remove the legacy `pilot/` path after parity and replacement flows are
   verified. Release 1.0 only after real game and hardware validation.
 
@@ -31,8 +32,8 @@ Pending device or driving checks remain required even when code is merged.
 | Profiles | [#7](https://github.com/140er/simsteer/pull/7) merged into V0.12; adding a profile is documented in [PROFILES.md](../PROFILES.md). |
 | Force feedback | Bridge code in [#5](https://github.com/140er/simsteer/pull/5) and the single-effect probe in [#8](https://github.com/140er/simsteer/pull/8) are merged; physical passthrough, feel and stop-path validation remain required. |
 | Physical wheel probe | [#3](https://github.com/140er/simsteer/pull/3) is open; live wheel and pedal evidence is still needed before selecting the input backend. |
-| Source launch and signing | [#9](https://github.com/140er/simsteer/pull/9) is open. |
-| AC and Forza telemetry | [#10](https://github.com/140er/simsteer/pull/10) is open. Windows timing passes; real AC and Forza driving, Forza menu stability, independent review and final-head checks remain required. |
+| Source launch and signing | [#9](https://github.com/140er/simsteer/pull/9) is merged into V0.12. |
+| AC and Forza telemetry | [#10](https://github.com/140er/simsteer/pull/10) is open. Windows timing passes; real drives and Forza menu validation where the game is available, otherwise recorded as unavailable, independent review and final-head checks remain required. |
 | Guided calibration | [#11](https://github.com/140er/simsteer/pull/11) is open and blocked from merge until calibration detects and corrects inverted steering, persists the correction per game/device, tests inverted input and supplies fresh review evidence. |
 
 ## Phases and dependencies
@@ -46,7 +47,7 @@ what has landed; each remaining unit must satisfy the merge gates below.
 | 1B: Deterministic replay | 1A | Recorded and synthetic clips replay headlessly, repeatable outputs match, and model downloads verify pinned hashes. |
 | 1C: Physical wheel probe | None | Wheel and pedal readings work while a game has focus; supervised force and interruption tests establish a usable backend. |
 | 2A: Data profiles | 1B | Built-in and user TOML profiles load, invalid profiles identify their errors, and existing ETS2 behavior is preserved. |
-| 2B: AC and Forza telemetry | 2A | Parser tests, telemetry loss/recovery, Windows replay, real drives and Forza menu stability pass. |
+| 2B: AC and Forza telemetry | 2A | Parser tests, telemetry loss/recovery and Windows replay pass. Real drives and Forza menu checks are required where the game is available, otherwise recorded as unavailable. |
 | 2C: Generic mode | 2B | A game without telemetry can engage for steering only, with model speed, conservative steering limits and no pedal output. |
 | 2D: Further telemetry | 2C and confirmed games available for validation | Le Mans Ultimate and the other supported games have documented telemetry checks and real-drive evidence; unvalidated profiles stay marked untested. |
 | 3A: Actionable checks | 2D | Model, driver, rendering and game checks identify fixes; repeated fixes leave the same valid state. |
@@ -56,7 +57,7 @@ what has landed; each remaining unit must satisfy the merge gates below.
 | 4A: Physical input | 1A and 1C hardware evidence | Wheel, pedals and engage buttons work in the background, with range, inversion, deadband and disconnect tests. |
 | 4B: vJoy handover | 2C and 4A | Manual input passes through; brake and steering overrides disengage safely; throttle override and the handover ramp work in real driving. |
 | 4C: Unchanged game FFB | 1A | Effect traces and supervised comparisons match native feedback while disengaged; unknown packet counts stay zero and force stops after a crash. |
-| 4D: Engaged rim following | 4B, 4C and 3C | Optional torque-capped following, force mixing, transitions, physical override and stall shutdown pass supervised tests. |
+| 4D: Engaged rim following | 4B, 4C and 3C | Torque-capped rim following, optional force mixing, transitions, physical override and stall shutdown pass supervised tests. |
 | 5A: Release 1.0 | 3D and 4D | A fresh Windows zip completes setup, calibration and real drives with both device paths; generic mode and the published tested-game list are verified. |
 
 Calibration can progress alongside telemetry work. The setup window
@@ -86,16 +87,19 @@ must be <=50 ms**, independently, for every tested profile. Required
 metrics must be present, valid and finite; model medians cannot replace
 model p95.
 
-Linux timings, all relative timing changes and parser timings are
-informational and never block. Calibration duration, build size and live
-FPS are also informational. Existing functional, startup, calibration-quality,
-device, hardware, safety and force-feedback acceptance checks remain
-required alongside the Windows timing gates.
+Linux replay and model timings must still be measured and reported, but
+never block timing acceptance. Parent/head and cross-profile replay changes,
+parser timings, replay calibration duration, build size and live FPS are
+informational. The first live calibration still targets under 10 minutes;
+functional calibration lane predicates remain required. Existing startup,
+calibration-quality, device, hardware, safety and force-feedback acceptance
+checks also remain required, including physical versus gamepad loop cost,
+bridged versus native feedback lag and force-feedback loop cost comparisons.
 
 ### Hardware safety
 
 Any test that can move the wheel requires a person present and explicit
-approval to start. Begin around 5% force, increase by at most 2.5 percentage
+approval to start. Begin at 5% force, increase by at most 2.5 percentage
 points with approval at each step, and never exceed 15%. Use a torque-based
 rim-follow cap appropriate to the base, enforce the 15% ceiling and verify
 that interruption or a stalled process stops force. New driver installation,
