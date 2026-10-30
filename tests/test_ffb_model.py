@@ -15,7 +15,7 @@ import pytest
 
 from simsteer.core import ffb_model as fm
 from simsteer.runtime.ffb.vjoy_ffb import crosscheck
-from tests import ffb_fixtures as fx
+import ffb_fixtures as fx
 
 NAMES = fx.fixture_names()
 

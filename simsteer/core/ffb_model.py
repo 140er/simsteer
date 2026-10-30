@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import math
 import struct
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Union
 
 # --------------------------------------------------------------------------

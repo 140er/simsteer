@@ -12,7 +12,7 @@ from simsteer.runtime.ffb import bridge as br
 from simsteer.runtime.ffb import dinput_out as di
 from simsteer.runtime.ffb import vjoy_ffb as vj
 from simsteer.runtime.ffb.vjoy_ffb import Packet
-from tests import ffb_fixtures as fx
+import ffb_fixtures as fx
 
 
 class Clock:

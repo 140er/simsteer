@@ -33,7 +33,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Sequence
+from typing import Sequence
 
 from simsteer.core import ffb_model as fm
 
