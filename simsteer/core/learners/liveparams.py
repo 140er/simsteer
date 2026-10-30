@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -268,9 +268,13 @@ class LiveParams:
                  game: str | None = None,
                  device_kind: str | None = None,
                  seeds: Seeds | None = None,
-                 gates: str = "strict") -> None:
+                 gates: str = "strict",
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.game = game
         self.seeds: Seeds = seeds or {}
+        # Timestamps below, and the controller's trim freeze that reads
+        # them, use this clock so replay decisions repeat exactly.
+        self.clock = clock
         # Per-device persistence: the rack response (and especially
         # the AXIS->WHEEL sign) differs between the ViGEm gamepad and
         # the vJoy wheel in the same game — ETS2 treats them as
@@ -361,6 +365,9 @@ class LiveParams:
         # now). Lighter than a boolean flag because it lets the gate
         # auto-clear without a separate tick.
         self.last_intervened_ts: float = 0.0
+        # Frames where the fit predicted the axis, accepted or not. The
+        # calibration check reads `last_innovation` when this grows.
+        self.predictions = 0
 
     # ----- raw parameters -----
 
@@ -554,7 +561,7 @@ class LiveParams:
         # Always mark as intervened, even if we skip the math below,
         # so a streak of small-wheel intervention frames still freezes
         # the trim integrator.
-        self.last_intervened_ts = time.monotonic()
+        self.last_intervened_ts = self.clock()
         if abs(wheel) < INTERVENTION_MIN_WHEEL:
             return
         implied_a = (target_axis
@@ -667,6 +674,7 @@ class LiveParams:
         predicted = float(H @ self.x)
         actual = axis_lagged
         innovation = actual - predicted
+        self.predictions += 1
         innov_gate = (MAX_INNOVATION_WARM if self.trusted()
                       else gates["max_innovation_cold"])
         if abs(innovation) > innov_gate:
@@ -719,7 +727,7 @@ class LiveParams:
         # Trajectory log + last-update timestamp for HUD diagnostics.
         # Appended only on accepted updates so the buffer reflects what
         # the filter actually saw, not every frame.
-        self.last_update_ts = time.monotonic()
+        self.last_update_ts = self.clock()
         self.history.append((self.last_update_ts,
                              float(self.x[0]), float(self.x[1]),
                              float(self.x[2])))

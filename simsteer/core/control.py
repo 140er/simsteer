@@ -51,7 +51,6 @@ from __future__ import annotations
 
 import json
 import math
-import time
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -405,7 +404,7 @@ class LateralController:
             # dominated by lag, not by the steady-state offset the
             # trim is meant to correct.
             intervened_recently = (
-                time.monotonic() - self.live_params.last_intervened_ts < 1.0)
+                self.live_params.clock() - self.live_params.last_intervened_ts < 1.0)
             if v_ego < 8.0:
                 freeze_reason = "slow"
             elif abs(target_wheel) > 0.05:
