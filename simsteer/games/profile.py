@@ -297,7 +297,8 @@ def parse_profile(text: str, path: Path | str, builtin: bool = False) -> GamePro
 
 def load_profile(path: Path, builtin: bool = False) -> GameProfile:
     try:
-        text = path.read_text(encoding="utf-8")
+        # utf-8-sig: PowerShell 5.1 and older Notepad write a BOM.
+        text = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as e:
         raise ProfileError(path, None, f"cannot read ({e})") from None
     return parse_profile(text, path, builtin=builtin)

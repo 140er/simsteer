@@ -18,7 +18,7 @@ from simsteer.core.control import ControllerConfig
 from simsteer.core.learners.liveparams import GATE_PROFILES, LiveParams
 from simsteer.games.base import BUILTIN_DIR, load_registry, reload
 from simsteer.games.profile import (
-    CONTROLLER_KEYS, DEVICE_KINDS, ProfileError, parse_profile,
+    CONTROLLER_KEYS, DEVICE_KINDS, ProfileError, load_profile, parse_profile,
 )
 from simsteer.runtime import telemetry
 
@@ -199,6 +199,12 @@ def test_bad_user_profile_is_skipped_and_named(data_dir, capsys):
     assert f"{bad}: testd: unknown key" in err
     assert {"ets2", "ats"} <= {ln.split()[0] for ln in out.splitlines()[1:]}
     assert "mygame" not in out
+
+
+def test_profile_with_utf8_bom_loads(tmp_path):
+    path = tmp_path / "bom.toml"
+    path.write_bytes(b"\xef\xbb\xbf" + MINIMAL.encode())
+    assert load_profile(path).id == "mygame"
 
 
 def test_user_profile_replaces_builtin_in_place(tmp_path):
