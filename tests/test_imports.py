@@ -30,7 +30,9 @@ def isolated_imports(monkeypatch):
     for name in OPTIONAL_NATIVE:
         try:
             importlib.import_module(name)
-        except ImportError:
+        except Exception:
+            # Missing, or present but unusable here: dxcam raises COMError
+            # at import in a session without a desktop.
             monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     def ours():
         return [n for n in sys.modules if n.split(".")[0] in ("simsteer", "pilot")]
@@ -54,5 +56,11 @@ def test_module_imports_without_pilot(module, isolated_imports):
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only drivers")
 def test_windows_native_imports():
-    import dxcam  # noqa: F401
     import vgamepad  # noqa: F401
+
+    try:
+        import dxcam  # noqa: F401
+    except Exception as e:
+        if type(e).__name__ != "COMError":
+            raise
+        pytest.skip(f"dxcam needs a desktop session: {e}")
