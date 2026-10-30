@@ -21,4 +21,4 @@ Invoke-Step 'install' { uv pip install -q -p $py -e '.[dev]' }
 Invoke-Step 'ruff' { & $py -m ruff check --no-cache . }
 Invoke-Step 'pytest' { & $py -m pytest tests -q -p no:cacheprovider }
 Invoke-Step 'simsteer --help' { & $py -m simsteer --help }
-Invoke-Step 'windows imports' { & $py -c "import dxcam, vgamepad; print('imported: dxcam, vgamepad')" }
+Invoke-Step 'windows imports' { & $py scripts\check_windows_imports.py }
