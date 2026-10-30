@@ -1,4 +1,4 @@
-"""Probe a Fanatec wheel and pedals on the simrig and write a JSON report.
+"""Probe a Fanatec wheel and pedals and write a JSON report.
 
 The report decides two things for SimSteer 1.0 (plan step H1):
 
