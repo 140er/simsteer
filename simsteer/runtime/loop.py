@@ -27,7 +27,10 @@ everything the user needs to drive and tune live is.
 
 from __future__ import annotations
 
+import json
+import sys
 import time
+from collections.abc import Callable
 from dataclasses import replace
 
 import cv2
@@ -61,6 +64,8 @@ from simsteer.games.base import GameProfile, get_profile
 from simsteer.runtime.capture import Capture, CaptureConfig
 from simsteer.runtime.fov import FovResolver
 from simsteer.runtime.output.base import DeviceManager
+from simsteer.runtime.replay import LiveClock
+from simsteer.runtime.telemetry import Telemetry
 from simsteer.ui.hud import (
     COL_ACCENT_BLUE, COL_ACCENT_GREEN, COL_ACCENT_RED, COL_ACCENT_VIOLET,
     HudRenderer, HudState,
@@ -102,8 +107,53 @@ CALIB_KEY_HOTKEY_IDS: dict[int, str] = {
 }
 
 
-def run(settings: Settings, game_id: str = "ets2") -> int:
-    """Run the driving loop for one pinned game until the user quits (q).
+class WindowKeys:
+    """Keys from the overlay window, plus global keys when given."""
+
+    def __init__(self, global_keys: GlobalKeys | None = None) -> None:
+        self.global_keys = global_keys
+
+    def poll(self) -> list[int]:
+        pressed: list[int] = []
+        cv_key = cv2.waitKey(1) & 0xFF
+        if cv_key != 0xFF:
+            pressed.append(cv_key)
+        if self.global_keys is not None:
+            pressed.extend(self.global_keys.poll())
+        return pressed
+
+
+class NoKeys:
+    def poll(self) -> list[int]:
+        return []
+
+
+def _setup_window_or_exit(w: int, h: int) -> None:
+    try:
+        setup_window(w, h)
+    except cv2.error as e:
+        raise SystemExit(
+            "this OpenCV build cannot open a window (opencv-python-headless?). "
+            f"Run with --headless or install opencv-python. ({e.err})") from None
+
+
+def run(settings: Settings, game_id: str = "ets2", *,
+        source=None,
+        make_telemetry: Callable[[], Telemetry] | None = None,
+        clock=None,
+        keys=None,
+        model=None,
+        headless: bool = False,
+        max_frames: int | None = None,
+        log_path: str | None = None,
+        log_timing: bool = False) -> int:
+    """Run the driving loop for one pinned game until the user quits (q),
+    the source runs out, or `max_frames` frames are done.
+
+    Defaults are the live game: screen capture, the profile's telemetry,
+    the wall clock, window plus global keys, and the ONNX model. Replay
+    passes a `ReplaySource`, `ReplayTelemetry` and `ReplayClock` instead.
+    `headless` opens no window, no tuner and reads no keys.
 
     Pinned-game only for now: the live `GameDetector` + `SessionManager`
     hot-swap arrives in Phase 2. Per-game state (calibration, controller
@@ -113,6 +163,12 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
     if profile is None:
         print(f"unknown game: {game_id!r}")
         return 2
+    if source is None:
+        source = Capture(CaptureConfig(target_fps=20))
+    if make_telemetry is None:
+        make_telemetry = profile.make_telemetry
+    if clock is None:
+        clock = LiveClock()
 
     # --- Per-game state (keyed by game/device, shared with v1) ---
     calib = Calibration.load(game_id)
@@ -124,8 +180,9 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
 
     # --- Session-wide, game-agnostic resources ---
     fq = FrameQueue()
-    model = DrivingModel()
-    tel = profile.make_telemetry()
+    if model is None:
+        model = DrivingModel()
+    tel = make_telemetry()
     manual = ManualInputs()
     nav = NavManager()
     probe = SteeringProbe(enabled=not settings.no_probe)
@@ -153,7 +210,7 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
     # knobs, Setup + Hotkeys tabs, Recalibrate). Runs in its own daemon
     # Tk thread; mutates calib/ctrl_cfg/manual which the loop reads each
     # frame. Set settings.no_tuner to skip.
-    if not settings.no_tuner:
+    if not settings.no_tuner and not headless:
         try:
             Tuner(calib, ctrl_cfg, manual, live_params=live_params,
                   game=game_id, device=pad, settings=settings, probe=probe,
@@ -162,7 +219,8 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
         except Exception as e:
             print(f"tuner: failed to open ({e}) — continuing without it")
 
-    print(f"vision: {model.active_provider}   policy: {model.policy_provider}")
+    print(f"vision: {getattr(model, 'active_provider', '?')}   "
+          f"policy: {getattr(model, 'policy_provider', '?')}")
     print(f"game: {profile.display_name}   telemetry: "
           f"{'available' if tel.available else 'NOT detected'}")
     print(f"calibration: {live_calib.status_label}  "
@@ -176,9 +234,12 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
 
     show_input = True
     view_mode = "model"   # default to the self-aligning model view
-    last = time.perf_counter()
+    last = clock.now()
     fps = 0.0
     frame_idx = 0
+    n_frames = 0
+    window_ready = headless
+    log_f = open(log_path, "w", encoding="utf-8") if log_path else None
     blocked_reason = ""
     lane_change_idx: int | None = None
     lane_change_until = 0.0
@@ -207,27 +268,16 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
         nonlocal banner_text, banner_color, banner_until
         banner_text = text
         banner_color = color
-        banner_until = time.time() + secs
+        banner_until = clock.now() + secs
 
-    with Capture(CaptureConfig(target_fps=20)) as cap:
-        first = None
-        for _ in range(50):
-            first = cap.grab()
-            if first is not None:
-                break
-            time.sleep(0.05)
-        if first is not None:
-            h, w = first.shape[:2]
-            win_w = min(w, settings.max_width)
-            setup_window(win_w, int(round(h * win_w / w)))
-            cv2.setWindowTitle(WINDOW_NAME,
-                               f"SimSteer {__version__} — {profile.display_name}")
-        else:
-            setup_window(settings.max_width, settings.max_width * 9 // 16)
-
-        watched = {KEY_INSERT, KEY_NUMPAD4, KEY_NUMPAD6,
-                   KEY_PAGEUP, KEY_PAGEDOWN, KEY_END}
-        global_keys = GlobalKeys(watched)
+    with source as cap:
+        if keys is None and headless:
+            keys = NoKeys()
+        elif keys is None:
+            watched = {KEY_INSERT, KEY_NUMPAD4, KEY_NUMPAD6,
+                       KEY_PAGEUP, KEY_PAGEDOWN, KEY_END}
+            keys = WindowKeys(GlobalKeys(watched)
+                              if sys.platform == "win32" else None)
 
         if settings.force_engage and pad is not None:
             pad.engage()
@@ -235,20 +285,34 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
                   "calibration to actually track)")
 
         try:
-            while True:
+            while max_frames is None or n_frames < max_frames:
                 frame_idx += 1
+                t_grab = time.perf_counter()
                 frame = cap.grab()
                 if frame is None:
-                    keys = [cv2.waitKey(1) & 0xFF, *global_keys.poll()]
-                    if ord("q") in keys:
+                    if cap.done:
                         break
+                    if ord("q") in keys.poll():
+                        break
+                    if headless:
+                        time.sleep(0.002)
                     continue
+                n_frames += 1
+                t_warp = time.perf_counter()
+                if not window_ready:
+                    h, w = frame.shape[:2]
+                    win_w = min(w, settings.max_width)
+                    _setup_window_or_exit(win_w, int(round(h * win_w / w)))
+                    cv2.setWindowTitle(
+                        WINDOW_NAME,
+                        f"SimSteer {__version__} — {profile.display_name}")
+                    window_ready = True
 
                 # Recover telemetry if it wasn't live at launch.
                 if (not tel.available
                         and frame_idx % TELEMETRY_RETRY_EVERY_N == 0):
                     tel.close()
-                    tel = profile.make_telemetry()
+                    tel = make_telemetry()
 
                 # --- Telemetry reads ---
                 v_real = tel.speed_mps()
@@ -259,10 +323,10 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
 
                 # --- Compose desire (nav + manual lane-change), step model ---
                 img_narrow, img_wide = fq.push(frame, calib)
-                now_perf = time.perf_counter()
+                now_perf = clock.now()
                 dt = max(1e-3, now_perf - last)
                 nav_desire_idx = nav.tick(v_ego=v_ego, dt=dt, now_t=now_perf)
-                now_wall = time.time()
+                now_wall = now_perf
                 if hasattr(tel, "nav_distance_m"):
                     nav.update_destination(tel.nav_distance_m(), tel.nav_time_s())
                 lane_change_active = (lane_change_idx is not None
@@ -275,8 +339,10 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
                 else:
                     desire_vec = None
                     lane_change_idx = None
+                t_model = time.perf_counter()
                 vision_out, policy_out = model.step(img_narrow, img_wide,
                                                     desire=desire_vec)
+                t_ctrl = time.perf_counter()
                 decoded = decode(vision_out, policy_out)
 
                 # --- Online camera-pose calibration ---
@@ -345,7 +411,7 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
                                                    manual.brake, force=True)
 
                 # --- FPS + auto-disengage (with DML-warmup grace) ---
-                now = time.perf_counter()
+                now = clock.now()
                 fps = 1.0 / max(now - last, 1e-3)
                 last = now
                 if (pad is not None and pad.engaged and fps < MIN_HEALTHY_FPS
@@ -363,6 +429,31 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
                     set_banner("DISENGAGED", COL_ACCENT_BLUE, 2.0)
                 was_engaged_last_frame = engaged_now
                 allowed, blocked_reason = engage_check()
+                t_render = time.perf_counter()
+
+                if log_f is not None:
+                    row = {
+                        "frame": n_frames,
+                        "t": round(now, 4),
+                        "v_ego": round(float(v_ego), 4),
+                        "steer_axis": round(float(steer), 6),
+                        "curvature": round(float(lat_ctrl.last_curvature), 7),
+                        "throttle": round(float(throttle_out), 4),
+                        "brake": round(float(brake_out), 4),
+                        "engaged": engaged_now,
+                        "telemetry": "ok" if tel.available else "lost",
+                    }
+                    if log_timing:
+                        row.update(
+                            cap_ms=round((t_warp - t_grab) * 1e3, 3),
+                            warp_ms=round((t_model - t_warp) * 1e3, 3),
+                            model_ms=round((t_ctrl - t_model) * 1e3, 3),
+                            ctrl_ms=round((t_render - t_ctrl) * 1e3, 3),
+                            frame_ms=round((t_render - t_grab) * 1e3, 3))
+                    log_f.write(json.dumps(row) + "\n")
+
+                if headless:
+                    continue
 
                 # --- Render: model view (self-aligning) or capture view ---
                 # BOTH views project the model's path using the height the
@@ -416,17 +507,13 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
                     game_steer=game_steer, steer=steer, ai_steer=ai_steer,
                     ai_throttle=ai_throttle, ai_brake=ai_brake,
                     throttle_out=throttle_out, brake_out=brake_out, nav=nav,
-                    cal_routine=cal_routine, wizard=wizard)
+                    cal_routine=cal_routine, wizard=wizard, now=now)
                 hud_renderer.draw(overlay, hud_state, mode=settings.hud_mode)
                 draw_calibration_hud(overlay, calib)
                 show_scaled(overlay, settings.max_width)
 
                 # --- Keys (game-focused global + overlay-focused cv2) ---
-                pressed: list[int] = []
-                cv_key = cv2.waitKey(1) & 0xFF
-                if cv_key != 0xFF:
-                    pressed.append(cv_key)
-                pressed.extend(global_keys.poll())
+                pressed = keys.poll()
 
                 def hk(hk_id: str) -> bool:
                     return _hk_enabled(hk_id, settings)
@@ -482,11 +569,11 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
                                 print("-> ENGAGED")
                     elif key == KEY_NUMPAD4 and hk("lane_change_left"):
                         lane_change_idx = DESIRE_LANE_CHANGE_LEFT
-                        lane_change_until = time.time() + ctrl_cfg.lane_change_hold_s
+                        lane_change_until = now + ctrl_cfg.lane_change_hold_s
                         print("lane change LEFT commanded")
                     elif key == KEY_NUMPAD6 and hk("lane_change_right"):
                         lane_change_idx = DESIRE_LANE_CHANGE_RIGHT
-                        lane_change_until = time.time() + ctrl_cfg.lane_change_hold_s
+                        lane_change_until = now + ctrl_cfg.lane_change_hold_s
                         print("lane change RIGHT commanded")
                     elif key == KEY_PAGEUP and hk("nav_queue_left"):
                         nav.queue(ManeuverDir.LEFT)
@@ -536,7 +623,11 @@ def run(settings: Settings, game_id: str = "ets2") -> int:
             live_params.save()
             calib.save(game=game_id)
             tel.close()
-            cv2.destroyAllWindows()
+            if log_f is not None:
+                log_f.close()
+            if not headless:
+                cv2.destroyAllWindows()
+    print(f"frames: {n_frames}")
     return 0
 
 
@@ -546,7 +637,7 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
                      lat_ctrl, long_ctrl, live_params, live_calib, ctrl_cfg,
                      fov_resolver, decoded, actual_yaw, wheel_angle, game_steer,
                      steer, ai_steer, ai_throttle, ai_brake, throttle_out,
-                     brake_out, nav, cal_routine, wizard) -> HudState:
+                     brake_out, nav, cal_routine, wizard, now) -> HudState:
     """Assemble both the clean user-mode HudState fields and the dev-mode
     text stack. Kept out of the hot loop body for readability."""
     if pad is None:
@@ -565,7 +656,7 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
     lp_frac = min(1.0, max(live_params.samples, live_params.session_samples)
                   / float(TRUSTED_MIN_SAMPLES))
 
-    banner = (banner_text if banner_text and time.time() < banner_until else "")
+    banner = (banner_text if banner_text and now < banner_until else "")
 
     lc_chip = None
     if lane_change_active:
