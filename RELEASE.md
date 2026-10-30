@@ -26,6 +26,38 @@ python tools\fetch_model.py            # ensure models/ has both .onnx files
 
 Output: `dist\SimSteer\` (~280 MB unpacked).
 
+### Code signing (optional until a certificate exists)
+
+`build.bat` runs `tools\sign_build.py` after PyInstaller. With
+`SIMSTEER_SIGN_CERT_SHA1` unset it prints
+`sign_build: SIMSTEER_SIGN_CERT_SHA1 not set, signing skipped.` and the
+build stays unsigned. To sign, set these in the build shell first:
+
+| Variable | Value |
+|---|---|
+| `SIMSTEER_SIGN_CERT_SHA1` | Thumbprint of the code-signing certificate in your Windows certificate store. Required; signing runs only when it's set. |
+| `SIMSTEER_SIGN_TOOL` | Path to `signtool.exe`. Optional; default is `signtool` on PATH, then the newest Windows SDK. |
+| `SIMSTEER_SIGN_TIMESTAMP_URL` | RFC 3161 timestamp server. Optional; default `http://timestamp.digicert.com`. Use your CA's. |
+
+```powershell
+$env:SIMSTEER_SIGN_CERT_SHA1 = '<thumbprint>'
+.\build.bat
+```
+
+It signs `SimSteer.exe` and `SimSteer-debug.exe` with SHA256 and a
+timestamp, then runs `signtool verify /pa` on both; either failing fails
+the build. Check that both executables were verified before packaging.
+The bundled DLLs come from Python, wheels and Microsoft runtimes; repeat
+the Windows smoke test when those dependencies change.
+
+The key never passes through the repo or the script. Code-signing keys
+live on a hardware token or in the certificate store, and signtool picks
+them by thumbprint. If you have a `.pfx` (for example a test
+certificate), import it with
+`Import-PfxCertificate -FilePath <file> -CertStoreLocation Cert:\CurrentUser\My -Password (Read-Host -AsSecureString)`
+and use its thumbprint; never put the password in a variable, file or
+command line. `.gitignore` excludes `*.pfx`, `*.p12` and `*.cer`.
+
 ## 3. Smoke test on a clean Windows 11 VM (no Python installed)
 
 Critical — DirectML / ViGEm / mmap behave differently on machines that
@@ -91,13 +123,17 @@ follows [docs/SETUP.md](docs/SETUP.md). Without `-IncludeModels` they run
 
 - Unsigned binary — SmartScreen and many AV products flag on first run.
   Document the unblock flow in the release description.
+- Smart App Control (Windows 11) can block the unsigned exe outright,
+  with no *Run anyway*. Point those users to README's *Run from source*.
 - No auto-update — users need to download new releases manually.
 - Calibration is per-user, per-game — first-run wizard always shows on
   a fresh install.
 
 ## Future (post-MVP)
 
-- EV code signing certificate (~$300/yr) to remove SmartScreen friction.
+- Sign Windows releases once a certificate is available. Set
+  `SIMSTEER_SIGN_CERT_SHA1` to enable the build hook (see *Code signing*
+  above).
 - Auto-update channel (Tauri, electron-updater, or simple Github API
   polling).
 - Bundle ViGEm/vJoy MSIs (currently links only).
