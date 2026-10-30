@@ -42,6 +42,11 @@ build/
 dist/
 *.spec.bak
 
+# Code-signing certificates and keys (never commit; see RELEASE.md)
+*.pfx
+*.p12
+*.cer
+
 # Release / share archives (produced by build + tools\make_source_zip.ps1)
 SimSteer-*.zip
 

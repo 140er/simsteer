@@ -7,6 +7,10 @@ handed a pre-built `SimSteer.exe` instead, skip to
 [Per-game setup](#5-per-game-setup) — the rest is for building/running
 from source.
 
+If Smart App Control blocks `SimSteer.exe`, use
+[Run from source](#run-from-source-smart-app-control): one script does
+steps 1, 2 and 7.
+
 > **What this is**: a bridge that screen-captures a driving game, runs
 > comma.ai's openpilot vision+planning model on the frame, and steers
 > the car through a virtual gamepad (ViGEm) or virtual wheel (vJoy).
@@ -259,13 +263,58 @@ python tools\fetch_model.py     # models must be present to bundle them
 
 Output: `dist\SimSteer\` containing `SimSteer.exe` (windowed) and
 `SimSteer-debug.exe` (console). See [RELEASE.md](../RELEASE.md) for the
-full release/zip checklist.
+full release/zip checklist, including the optional code-signing step.
 
 > **Close any running `SimSteer.exe` before rebuilding** — PyInstaller
 > can't overwrite a locked exe and the build will fail on "Access is
 > denied."
 
 ---
+
+## Run from source (Smart App Control)
+
+Windows 11 can run Smart App Control, which blocks apps that are neither
+signed nor known to Microsoft's cloud service. `SimSteer.exe` is
+unsigned, so it can be blocked. Keep Smart App Control on and run
+SimSteer from source. Older Windows configurations require a reset to
+turn it back on after disabling it;
+[recent updates allow re-enabling it without a reset](https://support.microsoft.com/en-us/windows/security/threat-malware-protection/smart-app-control-frequently-asked-questions).
+
+```powershell
+.\run-from-source.bat                  # or double-click it
+.\run-from-source.bat --list-games     # arguments go to python -m simsteer
+```
+
+`run-from-source.bat` starts `run-from-source.ps1` with
+`-ExecutionPolicy Bypass`, because Windows doesn't run `.ps1` files by
+default. The script:
+
+1. Looks for [uv](https://docs.astral.sh/uv/). If it's missing, it
+   shows the official install command and asks before running it:
+   `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
+2. Creates `.venv` with Python 3.11. uv downloads a private Python if
+   none is installed; your system Python is left alone.
+3. Runs `uv pip install -e .`, then again only when `pyproject.toml`
+   changes.
+4. Fetches the models with `tools\fetch_model.py` if `models\` lacks them.
+5. Runs `python -m simsteer` with your arguments and returns its exit
+   code.
+
+A second run reuses `.venv` and the models, so it starts at once and
+works offline. If `.venv` is broken or uses an older Python, the script
+says so; delete `.venv` and run it again.
+
+SimSteer runs as Python code using uv, Python and the packages' own
+binary files. On a Windows 11 machine with Smart App Control in enforce
+mode, this path passed `--help`, `--list-games` and a 60-frame headless
+replay without a Code Integrity block. That does not guarantee every
+future package version will be accepted. If Windows blocks something,
+the script names the step that failed, and Event Viewer shows the blocked file
+under *Applications and Services Logs → Microsoft → Windows →
+CodeIntegrity → Operational*.
+
+Drivers (step 3), per-game setup (step 5) and the FOV (step 6) are the
+same as for the exe.
 
 ## CLI flags
 

@@ -21,6 +21,8 @@ There are two ways to run SimSteer:
 - **From a pre-built `SimSteer.exe`** (someone handed you the
   `dist\SimSteer\` zip) → the *End-user install* section below.
 
+If Smart App Control blocks `SimSteer.exe`, [run from source](#run-from-source).
+
 ## End-user install
 
 1. **Download** the latest `SimSteer-<version>.zip` from
@@ -189,6 +191,28 @@ you have three escape hatches:
 LiveCalib also auto-recovers if its smoothed estimate goes INVALID for
 3+ consecutive blocks. It resets itself, calibration goes back to the
 Camera step, and the hint says why the bar jumped back to 0%.
+
+## Run from source
+
+Use this when Windows says Smart App Control blocked `SimSteer.exe`.
+Smart App Control blocks unsigned apps it doesn't know, and SimSteer
+isn't code-signed yet. Keep Smart App Control on: older Windows
+configurations require a reset to turn it back on after disabling it.
+[Recent Windows updates allow re-enabling it without a reset](https://support.microsoft.com/en-us/windows/security/threat-malware-protection/smart-app-control-frequently-asked-questions).
+
+1. Download **Source code (zip)** from the latest
+   [release](https://github.com/140er/simsteer/releases) and extract it.
+2. Double-click `run-from-source.bat`.
+
+The first run sets up a private Python 3.11 in `.venv`, installs
+SimSteer's packages and fetches the models, which takes a few minutes.
+Later runs start straight away. It needs [uv](https://docs.astral.sh/uv/)
+and offers to install it if it's missing. Arguments pass through, for
+example `run-from-source.bat --game ets2`.
+
+Follow the driver, game, camera and calibration steps above, launching
+with `run-from-source.bat` in step 5. Details are in
+[docs/SETUP.md](docs/SETUP.md#run-from-source-smart-app-control).
 
 ## Troubleshooting
 
