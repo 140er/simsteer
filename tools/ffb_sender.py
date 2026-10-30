@@ -16,8 +16,10 @@ force axis named by object ID, as a wheel game does.
 
 On a physical wheel the device gain is scaled by `--ffb-test-cap`
 (1 to 15 percent, required), and the run asks for Enter at the console,
-so it cannot start from a non-interactive shell. `--list` only enumerates
-and queries capabilities; it never acquires a device or sends an effect.
+so it cannot start from a non-interactive shell. If the device refuses a
+gain write, the script stops there and the sender exits with code 3.
+`--list` only enumerates and queries capabilities; it never acquires a
+device or sends an effect.
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ ALL = (fm.DIEP_DURATION | fm.DIEP_SAMPLEPERIOD | fm.DIEP_GAIN | fm.DIEP_TRIGGERB
        | fm.DIEP_TYPESPECIFICPARAMS | fm.DIEP_STARTDELAY)
 TS = fm.DIEP_TYPESPECIFICPARAMS
 MS = 1000
+EXIT_GAIN_REFUSED = 3
 
 Step = tuple[float, fm.DiCall]
 
@@ -162,9 +165,16 @@ def _precise_timer(on: bool) -> None:
         (winmm.timeBeginPeriod if on else winmm.timeEndPeriod)(1)
 
 
-def play(sink: di.DirectInputSink, steps: list[Step], seconds: float, cap: float | None, log_path: str | None) -> int:
+def _gain_refused(gain: int, hr: int) -> int:
+    print(f"stopped: the device refused device gain {gain} ({di.hresult_name(hr)}); "
+          "no effect was sent after it", file=sys.stderr)
+    return EXIT_GAIN_REFUSED
+
+
+def play(sink: di.FfbSink, steps: list[Step], seconds: float, cap: float | None, log_path: str | None) -> int:
     lines: list[str] = []
     errors = 0
+    refused: tuple[int, int] | None = None
     t0 = time.perf_counter()
     loop = 0
     _precise_timer(True)
@@ -183,8 +193,11 @@ def play(sink: di.DirectInputSink, steps: list[Step], seconds: float, cap: float
                 if di.failed(hr):
                     errors += 1
                 lines.append(f"{(c0 - t0) * 1000:.3f}\t{call.text()}\t{di.hresult_name(hr)}\t{(c1 - c0) * 1e6:.0f}")
+                if call.op == "SetGain" and di.failed(hr):
+                    refused = (call.value, hr)
+                    break
             loop += 1
-            if not seconds or time.perf_counter() - t0 >= seconds:
+            if refused or not seconds or time.perf_counter() - t0 >= seconds:
                 break
             time.sleep(0.2)
     finally:
@@ -194,6 +207,8 @@ def play(sink: di.DirectInputSink, steps: list[Step], seconds: float, cap: float
         with open(log_path, "w", encoding="utf-8") as f:
             f.write("t_ms\tcall\tresult\tcall_us\n" + "\n".join(lines) + "\n")
     print(f"played {loop} loop(s), {len(lines)} calls, {errors} failed")
+    if refused:
+        return _gain_refused(*refused)
     return 1 if errors else 0
 
 
@@ -235,7 +250,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         input(f"Script on the Fanatec base at {cap:g} percent. Hands near the rim, Enter to start, Ctrl+C to cancel: ")
         sink = di.DirectInputSink()
-    if not sink.open():
+    gain = fm.DI_FFNOMINALMAX if cap is None else capped_gain(fm.DI_FFNOMINALMAX, cap)
+    try:
+        opened = sink.open(gain)
+    except di.GainRefused as e:
+        return _gain_refused(gain, e.hr)
+    if not opened:
         print(f"no device: {sink.last_error}", file=sys.stderr)
         return 1
     print(f"playing on {sink.device.name} ({sink.device.vid:04X}:{sink.device.pid:04X}), axis 0x{sink.axis_id:08X}")

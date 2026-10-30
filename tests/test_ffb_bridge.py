@@ -92,7 +92,7 @@ def test_cap_scales_every_device_gain():
     src.push(0.2, fx.control(fm.CTRL_DEVRST))
     run_until(b, clock, 0.3)
     gains = [c.value for c in sink.calls if c.op == "SetGain"]
-    assert gains == [500, 500, 251, 251]
+    assert gains == [500, 500, 500, 251, 251]  # open, replay, game, game, after the reset
     assert max(gains) <= 10000 * 5 / 100
     assert b.model.device_gain == 5020  # the model keeps the game's own value
 
@@ -112,7 +112,7 @@ def test_forwards_and_renews_while_the_game_plays():
     constant_game(src)
     run_until(b, clock, 0.35)
     ops = [c.op for c in sink.calls]
-    assert ops[:6] == ["SetGain", "Command", "SetGain", "CreateEffect", "SetParameters", "SetParameters"]
+    assert ops[:7] == ["SetGain", "SetGain", "Command", "SetGain", "CreateEffect", "SetParameters", "SetParameters"]
     renewals = [c for c in sink.calls if c.op == "SetParameters" and c.flags & fm.DIEP_START]
     assert len(renewals) == 3
     assert b.status == "FFB pass 0 unknown"
@@ -123,7 +123,7 @@ def test_unknown_packets_reach_the_hud_and_not_the_wheel():
     b, src, sink, clock = make()
     src.push(0.01, fx.raw(fm.IOCTL_HID_WRITE_REPORT, [0x17, 1, 0, 0]))
     run_until(b, clock, 0.05)
-    assert [c.op for c in sink.calls] == ["SetGain", "Command"]  # only what opening the wheel sends
+    assert [c.op for c in sink.calls] == ["SetGain", "SetGain", "Command"]  # only what opening the wheel sends
     assert b.status == "FFB pass 1 unknown"
 
 
@@ -148,7 +148,7 @@ def test_waits_without_a_wheel_then_rebuilds_it():
     sink.present = True
     run_until(b, clock, 1.2)
     assert b.device_open
-    assert [c.op for c in sink.calls][:5] == ["SetGain", "Command", "CreateEffect", "SetParameters", "Start"]
+    assert [c.op for c in sink.calls][:6] == ["SetGain", "SetGain", "Command", "CreateEffect", "SetParameters", "Start"]
     assert sink.calls[0].value == 500
 
 
@@ -163,7 +163,7 @@ def test_lost_wheel_is_reopened_and_replayed():
     sink.calls.clear()
     run_until(b, clock, 1.3)
     assert b.device_open and sink.opened == 2
-    assert [c.op for c in sink.calls][:5] == ["SetGain", "Command", "CreateEffect", "SetParameters", "Start"]
+    assert [c.op for c in sink.calls][:6] == ["SetGain", "SetGain", "Command", "CreateEffect", "SetParameters", "Start"]
 
 
 def test_unattended_never_opens_a_wheel():
@@ -198,6 +198,178 @@ def test_failure_stops_forwarding_and_closes_the_wheel():
     b._thread.join(2)
     assert not b.running and b.status.startswith("FFB stopped: boom")
     assert sink.device is None
+
+
+# --------------------------------------------------------------------------
+# a refused cap is fatal
+
+UNSUPPORTED = 0x80004001  # DIERR_UNSUPPORTED
+EFFECT_OPS = {"CreateEffect", "SetParameters", "Start"}
+
+
+class GainRefusingSink(di.LogSink):
+    """Refuses a gain write when `refuses(sink, call)` says so."""
+
+    def __init__(self, refuses) -> None:
+        super().__init__()
+        self.refuses = refuses
+        self.refused_at: int | None = None
+
+    def execute(self, call):
+        if call.op == "SetGain" and self.refuses(self, call):
+            if self.refused_at is None:
+                self.refused_at = len(self.calls)
+            self.calls.append(call)
+            return UNSUPPORTED
+        return super().execute(call)
+
+
+def after_reset(sink, call):
+    return any(c.op == "Command" and c.flags == fm.DISFFC_RESET for c in sink.calls)
+
+
+def run_thread(b) -> bool:
+    """Run the real forwarding thread; True if it stopped by itself."""
+    b.start()
+    b._thread.join(2)
+    stopped = not b.running
+    b.stop()
+    return stopped
+
+
+def game_with(src, t, pkt):
+    """An endless constant, then `pkt` at `t`, then a second effect."""
+    src.push(0.0, fx.new_effect(1, 1))
+    src.push(0.001, fx.constant(1, 4000))
+    src.push(0.002, fx.effect_report(1, 1))
+    src.push(0.003, fx.effect_op(1, fm.OP_START))
+    src.push(t, pkt)
+    src.push(t + 0.05, fx.new_effect(1, 2))
+    src.push(t + 0.051, fx.constant(2, -4000))
+    src.push(t + 0.052, fx.effect_report(2, 1))
+    src.push(t + 0.053, fx.effect_op(2, fm.OP_START))
+
+
+@pytest.mark.parametrize("refuses,packet,gain", [
+    (lambda sink, call: True, None, 500),
+    (lambda sink, call: call.value == 251, fx.gain(128), 251),
+    (after_reset, fx.control(fm.CTRL_DEVRST), 500),
+], ids=["at-open", "after-device-gain", "after-reset"])
+def test_refused_gain_stops_forwarding_before_any_further_effect(refuses, packet, gain):
+    clock = Clock()
+    src = Source(clock)
+    sink = GainRefusingSink(refuses)
+    b = br.FfbBridge(src, sink, 5, clock=clock)
+    if packet is None:
+        constant_game(src)
+    else:
+        game_with(src, 0.15, packet)
+    stopped = run_thread(b)
+    assert sink.refused_at is not None
+    assert not {c.op for c in sink.calls[sink.refused_at + 1:]} & EFFECT_OPS
+    assert stopped and sink.device is None
+    reason = f"wheel refused the capped gain {gain}: DIERR_UNSUPPORTED"
+    assert b.status == f"FFB stopped: {reason}"
+    assert b.summary()["failure"] == reason
+    assert sink.opened == 1  # never reopened
+    if packet is None:
+        assert sink.lines() == ["SetGain 500"]
+
+
+class FakeCom:
+    """Stands in for COM under DirectInputSink: one DD2 with one actuator,
+    every call logged, the device gain refused when `refuse_gain(value)`."""
+
+    def __init__(self, monkeypatch, refuse_gain=lambda value: False) -> None:
+        self.log: list[str] = []
+        self.refuse_gain = refuse_gain
+        self.effects = 0
+        inst = di.DIDEVICEINSTANCEW()
+        inst.guidProduct.Data1 = 0x00070EB7
+        log = self.log
+
+        class FakeDirectInput:
+            hwnd = 1
+
+            def ff_devices(self):
+                return [inst]
+
+            def create_device(self, inst):
+                return 0x100
+
+            def close(self):
+                log.append("DirectInput8 Release")
+
+        monkeypatch.setattr(di, "DirectInput", FakeDirectInput)
+        monkeypatch.setattr(di, "_actuators", lambda ptr: [di.DIDEVICEOBJECTINSTANCEW(dwType=0x01000002)])
+        monkeypatch.setattr(di, "_com_call", self.call)
+
+    def call(self, ptr, interface, method, argtypes, *args, restype=None):
+        if method == "SetProperty" and args[0] == di.DIPROP_FFGAIN:
+            value = args[1]._obj.dwData
+            self.log.append(f"SetGain {value}")
+            return UNSUPPORTED if self.refuse_gain(value) else di.DI_OK
+        if method == "SetProperty":
+            self.log.append("AutoCenter off")
+        elif method == "SendForceFeedbackCommand":
+            self.log.append(f"Command 0x{args[0]:02X}")
+        elif method == "CreateEffect":
+            self.effects += 1
+            args[2]._obj.value = 0x1000 + self.effects
+            self.log.append(f"CreateEffect 0x{args[2]._obj.value:X}")
+        elif interface == "IDirectInputEffect":
+            self.log.append(f"{method} 0x{ptr:X}")
+        else:
+            self.log.append(method)
+        return di.DI_OK
+
+
+def test_directinput_sink_sets_the_gain_before_open_returns(monkeypatch):
+    com = FakeCom(monkeypatch)
+    sink = di.DirectInputSink()
+    assert sink.open(500)
+    assert com.log[-3:] == ["Acquire", "AutoCenter off", "SetGain 500"]
+    assert sink.device.is_fanatec and sink.axis_id == 0x01000002
+
+
+def test_directinput_sink_refusing_the_gain_closes_and_raises(monkeypatch):
+    com = FakeCom(monkeypatch, refuse_gain=lambda value: True)
+    sink = di.DirectInputSink()
+    with pytest.raises(di.GainRefused):
+        sink.open(500)
+    assert com.log[com.log.index("SetGain 500") + 1:] == [
+        f"Command 0x{fm.DISFFC_STOPALL:02X}", "Unacquire", "Release", "DirectInput8 Release"]
+    assert sink.device is None and sink.last_error.startswith("SetProperty(FFGAIN) failed: DIERR_UNSUPPORTED")
+
+
+def test_refused_gain_mid_run_stops_and_unloads_every_effect(monkeypatch):
+    com = FakeCom(monkeypatch, refuse_gain=lambda value: value == 251)
+    clock = Clock()
+    src = Source(clock)
+    b = br.FfbBridge(src, di.DirectInputSink(), 5, clock=clock)
+    game_with(src, 0.15, fx.gain(128))
+    assert run_thread(b)
+    assert "Start 0x1001" in com.log
+    assert com.log[com.log.index("SetGain 251") + 1:] == [
+        f"Command 0x{fm.DISFFC_STOPALL:02X}", "Unload 0x1001", "Release 0x1001", "Unacquire", "Release",
+        "DirectInput8 Release"]
+    assert b.status == "FFB stopped: wheel refused the capped gain 251: DIERR_UNSUPPORTED"
+
+
+# --------------------------------------------------------------------------
+# latency stays bounded
+
+
+def test_latency_keeps_a_window_and_the_whole_run_count_and_max(monkeypatch):
+    monkeypatch.setattr(br, "LATENCY_WINDOW", 4)
+    b, src, sink, clock = make()
+    clock.t = 1.0
+    for ms in (9, 1, 2, 3, 4, 5):
+        b._forward(Packet(1.0 - ms / 1000, *fx.raw(fm.IOCTL_HID_WRITE_REPORT, [0x17, 1, 0, 0]), None))
+    assert list(b.stats.latencies_ms) == pytest.approx([2, 3, 4, 5])
+    lat = b.summary()["latency_ms"]
+    assert (lat["n"], lat["window"]) == (6, 4)
+    assert lat["max"] == pytest.approx(9) and lat["p99"] == pytest.approx(5)  # percentiles from the window
 
 
 # --------------------------------------------------------------------------

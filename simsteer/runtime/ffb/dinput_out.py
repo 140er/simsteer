@@ -337,8 +337,10 @@ def is_fanatec(dev: DeviceInfo) -> bool:
 class FfbSink(Protocol):
     device: DeviceInfo | None
 
-    def open(self) -> bool:
-        """Find and acquire the wheel. False when none is attached."""
+    def open(self, gain: int) -> bool:
+        """Find and acquire the wheel and set its device gain to `gain`.
+        False when none is attached. Raises `GainRefused`, with the wheel
+        closed again, when the wheel refuses the gain."""
 
     def execute(self, call: fm.DiCall) -> int:
         """Run one call, return its HRESULT."""
@@ -357,11 +359,17 @@ class LogSink:
     device: DeviceInfo | None = None
     opened: int = 0
 
-    def open(self) -> bool:
+    def open(self, gain: int) -> bool:
         if not self.present:
             return False
         self.opened += 1
         self.device = DeviceInfo("log sink", 0, 0, "")
+        hr = self.execute(fm.DiCall("SetGain", value=gain))
+        if failed(hr):
+            self.close()
+            if hr in DEVICE_LOST:
+                return False
+            raise GainRefused(hr)
         return True
 
     def execute(self, call: fm.DiCall) -> int:
@@ -384,6 +392,13 @@ class DIError(Exception):
         self.stage = stage
         self.hr = hr & 0xFFFFFFFF
         super().__init__(f"{stage} failed: {hresult_name(self.hr)} (0x{self.hr:08X})")
+
+
+class GainRefused(DIError):
+    """The wheel refused the device gain; it must not play anything."""
+
+    def __init__(self, hr: int):
+        super().__init__("SetProperty(FFGAIN)", hr)
 
 
 def _com_call(ptr: int, interface: str, method: str, argtypes: Sequence, *args, restype=ctypes.c_long) -> int:
@@ -591,7 +606,7 @@ class DirectInputSink:
         self._effects: dict[int, int] = {}
         self.last_error: str | None = None
 
-    def open(self) -> bool:
+    def open(self, gain: int) -> bool:
         self.close()
         try:
             self._di = DirectInput()
@@ -614,9 +629,16 @@ class DirectInputSink:
             if not actuators:
                 raise DIError("EnumObjects(FFACTUATOR)", DIERR_INVALIDPARAM)
             self.axis_id = actuators[0].dwType
+            hr = self._set_dword(DIPROP_FFGAIN, gain)
+            if failed(hr):
+                raise DIError("SetProperty(FFGAIN)", hr) if hr in DEVICE_LOST else GainRefused(hr)
             self.device = info_of(inst)
             self.last_error = None
             return True
+        except GainRefused as e:
+            self.last_error = str(e)
+            self.close()
+            raise
         except (DIError, OSError) as e:
             self.last_error = str(e)
             self.close()

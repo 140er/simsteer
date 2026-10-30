@@ -16,10 +16,12 @@ This PR runs the bridge standalone and test-only:
 
 `--ffb-test-cap` (1 to 15 percent) is required. It scales the device gain
 on the wheel, so the strongest force the game can ask for is that share of
-the base's peak torque (5 percent of the DD2 is about 1.25 Nm). Without
-`--attended` the bridge never opens a physical wheel; it reports what it
-finds and keeps waiting, which is what unattended runs need. `--dry-run`
-logs the calls instead of making them.
+the base's peak torque (5 percent of the DD2 is about 1.25 Nm). The wheel
+gets the capped gain before anything else; if it ever refuses a capped
+gain, the bridge stops forwarding and closes the wheel, which stops and
+unloads every effect. Without `--attended` the bridge never opens a
+physical wheel; it reports what it finds and keeps waiting, which is what
+unattended runs need. `--dry-run` logs the calls instead of making them.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Protocol, Sequence
 
@@ -42,6 +45,7 @@ CAP_MAX = 15.0
 REOPEN_S = 1.0
 IDLE_WAIT_S = 0.02
 ERROR_LOG_MAX = 50
+LATENCY_WINDOW = 20_000
 
 
 def validate_cap(cap: float) -> float:
@@ -56,6 +60,10 @@ def capped_gain(game_gain: int, cap_percent: float) -> int:
     return min(fm.DI_FFNOMINALMAX, round(game_gain * cap_percent / 100))
 
 
+class CapNotApplied(RuntimeError):
+    """The wheel refused the capped device gain, so nothing may play on it."""
+
+
 class PacketSource(Protocol):
     def get(self, timeout: float | None) -> Packet | None: ...
 
@@ -64,10 +72,21 @@ class PacketSource(Protocol):
 
 @dataclass
 class BridgeStats:
+    """`latencies_ms` keeps the last LATENCY_WINDOW packets; the count and
+    the maximum cover the whole run."""
+
     errors: int = 0
     error_log: list[str] = field(default_factory=list)
     device_events: list[str] = field(default_factory=list)
-    latencies_ms: list[float] = field(default_factory=list)
+    latencies_ms: deque[float] = field(default_factory=lambda: deque(maxlen=LATENCY_WINDOW))
+    latency_count: int = 0
+    latency_max: float | None = None
+
+    def add_latency(self, ms: float) -> None:
+        self.latencies_ms.append(ms)
+        self.latency_count += 1
+        if self.latency_max is None or ms > self.latency_max:
+            self.latency_max = ms
 
 
 def percentile(values: Sequence[float], q: float) -> float | None:
@@ -142,9 +161,10 @@ class FfbBridge:
             "adapted": c.adapted, "calls": c.calls, "rearms": c.rearms, "errors": self.stats.errors,
             "device": self.sink.device.name if self.sink.device else None,
             "cap_percent": self.cap,
+            "failure": str(self.failure) if self.failure is not None else None,
             "latency_ms": {
-                "n": len(lat), "p50": percentile(lat, 50), "p95": percentile(lat, 95),
-                "p99": percentile(lat, 99), "max": max(lat) if lat else None,
+                "n": self.stats.latency_count, "window": len(lat), "p50": percentile(lat, 50),
+                "p95": percentile(lat, 95), "p99": percentile(lat, 99), "max": self.stats.latency_max,
             },
             "unknown_log": [f"{u.reason}: {u.data.hex()}" for u in self.model.unknown_log],
             "error_log": self.stats.error_log,
@@ -187,7 +207,7 @@ class FfbBridge:
         calls = self.model.apply(record, self.clock())
         if self.device_open:
             self._execute(calls)
-            self.stats.latencies_ms.append((self.clock() - packet.t) * 1000)
+            self.stats.add_latency((self.clock() - packet.t) * 1000)
 
     def _execute(self, calls: list[fm.DiCall]) -> None:
         for call in calls:
@@ -198,12 +218,17 @@ class FfbBridge:
             hr = self.sink.execute(call)
             if call.op == "Command" and call.flags == fm.DISFFC_RESET and not di.failed(hr):
                 # A reset may restore the wheel's own gain; put the cap back.
-                hr = self.sink.execute(fm.DiCall("SetGain", value=capped_gain(self.model.device_gain, self.cap)))
+                call = fm.DiCall("SetGain", value=capped_gain(self.model.device_gain, self.cap))
+                hr = self.sink.execute(call)
             if hr in di.DEVICE_LOST:
+                # Reopening sets the capped gain before anything else plays.
                 self._event(f"wheel lost: {di.hresult_name(hr)}")
                 self._close()
                 self._reopen_at = self.clock() + self.reopen_s
                 return
+            if di.failed(hr) and call.op == "SetGain":
+                # `_run` closes the wheel, which stops and unloads every effect.
+                raise CapNotApplied(f"wheel refused the capped gain {call.value}: {di.hresult_name(hr)}")
             if di.failed(hr):
                 self.stats.errors += 1
                 if len(self.stats.error_log) < ERROR_LOG_MAX:
@@ -214,11 +239,15 @@ class FfbBridge:
         if not self.attended:
             self._report_devices()
             return
-        if self.sink.open():
+        gain = capped_gain(self.model.device_gain, self.cap)
+        try:
+            opened = self.sink.open(gain)
+        except di.GainRefused as e:
+            raise CapNotApplied(f"wheel refused the capped gain {gain}: {di.hresult_name(e.hr)}") from e
+        if opened:
             self.device_open = True
             dev = self.sink.device
             self._event(f"wheel open: {dev.name if dev else '?'}")
-            # Replay starts with the device gain, so the cap is set before any effect.
             self._execute(self.model.replay(self.clock()))
 
     def _report_devices(self) -> None:
