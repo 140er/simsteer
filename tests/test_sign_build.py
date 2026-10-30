@@ -94,3 +94,39 @@ def test_commands_sign_both_exes_with_sha256_and_timestamp(sign, tmp_path, signt
 def test_empty_dist_is_an_error(sign, tmp_path):
     with pytest.raises(sign.SignError, match="Run PyInstaller first"):
         sign.targets(tmp_path)
+
+
+@pytest.mark.parametrize("results,steps,expected", [
+    ([7], ["sign"], 7),
+    ([0, 9], ["sign", "verify"], 9),
+    ([0, 0], ["sign", "verify"], 0),
+])
+def test_sign_and_verify_results_reach_the_build(sign, tmp_path, signtool, monkeypatch,
+                                                results, steps, expected):
+    monkeypatch.setenv("SIMSTEER_SIGN_CERT_SHA1", THUMB)
+    monkeypatch.setenv("SIMSTEER_SIGN_TOOL", str(signtool))
+    for name in sign.EXES:
+        (tmp_path / name).write_bytes(b"MZ")
+    called = []
+    codes = iter(results)
+
+    def call(cmd):
+        called.append(cmd[1])
+        return next(codes)
+
+    monkeypatch.setattr(sign.subprocess, "call", call)
+    assert sign.main(["--dist", str(tmp_path)]) == expected
+    assert called == steps
+
+
+def test_signtool_launch_error_is_clear(sign, tmp_path, signtool, monkeypatch, capsys):
+    monkeypatch.setenv("SIMSTEER_SIGN_CERT_SHA1", THUMB)
+    monkeypatch.setenv("SIMSTEER_SIGN_TOOL", str(signtool))
+    (tmp_path / "SimSteer.exe").write_bytes(b"MZ")
+
+    def call(cmd):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(sign.subprocess, "call", call)
+    assert sign.main(["--dist", str(tmp_path)]) == 2
+    assert "signtool sign could not start: permission denied" in capsys.readouterr().err

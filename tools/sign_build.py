@@ -113,7 +113,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     for step, cmd in (("sign", sign_command(cfg, files)), ("verify", verify_command(cfg, files))):
         print(f"sign_build: {step} {', '.join(f.name for f in files)}")
-        rc = subprocess.call(cmd)
+        try:
+            rc = subprocess.call(cmd)
+        except OSError as e:
+            print(f"sign_build: signtool {step} could not start: {e}", file=sys.stderr)
+            return 2
         if rc != 0:
             print(f"sign_build: signtool {step} failed (exit code {rc}).", file=sys.stderr)
             return rc
