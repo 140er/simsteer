@@ -1,21 +1,13 @@
-"""Customtkinter tuner window for live calibration + controller tuning.
+"""One-line normal tuner and a separate developer workbench.
 
-Single-page layout with a persistent top bar (engage badge, device
-picker, Save-all), a 2 Hz live-status strip (lookahead estimate +
-FROZEN badge, LiveParams summary + LOCKED badge), and a vertical
-stack of collapsible sections — Status, Setup, Camera, Lateral,
-LiveParams + guided calibration, Closed-loop trim, Lane Change,
-Longitudinal, Manual+bind, Hotkeys.
-
-Runs in its own thread so the cv2 capture/inference loop in main.py is
-unaffected. Sliders mutate the shared `Calibration`, `ControllerConfig`,
-`ManualInputs`, and `LiveParams` instances directly — Python attribute
-writes are atomic enough; the loop reads each field once per iteration
-and we're not coordinating multi-field updates.
+Both windows edit the existing shared objects. Tk stays on its own
+thread; the loop publishes an immutable HUD snapshot without calling Tk.
 """
 
 from __future__ import annotations
 
+import math
+import os
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,49 +15,36 @@ from typing import Any, Callable
 
 import customtkinter as ctk
 
+from simsteer.app.hotkeys import groups_in_order, hotkeys_in_group
+from simsteer.app.manual import ManualInputs
+from simsteer.app.settings import Settings
 from simsteer.core.calibration import Calibration
-from simsteer.app.calibration_routine import CalibrationRoutine
 from simsteer.core.control import ControllerConfig
 from simsteer.games.base import registry
-from simsteer.runtime.output.base import DeviceManager
-from simsteer.app.hotkeys import groups_in_order, hotkeys_in_group
-from simsteer.core.learners.livecalib import LiveCalib
-from simsteer.core.learners.liveparams import LiveParams
-from simsteer.app.manual import ManualInputs
-from simsteer.app.probe import SteeringProbe
-from simsteer.app.settings import Settings
-from simsteer.app.wizard import Wizard
+from simsteer.ui.hud import HudState
+from simsteer.ui.state import (
+    calibration_view,
+    developer_mode,
+    restart_required,
+    set_developer_mode,
+    status_label,
+)
 
-
-WINDOW_W = 620
-WINDOW_H = 820
-MIN_W = 540
-MIN_H = 620
-
-POLL_MS = 500  # status refresh, 2 Hz — covers strip + dashboard + cal routine
-
-COLOR_BAR_BG = "#1b2026"
-COLOR_STRIP_BG = "#171b20"
-COLOR_SECTION_HEADER = "#222a31"
-COLOR_SECTION_HEADER_HOVER = "#2c3741"
-COLOR_HEADER_TEXT = "#e8ecef"
-COLOR_VALUE = "#dfe6ee"
-COLOR_HINT = "#9aa3aa"
-COLOR_ENGAGED = "#27ae60"
-COLOR_DISENGAGED = "#4a525a"
-COLOR_BADGE_FROZEN = "#e67e22"
-COLOR_BADGE_LOCKED = "#c0392b"
-COLOR_OK = "#3aaf5b"
-COLOR_WARN = "#d6a93b"
-COLOR_BAD = "#d65454"
-COLOR_DANGER_KEY = "#e74c3c"
-COLOR_SAVE_FLASH = "#27ae60"
-COLOR_SAVE_ERR = "#e74c3c"
-COLOR_DIVIDER = "#262e36"
+WINDOW_W, WINDOW_H = 1280, 62
+WORKBENCH_W, WORKBENCH_H = 1160, 900
+POLL_MS = 250
+BG = "#0b0c0d"
+PANEL = "#151719"
+FIELD = "#24272a"
+INK = "#eeeeee"
+MUTED = "#9b9d9f"
+GREEN = "#63df71"
+BLUE = "#40bddd"
+RED = "#ff5555"
 
 
 @dataclass
-class _SliderSpec:
+class _NumberSpec:
     obj: Any
     attr: str
     label: str
@@ -73,1228 +52,903 @@ class _SliderSpec:
     hi: float
     step: float
     fmt: str = "{:.2f}"
+    scale: float = 1.0  # display units per stored unit
+    unit: str = ""
 
 
-class _Section:
-    """Collapsible section: header CTkButton + body CTkFrame."""
+@dataclass
+class _Number:
+    spec: _NumberSpec
+    entry: Any
+    var: Any
 
-    def __init__(self, parent, title: str, *, expanded: bool = True) -> None:
-        self.expanded = expanded
-        self._title = title
+    def editing(self):
+        return self.entry.focus_get() in (self.entry, self.entry._entry)
 
-        self.frame = ctk.CTkFrame(parent, fg_color="transparent")
-        self.frame.pack(fill="x", padx=2, pady=(2, 6))
+    def sync(self, force=False):
+        if force or not self.editing():
+            self.var.set(
+                self.spec.fmt.format(getattr(self.spec.obj, self.spec.attr) * self.spec.scale)
+            )
 
-        self.header = ctk.CTkButton(
-            self.frame, text=self._header_text(), anchor="w",
-            fg_color=COLOR_SECTION_HEADER,
-            hover_color=COLOR_SECTION_HEADER_HOVER,
-            text_color=COLOR_HEADER_TEXT,
+
+class _Group:
+    """Always open; filtering hides rows and then empty groups."""
+
+    def __init__(self, parent, title):
+        self.title = title
+        self.frame = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=12)
+        self.frame.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(
+            self.frame,
+            text=title,
+            anchor="w",
+            text_color=INK,
             font=ctk.CTkFont(size=13, weight="bold"),
-            corner_radius=6, height=30,
-            command=self.toggle)
-        self.header.pack(fill="x")
-
+            height=28,
+        ).pack(fill="x", padx=12, pady=(5, 2))
         self.body = ctk.CTkFrame(self.frame, fg_color="transparent")
-        if self.expanded:
-            self.body.pack(fill="x", padx=6, pady=(6, 2))
+        self.body.pack(fill="x", padx=12, pady=(0, 10))
+        self.rows = []
 
-    def _header_text(self) -> str:
-        return ("  ▾  " if self.expanded else "  ▸  ") + self._title
+    def add(self, widget, label):
+        self.rows.append((widget, label.casefold()))
+        widget.pack(fill="x", pady=1)
 
-    def toggle(self) -> None:
-        self.expanded = not self.expanded
-        if self.expanded:
-            self.body.pack(fill="x", padx=6, pady=(6, 2))
-        else:
-            self.body.pack_forget()
-        self.header.configure(text=self._header_text())
+    def filter(self, query):
+        visible = False
+        for row, label in self.rows:
+            row.pack_forget()
+            if not query or query in self.title.casefold() or query in label:
+                row.pack(fill="x", pady=1)
+                visible = True
+        self.frame.pack_forget()
+        if visible:
+            self.frame.pack(fill="x", pady=(0, 10))
 
 
 class Tuner:
-    def __init__(self, calib: Calibration, ctrl_cfg: ControllerConfig,
-                 manual: ManualInputs,
-                 live_params: LiveParams | None = None,
-                 game: str | None = None,
-                 device: DeviceManager | None = None,
-                 settings: Settings | None = None,
-                 probe: SteeringProbe | None = None,
-                 live_calib: LiveCalib | None = None,
-                 wizard: Wizard | None = None,
-                 cal_routine: CalibrationRoutine | None = None) -> None:
-        self.calib = calib
-        self.ctrl_cfg = ctrl_cfg
-        self.manual = manual
-        self.live_params = live_params
-        self.game = game
-        self.device = device
-        self.settings = settings
-        self.probe = probe
-        self.live_calib = live_calib
-        self.wizard = wizard
-        self.cal_routine = cal_routine
+    def __init__(
+        self,
+        calib: Calibration,
+        ctrl_cfg: ControllerConfig,
+        manual: ManualInputs,
+        live_params=None,
+        game=None,
+        device=None,
+        settings: Settings | None = None,
+        probe=None,
+        live_calib=None,
+        wizard=None,
+        cal_routine=None,
+        calib_flow=None,
+        *,
+        start_thread: bool = True,
+    ):
+        self.calib, self.ctrl_cfg, self.manual = calib, ctrl_cfg, manual
+        self.live_params, self.game, self.device = live_params, game, device
+        self.settings = settings if settings is not None else Settings()
+        self.probe, self.live_calib = probe, live_calib
+        self.wizard, self.cal_routine, self.calib_flow = wizard, cal_routine, calib_flow
+        self._startup_game = self.settings.game
+        self._game_choices = {"Auto": "auto"}
+        self._game_choices.update({p.display_name: p.id for p in registry().profiles})
+        self._hud_state: HudState | None = None
+        self._root = self._workbench = self._bind_window = None
+        self._numbers: list[_Number] = []
+        self._switches: list[tuple[Any, Callable]] = []
+        self._groups: list[_Group] = []
+        self._status_rows = {}
+        self._save_status = self._live = None
+        self._bind_frame = self._bind_status_label = None
+        self._filter_var = None
+        if start_thread:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
 
-        # Slider widgets keyed by (id(obj), attr).
-        self._sliders: dict[tuple[int, str],
-                            tuple[ctk.CTkSlider, ctk.CTkLabel,
-                                  _SliderSpec]] = {}
-        # Switches keyed by stable id so _zero_manual / refresh can find them.
-        self._switches: dict[str, ctk.CTkSwitch] = {}
+    def update_state(self, state: HudState):
+        self._hud_state = state
 
-        # Top-bar / status-strip / status-dashboard / bind handles.
-        self._root: ctk.CTk | None = None
-        self._engage_badge: ctk.CTkLabel | None = None
-        self._device_seg: ctk.CTkSegmentedButton | None = None
-        self._save_status_label: ctk.CTkLabel | None = None
-        self._save_flash_after_id: str | None = None
-
-        self._status_engage: ctk.CTkLabel | None = None
-        self._status_device: ctk.CTkLabel | None = None
-        self._status_lookahead: ctk.CTkLabel | None = None
-        self._status_liveparams: ctk.CTkLabel | None = None
-        self._status_liveparams_badge: ctk.CTkLabel | None = None
-
-        # 5-row dashboard (colored dot + label) in the Status section.
-        self._dash_rows: dict[str, tuple[ctk.CTkLabel, ctk.CTkLabel]] = {}
-
-        # Setup section state.
-        self._setup_game_var: "ctk.StringVar | None" = None
-        self._setup_status_label: ctk.CTkLabel | None = None
-
-        # Guided-calibration-routine status label.
-        self._cal_status_label: ctk.CTkLabel | None = None
-
-        self._bind_frame: ctk.CTkFrame | None = None
-        self._bind_status_label: ctk.CTkLabel | None = None
-
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    # ----- thread target -----
-
-    def _run(self) -> None:
+    def _run(self):
         ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("blue")
-
-        root = ctk.CTk()
-        self._root = root
-        root.title("SimSteer — tuner")
-        root.geometry(f"{WINDOW_W}x{WINDOW_H}+40+40")
-        root.attributes("-topmost", True)
-        root.minsize(MIN_W, MIN_H)
-
-        self._build_top_bar(root)
-        self._build_status_strip(root)
-
-        scroll = ctk.CTkScrollableFrame(root, fg_color="transparent")
-        scroll.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-
-        self._build_status_section(scroll)
-        if self.settings is not None:
-            self._build_setup_section(scroll)
-        self._build_camera_section(scroll)
-        self._build_lateral_section(scroll)
-        if self.live_params is not None:
-            self._build_liveparams_section(scroll)
-        self._build_closed_loop_trim_section(scroll)
-        self._build_lane_change_section(scroll)
-        self._build_longitudinal_section(scroll)
-        self._build_manual_section(scroll)
-        if self.settings is not None:
-            self._build_hotkeys_section(scroll)
-
-        root.after(POLL_MS, self._poll_status)
-
+        root = ctk.CTk(fg_color=BG)
+        self._build_ui(root)
         try:
             root.mainloop()
-        except Exception:
-            pass
+        finally:
+            self._root = None
 
-    # ----- top bar -----
+    def _build_ui(self, root):
+        self._root = root
+        ctk.ThemeManager.theme["CTkFont"]["family"] = (
+            "Segoe UI" if os.name == "nt" else "DejaVu Sans"
+        )
+        root.title("SimSteer")
+        root.geometry(f"{WINDOW_W}x{WINDOW_H}+30+30")
+        root.minsize(1180, WINDOW_H)
+        root.resizable(True, False)
+        root.attributes("-topmost", True)
+        bar = ctk.CTkFrame(root, fg_color=BG, corner_radius=0)
+        bar.pack(fill="both", expand=True, padx=12, pady=10)
+        self._state_label = ctk.CTkLabel(
+            bar, text="Disengaged", text_color=INK, font=ctk.CTkFont(size=15, weight="bold")
+        )
+        self._state_label.pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(
+            bar,
+            text="Insert",
+            fg_color=FIELD,
+            corner_radius=4,
+            width=48,
+            height=24,
+            text_color=INK,
+            font=ctk.CTkFont(size=11),
+        ).pack(side="left", padx=(0, 10))
+        current = next(
+            (name for name, id_ in self._game_choices.items() if id_ == self.settings.game), "Auto"
+        )
+        self._game_picker = ctk.CTkOptionMenu(
+            bar,
+            values=list(self._game_choices),
+            width=180,
+            height=30,
+            fg_color=FIELD,
+            button_color=FIELD,
+            button_hover_color="#393c3f",
+            text_color=INK,
+            command=self._on_game_change,
+        )
+        self._game_picker.set(current)
+        self._game_picker.pack(side="left", padx=(0, 8))
+        self._restart_button = self._button(bar, "Restart", self._save_and_restart, width=66)
+        self._device_picker = ctk.CTkSegmentedButton(
+            bar,
+            values=["Gamepad", "Wheel"],
+            width=138,
+            height=30,
+            fg_color=FIELD,
+            selected_color="#44484c",
+            selected_hover_color="#505458",
+            unselected_color=FIELD,
+            unselected_hover_color="#393c3f",
+            command=self._on_device_change_seg,
+        )
+        self._device_picker.set("Wheel" if self.device and self.device.is_wheel else "Gamepad")
+        self._device_picker.pack(side="left", padx=(0, 5))
+        if self.device is None:
+            self._device_picker.configure(state="disabled")
+        self._button(bar, "Bind", self._open_bind, width=42).pack(side="left", padx=(0, 12))
+        self._cal_label = ctk.CTkLabel(
+            bar, text="Calibration", text_color=MUTED, font=ctk.CTkFont(size=12)
+        )
+        self._cal_label.pack(side="left", padx=(0, 6))
+        self._button(bar, "Recalibrate", self._on_recalibrate_click, width=88).pack(
+            side="left", padx=(0, 12)
+        )
+        self._add_number(
+            bar,
+            _NumberSpec(
+                self.ctrl_cfg, "max_speed_mps", "Max", 5, 50, 1 / 3.6, "{:.0f}", 3.6, "km/h"
+            ),
+            inline=True,
+        )
+        self._add_switch(
+            bar, "ACC", lambda: self.ctrl_cfg.lead_follow_enabled, self._set_acc, inline=True
+        )
+        self._add_switch(
+            bar,
+            "Developer",
+            lambda: developer_mode(self.settings),
+            self._set_developer,
+            inline=True,
+        )
+        self._refresh()
+        root.after(POLL_MS, self._poll)
 
-    def _build_top_bar(self, root) -> None:
-        bar = ctk.CTkFrame(root, fg_color=COLOR_BAR_BG, corner_radius=0)
-        bar.pack(side="top", fill="x")
+    @staticmethod
+    def _button(parent, text, command, width=80):
+        return ctk.CTkButton(
+            parent,
+            text=text,
+            command=command,
+            width=width,
+            height=28,
+            fg_color=FIELD,
+            hover_color="#393c3f",
+            text_color=INK,
+            corner_radius=14,
+            font=ctk.CTkFont(size=12),
+        )
 
-        inner = ctk.CTkFrame(bar, fg_color="transparent")
-        inner.pack(fill="x", padx=10, pady=8)
+    def _make_group(self, parent, title):
+        group = _Group(parent, title)
+        self._groups.append(group)
+        return group
 
-        self._engage_badge = ctk.CTkLabel(
-            inner, text="DISENGAGED", width=110, height=28,
-            fg_color=COLOR_DISENGAGED, text_color="white",
-            corner_radius=6, font=ctk.CTkFont(size=12, weight="bold"))
-        self._engage_badge.pack(side="left", padx=(0, 10))
+    def _build_workbench(self):
+        win = ctk.CTkToplevel(self._root, fg_color=BG)
+        self._workbench = win
+        win.title("SimSteer workbench")
+        win.geometry(f"{WORKBENCH_W}x{WORKBENCH_H}+30+140")
+        win.minsize(1000, 700)
+        win.protocol("WM_DELETE_WINDOW", lambda: self._set_developer(False))
+        header = ctk.CTkFrame(win, fg_color="transparent")
+        header.pack(fill="x", padx=16, pady=12)
+        self._filter_var = ctk.StringVar()
+        ctk.CTkLabel(header, text="Filter", text_color=MUTED, font=ctk.CTkFont(size=12)).pack(
+            side="left", padx=(0, 8)
+        )
+        ctk.CTkEntry(
+            header,
+            textvariable=self._filter_var,
+            width=120,
+            height=30,
+            fg_color=PANEL,
+            border_width=0,
+            text_color=INK,
+        ).pack(side="left", padx=(0, 12))
+        self._filter_var.trace_add("write", lambda *_: self._filter())
+        self._live = ctk.CTkLabel(
+            header, text="", anchor="w", text_color=INK, font=ctk.CTkFont(size=11)
+        )
+        self._live.pack(side="left", fill="x", expand=True)
+        self._save_status = ctk.CTkLabel(
+            header, text="", text_color=MUTED, font=ctk.CTkFont(size=11)
+        )
+        self._save_status.pack(side="left", padx=8)
+        save = self._button(header, "Save all", self._save_all)
+        save.configure(fg_color=INK, text_color=BG, hover_color="#d6d6d6")
+        save.pack(side="right")
+        scroll = ctk.CTkScrollableFrame(win, fg_color="transparent", corner_radius=0)
+        scroll.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        # 3 equal columns, two 12 px gutters; group rows share label/value edges.
+        columns = []
+        for i in range(3):
+            scroll.grid_columnconfigure(i, weight=1, uniform="workbench")
+            col = ctk.CTkFrame(scroll, fg_color="transparent", corner_radius=0)
+            col.grid(row=0, column=i, sticky="new", padx=6)
+            columns.append(col)
+        self._build_camera(columns[0])
+        self._build_steering(columns[0])
+        lane = self._make_group(columns[0], "Lane change")
+        self._add_number(
+            lane, _NumberSpec(self.ctrl_cfg, "lane_change_hold_s", "Hold (s)", 0.05, 6, 0.05)
+        )
+        self._build_fit(columns[1])
+        self._build_trim(columns[1])
+        self._build_flags(columns[1])
+        self._build_manual(columns[1])
+        self._build_status(columns[2])
+        self._build_speed(columns[2])
+        hotkeys = ctk.CTkFrame(scroll, fg_color="transparent")
+        hotkeys.grid(row=1, column=0, columnspan=3, sticky="ew", padx=6)
+        self._build_hotkeys(hotkeys)
 
-        if self.device is not None:
-            self._device_seg = ctk.CTkSegmentedButton(
-                inner, values=["Gamepad", "Wheel"],
-                command=self._on_device_change_seg, height=28)
-            initial = "Wheel" if self.device.is_wheel else "Gamepad"
-            self._device_seg.set(initial)
-            self._device_seg.pack(side="left", padx=(0, 10))
+    def _build_camera(self, parent):
+        group = self._make_group(parent, "Camera")
+        for attr, label, lo, hi, step, fmt in [
+            ("fov_v_deg", "Capture VFOV (°)", 20, 120, 1, "{:.0f}"),
+            ("pitch_deg", "Pitch (°)", -20, 20, 0.1, "{:+.1f}"),
+            ("yaw_deg", "Yaw (°)", -8, 8, 0.1, "{:+.1f}"),
+            ("height_m", "Height (m)", 0.5, 5, 0.05, "{:.2f}"),
+            ("crop_top_pct", "Crop top", 0, 0.45, 0.01, "{:.2f}"),
+            ("crop_bottom_pct", "Crop bottom", 0, 0.45, 0.01, "{:.2f}"),
+        ]:
+            self._add_number(group, _NumberSpec(self.calib, attr, label, lo, hi, step, fmt))
+        self._add_switch(
+            group,
+            "Mirror lateral sign",
+            lambda: self.calib.lateral_sign < 0,
+            lambda v: setattr(self.calib, "lateral_sign", -1.0 if v else 1.0),
+            obj=self.calib,
+        )
+        self._add_switch(
+            group,
+            "Simple warp",
+            lambda: self.calib.simple_warp,
+            lambda v: setattr(self.calib, "simple_warp", v),
+            obj=self.calib,
+        )
 
-        ctk.CTkLabel(inner, text="").pack(side="left", expand=True, fill="x")
+    def _build_steering(self, parent):
+        group = self._make_group(parent, "Steering")
+        for attr, label, lo, hi, step, fmt in [
+            ("steer_max", "Steer max", 0, 1, 0.01, "{:.2f}"),
+            ("steer_authority", "Authority", 0.5, 3, 0.05, "{:.2f}"),
+            ("axis_bias", "Axis bias", -0.1, 0.1, 0.005, "{:+.3f}"),
+            ("lookahead_s", "Lookahead (s)", 0, 5, 0.01, "{:.2f}"),
+            ("curvature_anticipation_s", "Anticipation (s)", -0.3, 0.5, 0.01, "{:+.2f}"),
+            ("wheelbase_m", "Wheelbase (m)", 2.5, 6, 0.1, "{:.1f}"),
+        ]:
+            self._add_number(group, _NumberSpec(self.ctrl_cfg, attr, label, lo, hi, step, fmt))
 
-        self._save_status_label = ctk.CTkLabel(
-            inner, text="", text_color=COLOR_SAVE_FLASH,
-            font=ctk.CTkFont(size=11))
-        self._save_status_label.pack(side="right", padx=(0, 8))
-
-        ctk.CTkButton(inner, text="Save all", width=100, height=28,
-                      command=self._save_all).pack(side="right")
-
-    # ----- status strip -----
-
-    def _build_status_strip(self, root) -> None:
-        strip = ctk.CTkFrame(root, fg_color=COLOR_STRIP_BG, corner_radius=0)
-        strip.pack(side="top", fill="x")
-        inner = ctk.CTkFrame(strip, fg_color="transparent")
-        inner.pack(fill="x", padx=10, pady=6)
-
-        mono = ctk.CTkFont(family="Consolas", size=11)
-        badge_font = ctk.CTkFont(size=9, weight="bold")
-
-        self._status_engage = ctk.CTkLabel(
-            inner, text="engage: —", font=mono, text_color=COLOR_VALUE)
-        self._status_engage.pack(side="left", padx=(0, 12))
-
-        self._status_device = ctk.CTkLabel(
-            inner, text="device: —", font=mono, text_color=COLOR_VALUE)
-        self._status_device.pack(side="left", padx=(0, 12))
-
-        self._status_lookahead = ctk.CTkLabel(
-            inner, text="look: —", font=mono, text_color=COLOR_VALUE)
-        self._status_lookahead.pack(side="left", padx=(0, 4))
-
-        self._status_liveparams = ctk.CTkLabel(
-            inner, text="lp: —", font=mono, text_color=COLOR_VALUE)
-        self._status_liveparams.pack(side="left", padx=(12, 4))
-        self._status_liveparams_badge = ctk.CTkLabel(
-            inner, text=" LOCKED ", fg_color=COLOR_BADGE_LOCKED,
-            text_color="white", corner_radius=4, font=badge_font, height=18)
-
-    # ----- section builders -----
-
-    def _build_status_section(self, parent) -> None:
-        sec = _Section(parent, "Status", expanded=True)
-        for key, label in [("telemetry", "Telemetry"),
-                           ("device", "Output device"),
-                           ("camera", "Camera calibration"),
-                           ("steering", "Steering fit"),
-                           ("fov", "FOV calibration")]:
-            row = ctk.CTkFrame(sec.body, fg_color="transparent")
-            row.pack(fill="x", pady=1)
-            dot = ctk.CTkLabel(row, text="", width=12, height=12,
-                               fg_color=COLOR_BAD, corner_radius=6)
-            dot.pack(side="left", padx=(0, 8))
-            name = ctk.CTkLabel(row, text=f"{label}:", width=140,
-                                anchor="w", text_color=COLOR_VALUE,
-                                font=ctk.CTkFont(size=11))
-            name.pack(side="left")
-            value = ctk.CTkLabel(row, text="—", anchor="w",
-                                 text_color=COLOR_HINT,
-                                 font=ctk.CTkFont(size=11))
-            value.pack(side="left", fill="x", expand=True)
-            self._dash_rows[key] = (dot, value)
-
-    def _build_setup_section(self, parent) -> None:
-        sec = _Section(parent, "Setup", expanded=False)
-        if self.settings is None:
+    def _build_fit(self, parent):
+        group = self._make_group(parent, "Fit")
+        lp = self.live_params
+        if lp is None:
+            self._readout(group, "fit", "Steering fit", "—")
             return
-
-        # Game radio.
-        ctk.CTkLabel(sec.body, text="Game",
-                     anchor="w", text_color=COLOR_HEADER_TEXT,
-                     font=ctk.CTkFont(size=12, weight="bold")
-                     ).pack(anchor="w", pady=(0, 2))
-        games = registry()
-        saved = self.settings.game
-        self._setup_game_var = ctk.StringVar(
-            value=saved if games.get(saved) else "auto")
-        row = ctk.CTkFrame(sec.body, fg_color="transparent")
-        row.pack(fill="x", pady=(0, 8))
-        choices = [("Auto", "auto")] + [(p.display_name, p.id)
-                                        for p in games.profiles]
-        for i, (label, val) in enumerate(choices):
-            ctk.CTkRadioButton(row, text=label, value=val,
-                               variable=self._setup_game_var,
-                               font=ctk.CTkFont(size=11),
-                               text_color=COLOR_VALUE
-                               ).grid(row=i // 2, column=i % 2, sticky="w",
-                                      padx=(0, 12), pady=1)
-
-        # Advanced toggles.
-        ctk.CTkLabel(sec.body, text="Advanced toggles (apply live)",
-                     anchor="w", text_color=COLOR_HEADER_TEXT,
-                     font=ctk.CTkFont(size=12, weight="bold")
-                     ).pack(anchor="w", pady=(0, 4))
-
-        self._add_switch(
-            sec.body, "Active steering probing during wizard Phase B",
-            get=lambda: not self.settings.no_probe,
-            set_=self._on_probe_toggle, sid="probe_enabled")
-        self._add_switch(
-            sec.body, "Passive LiveParams fit while disengaged",
-            get=lambda: self.settings.passive_fit,
-            set_=self._on_passive_toggle, sid="passive_fit")
-        self._add_switch(
-            sec.body, "Force-engage (DEV — bypass calibration / FPS gate)",
-            get=lambda: self.settings.force_engage,
-            set_=self._on_force_toggle, sid="force_engage")
-
-        self._divider(sec.body)
-
-        # Recalibrate.
-        ctk.CTkLabel(sec.body, text="Calibration",
-                     anchor="w", text_color=COLOR_HEADER_TEXT,
-                     font=ctk.CTkFont(size=12, weight="bold")
-                     ).pack(anchor="w", pady=(0, 2))
-        self._hint(sec.body,
-                   "Recalibrate wipes camera pose + steering fit + "
-                   "first-drive flag so the wizard starts over. Same "
-                   "as the R hotkey.")
-        ctk.CTkButton(sec.body,
-                      text="Recalibrate (wipe LiveCalib + LiveParams)",
-                      command=self._on_recalibrate_click,
-                      fg_color="#7f3b3b", hover_color="#964545"
-                      ).pack(fill="x")
-
-        self._divider(sec.body)
-
-        # Save & Restart (settings.json + relaunch).
-        ctk.CTkButton(sec.body,
-                      text="Save & Restart  (required for game changes)",
-                      command=self._save_and_restart
-                      ).pack(fill="x", pady=(0, 4))
-        self._setup_status_label = ctk.CTkLabel(
-            sec.body,
-            text=f"settings file: {self.settings.path()}",
-            text_color=COLOR_HINT, anchor="w", justify="left",
-            wraplength=WINDOW_W - 80,
-            font=ctk.CTkFont(size=10))
-        self._setup_status_label.pack(anchor="w", pady=(4, 0))
-
-    def _build_camera_section(self, parent) -> None:
-        sec = _Section(parent, "Camera & Calibration", expanded=True)
-        self._hint(sec.body,
-                   "Capture VFOV must match your in-game vertical FOV. "
-                   "ETS2: Options → Gameplay → Camera → Field of view. "
-                   "AC: Options → Video → Camera FOV. Forza: Settings → "
-                   "Difficulty → Camera FOV. After you set it, drive a "
-                   "straight road ≥6 m/s and check the FOV row in the "
-                   "HUD — `ratio vx_model/v_ego` should sit near 1.0; "
-                   ">1.05 means VFOV too high, <0.95 means too low. "
-                   "LiveCalib auto-writes pitch + yaw; override only "
-                   "if the cyan horizon visibly drifts.")
-        for spec in [
-            _SliderSpec(self.calib, "fov_v_deg",
-                        "Capture VFOV (deg)",
-                        20, 120, 1, "{:.0f}"),
-            _SliderSpec(self.calib, "pitch_deg",
-                        "Pitch (deg, +down)",
-                        -20, 20, 0.1, "{:+.1f}"),
-            _SliderSpec(self.calib, "yaw_deg",
-                        "Yaw (deg, +left)",
-                        -8, 8, 0.1, "{:+.1f}"),
-            _SliderSpec(self.calib, "height_m",
-                        "Camera height (m)",
-                        0.5, 5.0, 0.05, "{:.2f}"),
-            _SliderSpec(self.calib, "crop_top_pct",
-                        "Crop top (fraction)",
-                        0.0, 0.45, 0.01, "{:.2f}"),
-            _SliderSpec(self.calib, "crop_bottom_pct",
-                        "Crop bottom (fraction)",
-                        0.0, 0.45, 0.01, "{:.2f}"),
+        for attr, label, lo, hi, step, fmt in [
+            ("a_linear", "Fit a", -30, 30, 0.01, "{:+.2f}"),
+            ("b_quad", "Fit b", -0.1, 0.1, 0.001, "{:+.4f}"),
+            ("c_bias", "Fit c", -0.1, 0.1, 0.001, "{:+.3f}"),
         ]:
-            self._add_slider(sec.body, spec)
-        self._add_switch(sec.body, "Mirror lateral sign",
-                         get=lambda: self.calib.lateral_sign < 0,
-                         set_=lambda v: setattr(
-                             self.calib, "lateral_sign",
-                             -1.0 if v else 1.0),
-                         sid="mirror_lateral_sign")
-        self._add_switch(sec.body,
-                         "Simple warp (crop+resize, no perspective)",
-                         get=lambda: bool(getattr(self.calib,
-                                                  "simple_warp", True)),
-                         set_=lambda v: setattr(
-                             self.calib, "simple_warp", bool(v)),
-                         sid="simple_warp")
-
-    def _build_lateral_section(self, parent) -> None:
-        sec = _Section(parent, "Lateral steering", expanded=True)
-        self._hint(sec.body,
-                   "TIMING: the controller reads the model's plan at "
-                   "(Lookahead + Anticipation) seconds into the future "
-                   "and steers toward THAT yaw. Lookahead = static "
-                   "steerActuatorDelay (per-car constant in openpilot; "
-                   "tune from the slider here). Anticipation = extra "
-                   "lead time (openpilot uses a fixed +0.2 s). TOO "
-                   "EARLY on gentle curves → lower Anticipation (go "
-                   "negative). TOO LATE → raise it.\n\n"
-                   "AUTHORITY is a flat multiplier on the model's "
-                   "planned curvature. openpilot does NOT have this "
-                   "knob — they take the plan as-is and close the loop "
-                   "with a PID on lateral-accel error. Set to 1.0 for "
-                   "comma-faithful behavior.")
-        for spec in [
-            _SliderSpec(self.ctrl_cfg, "steer_max",
-                        "Steer max (axis cap)",
-                        0.0, 1.0, 0.01, "{:.2f}"),
-            _SliderSpec(self.ctrl_cfg, "steer_authority",
-                        "Authority (flat curvature multiplier)",
-                        0.5, 3.0, 0.05, "{:.2f}"),
-            _SliderSpec(self.ctrl_cfg, "axis_bias",
-                        "Axis bias (+R / -L)",
-                        -0.1, 0.1, 0.005, "{:+.3f}"),
-            _SliderSpec(self.ctrl_cfg, "lookahead_s",
-                        "Lookahead (s) — actuator delay",
-                        0.0, 5.0, 0.01, "{:.2f}"),
-            _SliderSpec(self.ctrl_cfg, "curvature_anticipation_s",
-                        "Anticipation (s) — +early / 0=default / −late",
-                        -0.3, 0.5, 0.01, "{:+.2f}"),
-            _SliderSpec(self.ctrl_cfg, "wheelbase_m",
-                        "Wheelbase (m)",
-                        2.5, 6.0, 0.1, "{:.1f}"),
-        ]:
-            self._add_slider(sec.body, spec)
-
-    def _build_liveparams_section(self, parent) -> None:
-        sec = _Section(parent, "LiveParams — RLS steering fit",
-                       expanded=True)
-        self._hint(sec.body,
-                   "axis = a·wheel + b·wheel·v² + c. Drag a/b/c to seed "
-                   "a starting point; RLS keeps refining unless locked.")
-        for spec in [
-            _SliderSpec(self.live_params, "a_linear",
-                        "a  (axis per rad of wheel @ v=0)",
-                        -30.0, 30.0, 0.01, "{:+.2f}"),
-            _SliderSpec(self.live_params, "b_quad",
-                        "b  (speed-stiffness)",
-                        -0.10, 0.10, 0.001, "{:+.4f}"),
-            _SliderSpec(self.live_params, "c_bias",
-                        "c  (axis bias)",
-                        -0.10, 0.10, 0.001, "{:+.3f}"),
-        ]:
-            self._add_slider(sec.body, spec)
-        self._add_switch(
-            sec.body,
-            "Lock fit (freeze a/b/c — RLS and intervention off)",
-            get=lambda: bool(self.live_params and self.live_params.frozen),
-            set_=self._set_liveparams_lock, sid="liveparams_locked")
-        btn_row = ctk.CTkFrame(sec.body, fg_color="transparent")
-        btn_row.pack(fill="x", pady=(6, 0))
-        ctk.CTkButton(btn_row, text="Flip sign (a, b → −a, −b)",
-                      command=self._flip_liveparams_sign
-                      ).pack(side="left", expand=True, fill="x",
-                             padx=(0, 4))
-        ctk.CTkButton(btn_row, text="Reset RLS (per-game seed)",
-                      command=self._reset_liveparams
-                      ).pack(side="left", expand=True, fill="x",
-                             padx=(4, 0))
-
-        # Guided calibration — sub-block within LiveParams since it
-        # drives the RLS refit with widened gates.
+            self._add_number(group, _NumberSpec(lp, attr, label, lo, hi, step, fmt))
+        self._add_switch(group, "Lock fit", lambda: lp.frozen, lambda v: setattr(lp, "frozen", v))
+        row = ctk.CTkFrame(group.body, fg_color="transparent")
+        self._button(row, "Flip sign", self._flip_liveparams_sign).pack(side="left", padx=(0, 6))
+        self._button(row, "Reset fit", self._reset_liveparams).pack(side="left")
+        group.add(row, "Flip sign Reset fit")
         if self.cal_routine is not None:
-            self._divider(sec.body)
-            ctk.CTkLabel(sec.body, text="Guided calibration",
-                         anchor="w", text_color=COLOR_HEADER_TEXT,
-                         font=ctk.CTkFont(size=12, weight="bold")
-                         ).pack(anchor="w", pady=(0, 2))
-            self._hint(sec.body,
-                       "4-step routine (straight / slalom / corner / "
-                       "highway). Widens RLS gates and bumps Q so the "
-                       "fit converges in ~60 s of driving. ETS2 strict "
-                       "gates untouched (per-call override). Cancel "
-                       "anytime; 90 s total cap.")
-            row = ctk.CTkFrame(sec.body, fg_color="transparent")
-            row.pack(fill="x", pady=(0, 4))
-            ctk.CTkButton(row, text="Start guided calibration",
-                          command=self._start_calibration
-                          ).pack(side="left", fill="x", expand=True,
-                                 padx=(0, 4))
-            ctk.CTkButton(row, text="Cancel",
-                          command=self._cancel_calibration,
-                          fg_color="#7f3b3b", hover_color="#964545"
-                          ).pack(side="left", fill="x", expand=True)
-            self._cal_status_label = ctk.CTkLabel(
-                sec.body, text="(idle)", text_color=COLOR_HINT,
-                anchor="w", justify="left",
-                wraplength=WINDOW_W - 80,
-                font=ctk.CTkFont(size=11))
-            self._cal_status_label.pack(anchor="w", pady=(2, 0))
+            row = ctk.CTkFrame(group.body, fg_color="transparent")
+            self._button(row, "Start calibration", self.cal_routine.start, width=130).pack(
+                side="left", padx=(0, 6)
+            )
+            self._button(row, "Cancel", self.cal_routine.cancel).pack(side="left")
+            group.add(row, "Start calibration Cancel")
 
-    def _build_closed_loop_trim_section(self, parent) -> None:
-        sec = _Section(parent, "Closed-loop trim (wheel-angle)",
-                       expanded=True)
-        self._hint(sec.body,
-                   "Slow integrator on wheel-angle error. Frozen during "
-                   "corners, lane changes, saturation, intervention, "
-                   "cold RLS, and v<8 m/s. Clipped to ±wheel_trim_clip "
-                   "so even a wrong trim can only nudge.")
+    def _build_trim(self, parent):
+        group = self._make_group(parent, "Trim")
         self._add_switch(
-            sec.body, "Enable closed-loop trim",
-            get=lambda: bool(self.ctrl_cfg.wheel_trim_enabled),
-            set_=lambda v: setattr(self.ctrl_cfg,
-                                   "wheel_trim_enabled", bool(v)),
-            sid="wheel_trim_enabled")
-        for spec in [
-            _SliderSpec(self.ctrl_cfg, "wheel_trim_gain",
-                        "Trim gain (axis per rad·s of error)",
-                        0.0, 0.02, 0.0005, "{:.4f}"),
-            _SliderSpec(self.ctrl_cfg, "wheel_trim_clip",
-                        "Trim clip (max ± axis)",
-                        0.0, 0.2, 0.005, "{:.3f}"),
-        ]:
-            self._add_slider(sec.body, spec)
+            group,
+            "Closed-loop trim",
+            lambda: self.ctrl_cfg.wheel_trim_enabled,
+            lambda v: setattr(self.ctrl_cfg, "wheel_trim_enabled", v),
+            obj=self.ctrl_cfg,
+        )
+        self._add_number(
+            group,
+            _NumberSpec(self.ctrl_cfg, "wheel_trim_gain", "Trim gain", 0, 0.02, 0.0005, "{:.4f}"),
+        )
+        self._add_number(
+            group,
+            _NumberSpec(self.ctrl_cfg, "wheel_trim_clip", "Trim clip", 0, 0.2, 0.005, "{:.3f}"),
+        )
 
-    def _build_lane_change_section(self, parent) -> None:
-        sec = _Section(parent, "Lane change", expanded=False)
-        self._hint(sec.body,
-                   "Press NumPad 4 / 6 in the overlay to trigger a "
-                   "sustained desire pulse for `hold duration` seconds. "
-                   "The model picks up the desire and commits the "
-                   "maneuver on its own — no separate steering boost "
-                   "(openpilot does the same).")
-        for spec in [
-            _SliderSpec(self.ctrl_cfg, "lane_change_hold_s",
-                        "Hold duration (s)",
-                        0.05, 6.0, 0.05, "{:.2f}"),
-        ]:
-            self._add_slider(sec.body, spec)
-
-    def _build_longitudinal_section(self, parent) -> None:
-        sec = _Section(parent, "Longitudinal / ACC / AEB", expanded=False)
-        for spec in [
-            _SliderSpec(self.ctrl_cfg, "long_anticipation_s",
-                        "Anticipation on top of lookahead (s)",
-                        0.0, 6.0, 0.05, "{:.2f}"),
-            _SliderSpec(self.ctrl_cfg, "max_accel_mps2",
-                        "Max accel @ throttle=1 (m/s²)",
-                        0.5, 5.0, 0.1, "{:.1f}"),
-            _SliderSpec(self.ctrl_cfg, "max_decel_mps2",
-                        "Max decel @ brake=1 (m/s²)",
-                        1.0, 9.0, 0.1, "{:.1f}"),
-            _SliderSpec(self.ctrl_cfg, "speed_p_gain",
-                        "Speed P gain (m/s² per m/s)",
-                        0.0, 1.5, 0.05, "{:.2f}"),
-            _SliderSpec(self.ctrl_cfg, "accel_deadband_mps2",
-                        "Accel deadband (m/s²)",
-                        0.0, 0.5, 0.01, "{:.2f}"),
-            _SliderSpec(self.ctrl_cfg, "max_speed_mps",
-                        "Max speed (m/s)",
-                        5, 50, 1, "{:.0f}"),
-            _SliderSpec(self.ctrl_cfg, "max_lat_accel_mps2",
-                        "Corner: max lateral accel (m/s², 0=off)",
-                        0.0, 8.0, 0.1, "{:.1f}"),
-            _SliderSpec(self.ctrl_cfg, "lead_min_prob",
-                        "ACC: min lead prob to engage",
-                        0.0, 1.0, 0.05, "{:.2f}"),
-            _SliderSpec(self.ctrl_cfg, "lead_time_headway_s",
-                        "ACC: time headway (s)",
-                        0.5, 4.0, 0.05, "{:.2f}"),
-            _SliderSpec(self.ctrl_cfg, "lead_min_gap_m",
-                        "ACC: min bumper gap (m)",
-                        1.0, 15.0, 0.5, "{:.1f}"),
-            _SliderSpec(self.ctrl_cfg, "lead_gap_p_gain",
-                        "ACC: gap-error P gain",
-                        0.0, 1.0, 0.05, "{:.2f}"),
-            _SliderSpec(self.ctrl_cfg, "lead_ttc_brake_s",
-                        "AEB: TTC threshold (s)",
-                        0.5, 5.0, 0.1, "{:.1f}"),
-        ]:
-            self._add_slider(sec.body, spec)
+    def _build_flags(self, parent):
+        group = self._make_group(parent, "Flags")
         self._add_switch(
-            sec.body, "Lead follow (ACC) enabled",
-            get=lambda: bool(self.ctrl_cfg.lead_follow_enabled),
-            set_=lambda v: setattr(self.ctrl_cfg,
-                                   "lead_follow_enabled", bool(v)),
-            sid="lead_follow_enabled")
+            group, "Steering probe", lambda: not self.settings.no_probe, self._on_probe_toggle
+        )
+        self._add_switch(
+            group,
+            "Passive fit",
+            lambda: self.settings.passive_fit,
+            lambda v: setattr(self.settings, "passive_fit", v),
+            obj=self.settings,
+        )
+        self._add_switch(
+            group,
+            "Force engage",
+            lambda: self.settings.force_engage,
+            lambda v: setattr(self.settings, "force_engage", v),
+            obj=self.settings,
+        )
+        label = ctk.CTkLabel(
+            group.body,
+            text=self.settings.path(),
+            text_color=MUTED,
+            font=ctk.CTkFont(size=10),
+            anchor="w",
+            justify="left",
+            wraplength=310,
+        )
+        group.add(label, "Settings file path")
 
-    def _build_manual_section(self, parent) -> None:
-        sec = _Section(parent, "Manual override + bind helper",
-                       expanded=False)
-        self._hint(sec.body,
-                   "Manual overrides only fire while ENGAGED. The bind "
-                   "helper wiggles a chosen input so ETS2's controller "
-                   "wizard can detect it — disengage first.")
-        for spec in [
-            _SliderSpec(self.manual, "throttle", "Throttle (RT)",
-                        0.0, 1.0, 0.01, "{:.2f}"),
-            _SliderSpec(self.manual, "brake", "Brake (LT)",
-                        0.0, 1.0, 0.01, "{:.2f}"),
-            _SliderSpec(self.manual, "steer", "Steer (LX)",
-                        -1.0, 1.0, 0.01, "{:+.2f}"),
+    def _build_manual(self, parent):
+        group = self._make_group(parent, "Manual")
+        for attr, label, lo in [
+            ("throttle", "Throttle", 0),
+            ("brake", "Brake", 0),
+            ("steer", "Steer", -1),
         ]:
-            self._add_slider(sec.body, spec)
+            self._add_number(
+                group,
+                _NumberSpec(
+                    self.manual, attr, label, lo, 1, 0.01, "{:+.2f}" if lo < 0 else "{:.2f}"
+                ),
+            )
         self._add_switch(
-            sec.body, "Use manual steer (overrides AI)",
-            get=lambda: self.manual.steer_override,
-            set_=lambda v: setattr(self.manual,
-                                   "steer_override", bool(v)),
-            sid="manual_steer_override")
+            group,
+            "Manual steer",
+            lambda: self.manual.steer_override,
+            lambda v: setattr(self.manual, "steer_override", v),
+        )
         self._add_switch(
-            sec.body, "Use manual throttle/brake (overrides AI)",
-            get=lambda: self.manual.long_override,
-            set_=lambda v: setattr(self.manual,
-                                   "long_override", bool(v)),
-            sid="manual_long_override")
-        ctk.CTkButton(sec.body, text="Zero all + drop overrides",
-                      command=self._zero_manual
-                      ).pack(fill="x", pady=(6, 0))
+            group,
+            "Manual throttle/brake",
+            lambda: self.manual.long_override,
+            lambda v: setattr(self.manual, "long_override", v),
+        )
+        group.add(self._button(group.body, "Zero all", self._zero_manual), "Zero all")
 
-        if self.device is not None:
-            self._divider(sec.body)
-            ctk.CTkLabel(sec.body, text="Bind helper",
-                         anchor="w", text_color=COLOR_HEADER_TEXT,
-                         font=ctk.CTkFont(size=12, weight="bold")
-                         ).pack(anchor="w", pady=(0, 2))
-            self._hint(sec.body,
-                       "Click an input → 4 s countdown → it wiggles. "
-                       "Alt-tab to the game's binding slot during the "
-                       "countdown.")
-            self._bind_frame = ctk.CTkFrame(sec.body,
-                                            fg_color="transparent")
-            self._bind_frame.pack(fill="x", pady=(0, 4))
-            self._bind_status_label = ctk.CTkLabel(
-                sec.body, text="", text_color=COLOR_HINT, anchor="w",
-                font=ctk.CTkFont(size=11))
-            self._bind_status_label.pack(fill="x", pady=(0, 4))
-            self._rebuild_bind_buttons()
+    def _build_status(self, parent):
+        group = self._make_group(parent, "Status")
+        for key, name in [
+            ("telemetry", "Telemetry"),
+            ("device", "Device"),
+            ("camera", "Camera"),
+            ("steering", "Steering fit"),
+            ("fov", "FOV"),
+            ("calibration", "Calibration"),
+        ]:
+            self._readout(group, key, name, "—")
 
-    def _build_hotkeys_section(self, parent) -> None:
-        sec = _Section(parent, "Hotkeys", expanded=False)
-        if self.settings is None:
-            return
-        self._hint(sec.body,
-                   "Toggle off any hotkey you don't want firing. "
-                   "Changes persist to settings.json immediately.")
-        for group in groups_in_order():
-            ctk.CTkLabel(sec.body, text=group, anchor="w",
-                         text_color=COLOR_HEADER_TEXT,
-                         font=ctk.CTkFont(size=12, weight="bold")
-                         ).pack(anchor="w", pady=(8, 2), padx=(2, 0))
-            for hk in hotkeys_in_group(group):
-                self._add_hotkey_row(sec.body, hk)
+    def _build_speed(self, parent):
+        group = self._make_group(parent, "Speed & ACC")
+        self._add_switch(group, "ACC", lambda: self.ctrl_cfg.lead_follow_enabled, self._set_acc)
+        for attr, label, lo, hi, step, fmt in [
+            ("long_anticipation_s", "Speed anticipation (s)", 0, 6, 0.05, "{:.2f}"),
+            ("max_accel_mps2", "Max accel (m/s²)", 0.5, 5, 0.1, "{:.1f}"),
+            ("max_decel_mps2", "Max decel (m/s²)", 1, 9, 0.1, "{:.1f}"),
+            ("speed_p_gain", "Speed gain", 0, 1.5, 0.05, "{:.2f}"),
+            ("accel_deadband_mps2", "Accel deadband (m/s²)", 0, 0.5, 0.01, "{:.2f}"),
+            ("max_speed_mps", "Max speed (m/s)", 5, 50, 0.1, "{:.1f}"),
+            ("max_lat_accel_mps2", "Corner lateral accel (m/s²)", 0, 8, 0.1, "{:.1f}"),
+            ("lead_min_prob", "ACC lead probability", 0, 1, 0.05, "{:.2f}"),
+            ("lead_time_headway_s", "ACC headway (s)", 0.5, 4, 0.05, "{:.2f}"),
+            ("lead_min_gap_m", "ACC min gap (m)", 1, 15, 0.5, "{:.1f}"),
+            ("lead_gap_p_gain", "ACC gap gain", 0, 1, 0.05, "{:.2f}"),
+            ("lead_ttc_brake_s", "AEB time to collision (s)", 0.5, 5, 0.1, "{:.1f}"),
+        ]:
+            self._add_number(group, _NumberSpec(self.ctrl_cfg, attr, label, lo, hi, step, fmt))
 
-    def _add_hotkey_row(self, parent, hk) -> None:
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", padx=(2, 0), pady=2)
+    def _build_hotkeys(self, parent):
+        group = self._make_group(parent, "Hotkeys")
+        for name in groups_in_order():
+            for hk in hotkeys_in_group(name):
+                self._add_switch(
+                    group,
+                    f"{hk.key}   {hk.action}",
+                    lambda id_=hk.id: id_ not in self.settings.disabled_hotkeys,
+                    lambda v, id_=hk.id: self._set_hotkey(id_, v),
+                )
 
-        is_enabled = hk.id not in self.settings.disabled_hotkeys
-
-        def _toggle(hk_id=hk.id, sw=None) -> None:
-            v = bool(sw.get()) if sw is not None else True
-            if v:
-                if hk_id in self.settings.disabled_hotkeys:
-                    self.settings.disabled_hotkeys.remove(hk_id)
-            else:
-                if hk_id not in self.settings.disabled_hotkeys:
-                    self.settings.disabled_hotkeys.append(hk_id)
-            self.settings.save()
-
-        sw = ctk.CTkSwitch(row, text="", width=40,
-                           command=lambda: _toggle(sw=sw))
-        if is_enabled:
-            sw.select()
+    def _row(self, parent, label, inline=False):
+        container = parent.body if isinstance(parent, _Group) else parent
+        row = ctk.CTkFrame(container, fg_color="transparent", height=24)
+        if isinstance(parent, _Group):
+            parent.add(row, label)
         else:
-            sw.deselect()
-        sw.pack(side="left", padx=(0, 4))
+            row.pack(side="left" if inline else "top", padx=(0, 10), fill="x")
+        return row
 
-        key_color = COLOR_DANGER_KEY if hk.danger else COLOR_HEADER_TEXT
-        ctk.CTkLabel(row, text=hk.key, width=110, anchor="w",
-                     text_color=key_color,
-                     font=ctk.CTkFont(family="Consolas", size=11,
-                                      weight="bold")
-                     ).pack(side="left", padx=(0, 6))
+    def _add_number(self, parent, spec, inline=False):
+        row = self._row(parent, spec.label, inline)
+        ctk.CTkLabel(
+            row, text=spec.label, anchor="w", text_color=INK, height=23, font=ctk.CTkFont(size=12)
+        ).pack(side="left", padx=(0, 6))
+        var = ctk.StringVar(value=spec.fmt.format(getattr(spec.obj, spec.attr) * spec.scale))
+        if spec.unit:
+            ctk.CTkLabel(row, text=spec.unit, text_color=MUTED, font=ctk.CTkFont(size=11)).pack(
+                side="right", padx=(4, 0)
+            )
+        entry = ctk.CTkEntry(
+            row,
+            textvariable=var,
+            width=54 if inline else 82,
+            height=23,
+            border_width=0,
+            corner_radius=4,
+            fg_color=FIELD,
+            text_color=INK,
+            justify="right",
+            font=ctk.CTkFont(size=12),
+        )
+        entry.pack(side="right")
+        field = _Number(spec, entry, var)
+        self._numbers.append(field)
+        entry.bind("<Return>", lambda _: self._commit_number(field))
+        entry.bind("<FocusOut>", lambda _: self._commit_number(field))
+        entry.bind(
+            "<Escape>",
+            lambda _: var.set(spec.fmt.format(getattr(spec.obj, spec.attr) * spec.scale)),
+        )
 
-        text = ctk.CTkFrame(row, fg_color="transparent")
-        text.pack(side="left", fill="x", expand=True)
-        scope = "global" if hk.scope == "global" else "overlay"
-        ctk.CTkLabel(text, text=f"{hk.action}   ({scope})",
-                     anchor="w", text_color=COLOR_VALUE,
-                     font=ctk.CTkFont(size=11, weight="bold")
-                     ).pack(anchor="w")
-        if hk.description:
-            ctk.CTkLabel(text, text=hk.description, anchor="w",
-                         justify="left", text_color=COLOR_HINT,
-                         wraplength=WINDOW_W - 220,
-                         font=ctk.CTkFont(size=10)
-                         ).pack(anchor="w")
+    def _commit_number(self, field):
+        try:
+            self._set_number(field.spec, field.var.get())
+        except (ValueError, OverflowError):
+            field.entry.configure(text_color=RED)
+            return False
+        field.entry.configure(text_color=INK)
+        field.var.set(
+            field.spec.fmt.format(getattr(field.spec.obj, field.spec.attr) * field.spec.scale)
+        )
+        self._sync_controls()
+        return True
 
-        # Hold a strong reference so the switch isn't GC'd.
-        setattr(self, f"_hkey_sw_{hk.id}", sw)
+    def _set_number(self, spec, text):
+        value = float(text) / spec.scale
+        if not math.isfinite(value) or not spec.lo <= value <= spec.hi:
+            raise ValueError("Out of range")
+        value = max(spec.lo, min(spec.hi, round(value / spec.step) * spec.step))
+        if getattr(spec.obj, spec.attr) != value:
+            setattr(spec.obj, spec.attr, value)
+            self._persist(spec.obj)
 
-    # ----- widget helpers -----
+    def _add_switch(self, parent, label, get, set_, *, obj=None, inline=False):
+        row = self._row(parent, label, inline)
 
-    def _add_slider(self, parent, spec: _SliderSpec) -> None:
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", pady=(2, 0))
+        def changed():
+            set_(bool(sw.get()))
+            if obj is not None:
+                self._persist(obj)
+            self._sync_controls()
 
-        ctk.CTkLabel(row, text=spec.label, anchor="w",
-                     text_color=COLOR_VALUE,
-                     font=ctk.CTkFont(size=11)).pack(side="left")
-        value = ctk.CTkLabel(
-            row, text=spec.fmt.format(getattr(spec.obj, spec.attr)),
-            anchor="e", width=80, text_color=COLOR_VALUE,
-            font=ctk.CTkFont(family="Consolas", size=11))
-        value.pack(side="right")
-
-        def on_change(raw, s=spec, lbl=value) -> None:
-            snapped = round(float(raw) / s.step) * s.step
-            setattr(s.obj, s.attr, snapped)
-            lbl.configure(text=s.fmt.format(snapped))
-
-        slider = ctk.CTkSlider(parent, from_=spec.lo, to=spec.hi,
-                               command=on_change, height=18)
-        slider.set(getattr(spec.obj, spec.attr))
-        slider.pack(fill="x", pady=(0, 4))
-
-        self._sliders[(id(spec.obj), spec.attr)] = (slider, value, spec)
-
-    def _add_switch(self, parent, label: str, *,
-                    get: Callable[[], bool],
-                    set_: Callable[[bool], None],
-                    sid: str | None = None) -> None:
-        row = ctk.CTkFrame(parent, fg_color="transparent")
-        row.pack(fill="x", pady=2)
+        if not inline:
+            ctk.CTkLabel(
+                row, text=label, text_color=INK, anchor="w", height=23, font=ctk.CTkFont(size=12)
+            ).pack(side="left", fill="x", expand=True)
         sw = ctk.CTkSwitch(
-            row, text=label,
-            command=lambda: set_(bool(sw.get())),
-            font=ctk.CTkFont(size=11), text_color=COLOR_VALUE)
+            row,
+            text=label if inline else "",
+            command=changed,
+            width=38,
+            switch_width=30,
+            switch_height=17,
+            progress_color=INK,
+            button_color="#a6aaae",
+            button_hover_color="#b7bbbf",
+            fg_color="#45484c",
+            text_color=INK,
+            font=ctk.CTkFont(size=12),
+        )
+        sw.pack(side="right")
+        self._switches.append((sw, get))
         if get():
             sw.select()
-        else:
-            sw.deselect()
-        sw.pack(side="left", fill="x", expand=True)
-        if sid:
-            self._switches[sid] = sw
-        # Hold a reference so the switch isn't GC'd.
-        setattr(self, f"_sw_{id(sw)}", sw)
 
-    def _hint(self, parent, text: str) -> None:
-        ctk.CTkLabel(parent, text=text, text_color=COLOR_HINT,
-                     anchor="w", justify="left",
-                     wraplength=WINDOW_W - 80,
-                     font=ctk.CTkFont(size=10)
-                     ).pack(anchor="w", pady=(0, 6), padx=(2, 0))
+    def _readout(self, group, key, label, value):
+        row = self._row(group, label)
+        ctk.CTkLabel(row, text=label, text_color=INK, height=24, font=ctk.CTkFont(size=12)).pack(
+            side="left"
+        )
+        val = ctk.CTkLabel(
+            row, text=value, anchor="e", text_color=MUTED, font=ctk.CTkFont(size=11), height=24
+        )
+        val.pack(side="right", fill="x", expand=True)
+        self._status_rows[key] = val
 
-    def _divider(self, parent) -> None:
-        ctk.CTkFrame(parent, fg_color=COLOR_DIVIDER, height=1
-                     ).pack(fill="x", pady=8)
+    def _set_acc(self, enabled):
+        self.ctrl_cfg.lead_follow_enabled = bool(enabled)
+        self._persist(self.ctrl_cfg)
 
-    def _set_slider_value(self, obj, attr, value) -> None:
-        """Mirror clamps / sign-preservation by re-reading after set."""
-        setattr(obj, attr, value)
-        actual = getattr(obj, attr)
-        key = (id(obj), attr)
-        if key in self._sliders:
-            slider, value_label, spec = self._sliders[key]
-            slider.set(float(actual))
-            value_label.configure(text=spec.fmt.format(actual))
+    def _set_developer(self, enabled):
+        set_developer_mode(self.settings, enabled)
+        if self._root is not None:
+            self._sync_mode()
+            self._sync_controls()
 
-    # ----- status polling -----
+    def _on_game_change(self, name):
+        self.settings.game = self._game_choices[name]
+        self.settings.save()
+        self._refresh_restart()
 
-    def _poll_status(self) -> None:
+    def _refresh_restart(self):
         if self._root is None:
             return
-        try:
-            self._refresh_strip()
-            self._refresh_dashboard()
-            self._refresh_cal_routine()
-        except Exception:
-            pass
-        self._root.after(POLL_MS, self._poll_status)
+        if restart_required(self._startup_game, self.settings):
+            self._restart_button.pack(side="left", after=self._game_picker, padx=(0, 8))
+        else:
+            self._restart_button.pack_forget()
 
-    def _refresh_strip(self) -> None:
-        engaged = bool(self.device and self.device.engaged)
-        if self._engage_badge is not None:
-            self._engage_badge.configure(
-                text="ENGAGED" if engaged else "DISENGAGED",
-                fg_color=COLOR_ENGAGED if engaged else COLOR_DISENGAGED)
-        if self._status_engage is not None:
-            self._status_engage.configure(
-                text=f"engage: {'on' if engaged else 'off'}")
+    def _sync_mode(self):
+        if developer_mode(self.settings):
+            if self._workbench is None:
+                self._build_workbench()
+            if self._workbench.state() == "withdrawn":
+                self._workbench.deiconify()
+        elif self._workbench is not None:
+            self._workbench.withdraw()
 
-        if self._status_device is not None:
-            kind = self.device.kind if self.device else None
-            self._status_device.configure(text=f"device: {kind or '—'}")
-
-        if self._status_lookahead is not None:
-            # Static now — just mirror the slider value. No frozen
-            # badge because there's nothing to freeze.
-            self._status_lookahead.configure(
-                text=f"look: {self.ctrl_cfg.lookahead_s:.2f}s")
-
-        if self._status_liveparams is not None:
-            if self.live_params is not None:
-                a = self.live_params.a_linear
-                b = self.live_params.b_quad
-                c = self.live_params.c_bias
-                n = self.live_params.samples
-                self._status_liveparams.configure(
-                    text=f"lp: a={a:+.2f} b={b:+.4f} c={c:+.3f} n={n}")
-                if (self._status_liveparams_badge is not None
-                        and self.live_params.frozen):
-                    if not self._status_liveparams_badge.winfo_ismapped():
-                        self._status_liveparams_badge.pack(
-                            side="left", padx=(2, 0))
-                elif (self._status_liveparams_badge is not None
-                      and self._status_liveparams_badge.winfo_ismapped()):
-                    self._status_liveparams_badge.pack_forget()
+    def _sync_controls(self, force_obj=None):
+        for field in self._numbers:
+            field.sync(force=field.spec.obj is force_obj)
+        for sw, get in self._switches:
+            if get():
+                sw.select()
             else:
-                self._status_liveparams.configure(text="lp: —")
-
-    def _refresh_dashboard(self) -> None:
-        if not self._dash_rows:
-            return
-
-        # Telemetry.
-        if self.game and self.game != "auto":
-            self._paint_dash("telemetry", "ok", f"{self.game} connected")
-        else:
-            self._paint_dash("telemetry", "warn", "auto-detecting")
-
-        # Output device.
-        if self.device is None:
-            self._paint_dash("device", "bad", "not initialized")
-        elif self.device.kind is None:
-            self._paint_dash("device", "bad",
-                             self.device.last_error or "unavailable")
-        else:
-            self._paint_dash("device", "ok", f"{self.device.kind} ready")
-
-        # Camera calibration.
-        if self.live_calib is None:
-            self._paint_dash("camera", "warn", "not wired")
-        else:
-            try:
-                from simsteer.core.learners.livecalib import CalStatus
-                st = self.live_calib.cal_status
-                if st == CalStatus.CALIBRATED:
-                    pitch = self.live_calib.pitch_estimate or 0
-                    yaw = self.live_calib.yaw_estimate or 0
-                    self._paint_dash(
-                        "camera", "ok",
-                        f"pitch={pitch:+.2f}° yaw={yaw:+.2f}°")
-                elif st == CalStatus.INVALID:
-                    self._paint_dash("camera", "bad", "INVALID — drift")
-                else:
-                    pct = ((self.live_calib.blocks * 100
-                            + self.live_calib._block_n) / 500.0) * 100
-                    self._paint_dash("camera", "warn",
-                                     f"warming up ({pct:.0f}%)")
-            except Exception:
-                self._paint_dash("camera", "warn", "—")
-
-        # Steering fit.
-        if self.live_params is None:
-            self._paint_dash("steering", "warn", "not wired")
-        else:
-            try:
-                trusted = self.live_params.trusted()
-                n = max(self.live_params.samples,
-                        getattr(self.live_params, "session_samples", 0))
-                if trusted:
-                    self._paint_dash(
-                        "steering", "ok",
-                        f"a={self.live_params.a_linear:+.2f} n={n}")
-                else:
-                    self._paint_dash("steering", "warn",
-                                     f"warming up ({n}/200 samples)")
-            except Exception:
-                self._paint_dash("steering", "warn", "—")
-
-        # FOV.
-        self._paint_dash("fov", "ok",
-                         f"{self.calib.fov_h_deg:.1f}° (static — match in-game)")
-
-    def _refresh_cal_routine(self) -> None:
-        """Mirror the guided-calibration routine's state into its label.
-        Also pulls fresh a/b/c into the LiveParams sliders on completion
-        so the UI reflects the new fit without the user dragging."""
-        if self.cal_routine is None or self._cal_status_label is None:
-            return
-        try:
-            if self.cal_routine.active:
-                self._cal_status_label.configure(
-                    text=self.cal_routine.prompt)
-            elif self.cal_routine.summary_text:
-                self._cal_status_label.configure(
-                    text=self.cal_routine.summary_text)
-                # The routine moved a/b/c — refresh sliders cheaply.
-                if self.live_params is not None:
-                    for attr in ("a_linear", "b_quad", "c_bias"):
-                        key = (id(self.live_params), attr)
-                        if key in self._sliders:
-                            slider, value_label, spec = self._sliders[key]
-                            current = getattr(self.live_params, attr)
-                            if abs(slider.get() - current) > 1e-5:
-                                slider.set(float(current))
-                                value_label.configure(
-                                    text=spec.fmt.format(current))
-            else:
-                self._cal_status_label.configure(text="(idle)")
-        except Exception:
-            pass
-
-    def _paint_dash(self, key: str, level: str, text: str) -> None:
-        if key not in self._dash_rows:
-            return
-        dot, label = self._dash_rows[key]
-        color = {"ok": COLOR_OK, "warn": COLOR_WARN,
-                 "bad": COLOR_BAD}.get(level, COLOR_BAD)
-        try:
-            dot.configure(fg_color=color)
-            label.configure(text=text)
-        except Exception:
-            pass
-
-    # ----- save / action handlers -----
-
-    def _save_calib(self) -> None:
-        self.calib.save(game=self.game)
-        suffix = f"_{self.game}" if self.game else ""
-        print(f"saved calibration{suffix}.json")
-
-    def _save_ctrl(self) -> None:
-        self.ctrl_cfg.save(game=self.game)
-        suffix = f"_{self.game}" if self.game else ""
-        print(f"saved controller{suffix}.json")
-
-    def _save_liveparams(self) -> None:
-        if self.live_params is None:
-            return
-        self.live_params.save()
-        suffix = f"_{self.game}" if self.game else ""
-        print(f"saved liveparams{suffix}.json  "
-              f"a={self.live_params.a_linear:.2f} "
-              f"b={self.live_params.b_quad:.4f} "
-              f"c={self.live_params.c_bias:+.3f}")
-
-    def _save_settings(self) -> None:
-        if self.settings is None:
-            return
-        if self._setup_game_var is not None:
-            self.settings.game = self._setup_game_var.get()
-        self.settings.save()
-        if self._setup_status_label is not None:
-            self._setup_status_label.configure(
-                text=f"saved → {self.settings.path()}")
-
-    def _save_all(self) -> None:
-        """Top-bar action. Saves tuning data (calib + ctrl + liveparams)
-        AND settings. Each independent — one failure doesn't block the rest."""
-        errors: list[str] = []
-        for label, fn in (("calib", self._save_calib),
-                          ("ctrl", self._save_ctrl),
-                          ("liveparams", self._save_liveparams),
-                          ("settings", self._save_settings)):
-            try:
-                fn()
-            except Exception as e:
-                errors.append(f"{label}: {e}")
-        if errors:
-            self._flash_save("save errors: " + "; ".join(errors),
-                             color=COLOR_SAVE_ERR)
-        else:
-            stamp = datetime.now().strftime("%H:%M:%S")
-            self._flash_save(f"Saved {stamp}", color=COLOR_SAVE_FLASH)
-
-    def _flash_save(self, text: str, color: str) -> None:
-        if self._save_status_label is None or self._root is None:
-            return
-        self._save_status_label.configure(text=text, text_color=color)
-        if self._save_flash_after_id is not None:
-            try:
-                self._root.after_cancel(self._save_flash_after_id)
-            except Exception:
-                pass
-        self._save_flash_after_id = self._root.after(
-            2000, lambda: self._save_status_label.configure(text=""))
-
-    def _reset_liveparams(self) -> None:
-        if self.live_params is None:
-            return
-        self.live_params.reset()
-        self.live_params.save()
-        for attr in ("a_linear", "b_quad", "c_bias"):
-            self._set_slider_value(self.live_params, attr,
-                                   getattr(self.live_params, attr))
-        print(f"liveparams reset to seed for game={self.game!r}: "
-              f"a={self.live_params.a_linear:.3f} "
-              f"b={self.live_params.b_quad:.4f} "
-              f"c={self.live_params.c_bias:+.4f} (samples=0)")
-
-    def _set_liveparams_lock(self, v: bool) -> None:
-        if self.live_params is None:
-            return
-        self.live_params.frozen = bool(v)
-        state = "LOCKED" if v else "unlocked"
-        print(f"liveparams {state}  "
-              f"a={self.live_params.a_linear:+.2f} "
-              f"b={self.live_params.b_quad:+.4f} "
-              f"c={self.live_params.c_bias:+.3f}")
-
-    def _flip_liveparams_sign(self) -> None:
-        if self.live_params is None:
-            return
-        self._set_slider_value(self.live_params, "a_linear",
-                               -self.live_params.a_linear)
-        self._set_slider_value(self.live_params, "b_quad",
-                               -self.live_params.b_quad)
-        self.live_params.save()
-        print(f"liveparams sign flipped  "
-              f"a={self.live_params.a_linear:+.2f} "
-              f"b={self.live_params.b_quad:+.4f}")
-
-    def _start_calibration(self) -> None:
-        if self.cal_routine is None:
-            return
-        self.cal_routine.start()
-
-    def _cancel_calibration(self) -> None:
-        if self.cal_routine is None:
-            return
-        self.cal_routine.cancel()
-        # If the routine moved a/b/c before cancel, the strip will pick
-        # that up on the next poll — but refresh the sliders here too
-        # so they don't sit at pre-routine values.
-        if self.live_params is not None:
-            for attr in ("a_linear", "b_quad", "c_bias"):
-                key = (id(self.live_params), attr)
-                if key in self._sliders:
-                    slider, value_label, spec = self._sliders[key]
-                    current = getattr(self.live_params, attr)
-                    slider.set(float(current))
-                    value_label.configure(text=spec.fmt.format(current))
-
-    def _zero_manual(self) -> None:
-        for attr in ("throttle", "brake", "steer"):
-            self._set_slider_value(self.manual, attr, 0.0)
-        self.manual.steer_override = False
-        self.manual.long_override = False
-        for sid in ("manual_steer_override", "manual_long_override"):
-            sw = self._switches.get(sid)
-            if sw is not None:
                 sw.deselect()
 
-    # ----- setup-section callbacks -----
+    def _filter(self):
+        query = self._filter_var.get().strip().casefold()
+        for group in self._groups:
+            group.filter(query)
 
-    def _on_probe_toggle(self, v: bool) -> None:
-        if self.settings is None:
-            return
-        self.settings.no_probe = not bool(v)
-        if self.probe is not None:
-            self.probe.enabled = bool(v)
-        if self._setup_status_label is not None:
-            self._setup_status_label.configure(
-                text=f"probe → {'enabled' if v else 'disabled'}")
+    def _poll(self):
+        if self._root is not None:
+            self._refresh()
+            self._root.after(POLL_MS, self._poll)
 
-    def _on_passive_toggle(self, v: bool) -> None:
-        if self.settings is None:
-            return
-        self.settings.passive_fit = bool(v)
-        if self._setup_status_label is not None:
-            self._setup_status_label.configure(
-                text=f"passive_fit → {bool(v)}")
+    def _refresh(self):
+        self._sync_mode()
+        self._sync_controls()
+        self._refresh_restart()
+        s = self._hud_state
+        engaged = bool(self.device and self.device.engaged)
+        panel = (
+            s.calibration
+            if s
+            else calibration_view(
+                wizard=self.wizard, routine=self.cal_routine, flow=self.calib_flow, engaged=engaged
+            )
+        )
+        label = (
+            status_label(s)
+            if s
+            else (
+                "Engaged"
+                if engaged
+                else "Disengaged"
+                if self.device and self.device.kind
+                else "No gamepad"
+            )
+        )
+        if panel and not engaged and label == "Disengaged":
+            label = "Calibrating" if panel.tone == "calibrating" else panel.step_name
+        color = GREEN if engaged else BLUE if panel else INK
+        self._state_label.configure(text=label, text_color=color)
+        calibrated = (
+            bool(self.calib_flow.calibrated)
+            if self.calib_flow is not None
+            else bool(
+                self.live_params
+                and self.live_params.trusted()
+                and self.live_calib
+                and self.live_calib.cal_status == 1
+            )
+        )
+        self._cal_label.configure(
+            text="Calibrated" if calibrated else panel.step_name if panel else "Not calibrated"
+        )
+        if self._live is not None:
+            fit = ""
+            if self.live_params:
+                lp = self.live_params
+                fit = f"a {lp.a_linear:+.2f}  b {lp.b_quad:+.4f}  c {lp.c_bias:+.3f}  n {lp.samples:,}"
+                if lp.frozen:
+                    fit += "  LOCKED"
+            self._live.configure(
+                text=f"{label}    Look {self.ctrl_cfg.lookahead_s:.2f} s    {fit}"
+                + (f"    {s.fps:.0f} fps" if s else "")
+            )
+            values = {
+                "telemetry": (s.telemetry_status if s else "—"),
+                "device": (
+                    f"{self.device.kind} ready"
+                    if self.device and self.device.kind
+                    else "Unavailable"
+                ),
+                "camera": f"{self.calib.pitch_deg:+.1f}°  {self.calib.yaw_deg:+.1f}°  {self.calib.height_m:.2f} m",
+                "steering": f"a {self.live_params.a_linear:+.2f}  n {self.live_params.samples:,}"
+                if self.live_params
+                else "—",
+                "fov": f"V {self.calib.fov_v_deg:.1f}°  H {self.calib.fov_h_deg:.1f}°",
+                "calibration": (
+                    f"Score {panel.score:.2f}"
+                    if panel and panel.score is not None
+                    else self.cal_routine.summary_text
+                    if self.cal_routine and self.cal_routine.summary_text
+                    else f"{panel.step_name} {panel.progress:.0%}"
+                    if panel
+                    else "Calibrated"
+                    if calibrated
+                    else "—"
+                ),
+            }
+            if self.calib_flow and self.calib_flow.result:
+                values["calibration"] = f"Score {self.calib_flow.result.get('score', 0):.2f}"
+            for key, value in values.items():
+                if key in self._status_rows:
+                    self._status_rows[key].configure(text=value)
 
-    def _on_force_toggle(self, v: bool) -> None:
-        if self.settings is None:
-            return
-        self.settings.force_engage = bool(v)
-        if self._setup_status_label is not None:
-            self._setup_status_label.configure(
-                text=f"force_engage → {bool(v)}")
+    def _persist(self, obj):
+        if obj is self.manual:
+            return True
+        try:
+            if obj is self.calib or obj is self.ctrl_cfg:
+                obj.save(game=self.game)
+            else:
+                obj.save()
+            self._saved()
+            return True
+        except OSError:
+            self._saved("Save failed", RED)
+            return False
 
-    def _on_recalibrate_click(self) -> None:
-        from tkinter import messagebox
-        ok = messagebox.askyesno(
-            "Recalibrate?",
-            "This wipes camera calibration AND steering fit AND camera "
-            "pose (pitch/yaw/sign) for the current game, then restarts "
-            "the first-drive wizard.\n\n"
-            "You'll need to drive ~10-15 min on a highway before "
-            "engagement is allowed again.\n\n"
-            "Continue?")
+    def _saved(self, text=None, color=MUTED):
+        if self._save_status is not None:
+            self._save_status.configure(
+                text=text or datetime.now().strftime("Saved %H:%M:%S"), text_color=color
+            )
+
+    def _save_all(self):
+        ok = True
+        for field in self._numbers:
+            if field.editing():
+                ok = self._commit_number(field) and ok
+        for obj in (self.calib, self.ctrl_cfg, self.live_params, self.settings):
+            if obj is not None:
+                ok = self._persist(obj) and ok
         if not ok:
-            if self._setup_status_label is not None:
-                self._setup_status_label.configure(
-                    text="recalibrate cancelled")
-            return
-        if self.device is not None and self.device.engaged:
-            self.device.disengage()
-        if self.live_calib is not None:
-            self.live_calib.reset(reason="user clicked Recalibrate")
-        if self.live_params is not None:
-            self.live_params.reset(wipe_disk=True)
-            for attr in ("a_linear", "b_quad", "c_bias"):
-                self._set_slider_value(self.live_params, attr,
-                                       getattr(self.live_params, attr))
-        if self.wizard is not None:
-            self.wizard.reset()
+            self._saved("Save failed", RED)
+
+    def _set_hotkey(self, id_, enabled):
+        disabled = self.settings.disabled_hotkeys
+        if enabled and id_ in disabled:
+            disabled.remove(id_)
+        elif not enabled and id_ not in disabled:
+            disabled.append(id_)
+        self.settings.save()
+
+    def _on_probe_toggle(self, enabled):
+        self.settings.no_probe = not enabled
         if self.probe is not None:
+            self.probe.enabled = enabled
+        self._persist(self.settings)
+
+    def _reset_liveparams(self):
+        self.live_params.reset()
+        self._persist(self.live_params)
+        self._sync_controls(force_obj=self.live_params)
+
+    def _flip_liveparams_sign(self):
+        self.live_params.a_linear = -self.live_params.a_linear
+        self.live_params.b_quad = -self.live_params.b_quad
+        self._persist(self.live_params)
+        self._sync_controls(force_obj=self.live_params)
+
+    def _zero_manual(self):
+        self.manual.throttle = self.manual.brake = self.manual.steer = 0.0
+        self.manual.steer_override = self.manual.long_override = False
+        self._sync_controls(force_obj=self.manual)
+
+    def _on_recalibrate_click(self):
+        from tkinter import messagebox
+
+        if not messagebox.askyesno(
+            "Recalibrate?", "Reset this game's camera and steering calibration?", parent=self._root
+        ):
+            return
+        if self.calib_flow is not None:
+            self.calib_flow.request_restart("Recalibrate clicked")
+            return
+        if self.device and self.device.engaged:
+            self.device.disengage()
+        if self.live_calib:
+            self.live_calib.reset(reason="user clicked Recalibrate")
+        if self.live_params:
+            self.live_params.reset(wipe_disk=True)
+        if self.wizard:
+            self.wizard.reset()
+        if self.probe:
             self.probe.reset()
         defaults = Calibration()
         for attr in ("pitch_deg", "yaw_deg", "lateral_sign", "height_m"):
-            self._set_slider_value(self.calib, attr,
-                                   getattr(defaults, attr))
-        try:
-            self.calib.save(game=self.game)
-        except Exception:
-            pass
-        # Refresh the mirror-sign switch in case sign changed.
-        mirror = self._switches.get("mirror_lateral_sign")
-        if mirror is not None:
-            if self.calib.lateral_sign < 0:
-                mirror.select()
-            else:
-                mirror.deselect()
-        if self._setup_status_label is not None:
-            self._setup_status_label.configure(
-                text="calibration wiped — wizard restarted, drive ~15 min")
+            setattr(self.calib, attr, getattr(defaults, attr))
+        self._persist(self.calib)
+        self._sync_controls()
 
-    def _save_and_restart(self) -> None:
-        if self.settings is None:
+    def _save_and_restart(self):
+        if not restart_required(self._startup_game, self.settings):
             return
-        if self._setup_game_var is not None:
-            self.settings.game = self._setup_game_var.get()
-        self.settings.save()
-        if self._setup_status_label is not None:
-            self._setup_status_label.configure(text="saved — relaunching...")
         import os
         import subprocess
         import sys
+
+        self.settings.save()
+        args = [sys.executable]
+        if not getattr(sys, "frozen", False):
+            args += ["-m", "simsteer"]
+        args += [*sys.argv[1:], "--game", self.settings.game]
         try:
-            subprocess.Popen(
-                [sys.executable] + sys.argv[1:],
-                cwd=os.path.dirname(os.path.abspath(sys.argv[0]))
-                    if sys.argv[0] else None)
+            subprocess.Popen(args)
             os._exit(0)
-        except Exception as e:
-            if self._setup_status_label is not None:
-                self._setup_status_label.configure(
-                    text=f"restart failed: {e}")
+        except OSError:
+            self._restart_button.configure(text="Retry")
 
-    # ----- output device -----
-
-    def _on_device_change_seg(self, value: str) -> None:
+    def _on_device_change_seg(self, value):
         if self.device is None:
             return
         requested = "wheel" if value == "Wheel" else "gamepad"
-        ok = self.device.set_kind(requested)
-        if (not ok and self.device.kind is not None
-                and self._device_seg is not None):
-            self._device_seg.set(
-                "Wheel" if self.device.is_wheel else "Gamepad")
-
-        if ok and self.settings is not None and self.device.kind is not None:
-            self.settings.device = self.device.kind
-            self.settings.save()
-
-        if (ok and self.live_params is not None
-                and self.device.kind is not None):
+        if not self.device.set_kind(requested):
+            self._device_picker.set("Wheel" if self.device.is_wheel else "Gamepad")
+            return
+        self.settings.device = self.device.kind
+        self.settings.save()
+        if self.live_params:
             self.live_params.switch_device(self.device.kind)
-            for attr in ("a_linear", "b_quad", "c_bias"):
-                self._set_slider_value(self.live_params, attr,
-                                       getattr(self.live_params, attr))
-
-        # On device swap, seed lookahead_s to a sensible per-device
-        # default — wheel skips ETS2's input smoothing (~250 ms) so a
-        # shorter delay reads correctly; gamepad goes through it.
-        if ok:
-            seed = 0.10 if (self.device and self.device.is_wheel) else 0.25
-            self._set_slider_value(self.ctrl_cfg, "lookahead_s", seed)
-
+        self.ctrl_cfg.lookahead_s = 0.10 if self.device.is_wheel else 0.25
+        self._persist(self.ctrl_cfg)
+        self._sync_controls()
         self._rebuild_bind_buttons()
 
-        if ok:
-            if self.live_params is not None:
-                print(f"output device -> {self.device.kind}  "
-                      f"liveparams: a={self.live_params.a_linear:+.2f} "
-                      f"b={self.live_params.b_quad:+.4f} "
-                      f"c={self.live_params.c_bias:+.3f} "
-                      f"samples={self.live_params.samples}")
-            else:
-                print(f"output device -> {self.device.kind}")
-        else:
-            print(f"output device switch FAILED: {self.device.last_error}")
+    def _open_bind(self):
+        if self._bind_window is not None and self._bind_window.winfo_exists():
+            self._bind_window.lift()
+            return
+        win = ctk.CTkToplevel(self._root, fg_color=BG)
+        self._bind_window = win
+        win.title("Bind controller")
+        win.geometry("560x260")
+        self._bind_frame = ctk.CTkFrame(win, fg_color="transparent")
+        self._bind_frame.pack(fill="both", expand=True, padx=12, pady=12)
+        self._bind_status_label = ctk.CTkLabel(win, text="", text_color=INK)
+        self._bind_status_label.pack(fill="x", padx=12, pady=(0, 12))
+        self._rebuild_bind_buttons()
 
-    # ----- bind-wiggle helper -----
-
-    def _bind_inputs_for_active_device(self) -> list[tuple[str, str]]:
-        if self.device is None:
+    def _bind_inputs_for_active_device(self):
+        if not self.device:
             return []
         if self.device.is_wheel:
             from simsteer.runtime.output.wheel import Wheel
+
             return list(Wheel.WIGGLE_INPUTS)
         if self.device.is_gamepad:
             return [
-                ("left_stick_x",  "Left stick X (steer)"),
+                ("left_stick_x", "Left stick X"),
                 ("right_stick_x", "Right stick X"),
-                ("left_trigger",  "Left trigger (brake)"),
-                ("right_trigger", "Right trigger (throttle)"),
-                ("button_a",      "A"),
-                ("button_b",      "B"),
-                ("button_x",      "X"),
-                ("button_y",      "Y"),
-                ("button_lb",     "LB"),
-                ("button_rb",     "RB"),
+                ("left_trigger", "Brake"),
+                ("right_trigger", "Throttle"),
+                *[("button_" + key.lower(), key) for key in ("A", "B", "X", "Y", "LB", "RB")],
             ]
         return []
 
-    def _rebuild_bind_buttons(self) -> None:
-        frame = self._bind_frame
-        if frame is None:
+    def _rebuild_bind_buttons(self):
+        if self._bind_frame is None or not self._bind_frame.winfo_exists():
             return
-        for child in frame.winfo_children():
+        for child in self._bind_frame.winfo_children():
             child.destroy()
         inputs = self._bind_inputs_for_active_device()
         if not inputs:
-            ctk.CTkLabel(frame, text="(no device active)",
-                         text_color=COLOR_HINT,
-                         font=ctk.CTkFont(size=11)
-                         ).pack(anchor="w")
-            return
+            ctk.CTkLabel(self._bind_frame, text="No controller", text_color=INK).pack()
         for i, (kind, label) in enumerate(inputs):
-            r, c = divmod(i, 3)
-            btn = ctk.CTkButton(
-                frame, text=label, height=28,
-                command=lambda k=kind, lbl=label: self._wiggle(k, lbl))
-            btn.grid(row=r, column=c, sticky="ew", padx=2, pady=2)
-        for c in range(3):
-            frame.grid_columnconfigure(c, weight=1)
+            button = self._button(
+                self._bind_frame, label, lambda k=kind, lbl=label: self._wiggle(k, lbl)
+            )
+            button.grid(row=i // 3, column=i % 3, sticky="ew", padx=3, pady=3)
+        for i in range(3):
+            self._bind_frame.grid_columnconfigure(i, weight=1)
 
-    def _wiggle(self, kind: str, label: str) -> None:
-        if self.device is None or self.device.kind is None:
+    def _wiggle(self, kind, label):
+        if not self.device or not self.device.kind:
             return
         if self.device.engaged:
-            self._set_bind_status(
-                "disengage first (INSERT) before binding inputs")
+            self._set_bind_status("Disengage with Insert")
             return
 
-        def _run() -> None:
+        def run():
+            # Keep the selected backend stable if the toolbar changes device.
+            backend, is_wheel, raw = self.device.device, self.device.is_wheel, self.device.raw
             for n in (4, 3, 2, 1):
-                self._set_bind_status(
-                    f"wiggling {label} in {n} s — "
-                    f"alt-tab to the game now")
-                threading.Event().wait(1.0)
-            self._set_bind_status(f"wiggling {label}…")
-            try:
-                if self.device.is_wheel:
-                    self.device.device.wiggle(kind)
-                elif self.device.is_gamepad:
-                    from tools.bind_helper import wiggle as gamepad_wiggle
-                    gamepad_wiggle(self.device.raw, kind)
-            except Exception as e:
-                self._set_bind_status(f"error: {e}")
+                if self.device.engaged or self.device.device is not backend:
+                    self._set_bind_status("Cancelled")
+                    return
+                self._set_bind_status(f"{label} in {n} s")
+                threading.Event().wait(1)
+            if self.device.engaged or self.device.device is not backend:
+                self._set_bind_status("Cancelled")
                 return
-            self._set_bind_status(
-                "done. Click the next binding slot, or pick another input.")
-        threading.Thread(target=_run, daemon=True).start()
+            self._set_bind_status(f"Binding {label}")
+            try:
+                if is_wheel:
+                    backend.wiggle(kind)
+                else:
+                    from tools.bind_helper import wiggle
 
-    def _set_bind_status(self, text: str) -> None:
-        if self._bind_status_label is None or self._root is None:
-            return
-        self._root.after(
-            0, lambda: self._bind_status_label.configure(text=text))
+                    wiggle(raw, kind)
+                self._set_bind_status("Done")
+            except Exception as exc:
+                self._set_bind_status(str(exc))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _set_bind_status(self, text):
+        if self._root is not None:
+
+            def show():
+                if self._bind_status_label is not None and self._bind_status_label.winfo_exists():
+                    self._bind_status_label.configure(text=text)
+
+            self._root.after(0, show)

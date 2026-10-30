@@ -79,9 +79,8 @@ HOTKEYS: list[Hotkey] = [
            "Shows/hides the small preview of what the model is "
            "actually seeing.",
            "View", "overlay"),
-    Hotkey("hud_mode", "H", "Toggle HUD: user / dev",
-           "User mode is the clean panel layout; dev mode is the "
-           "stack-of-debug-text dump.",
+    Hotkey("hud_mode", "H", "Developer mode",
+           "Toggle the HUD diagnostics and tuner workbench together.",
            "View", "overlay"),
 
     # Calibration
@@ -167,6 +166,8 @@ def hk_enabled(hotkey_id: str, settings: "Settings | None") -> bool:
     None (called before Settings is wired) or the id is unknown."""
     if settings is None:
         return True
+    if hotkey_id == "mirror_sign" and settings.hud_mode != "dev":
+        return False
     return hotkey_id not in (settings.disabled_hotkeys or [])
 
 

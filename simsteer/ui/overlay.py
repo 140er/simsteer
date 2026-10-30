@@ -18,6 +18,8 @@ import numpy as np
 
 from simsteer.core.calibration import Calibration, polyline_to_image
 from simsteer.core.preprocess import yuv6_to_bgr
+from simsteer.ui.hud import bar_height
+from simsteer.ui.text import draw_text, text_width
 
 LANE_COLORS = [
     (180, 220, 255),  # outer left  (light blue/white — adjacent lane)
@@ -224,89 +226,37 @@ def _draw_timestep_markers(out: np.ndarray, calib: Calibration,
         px, py = int(img[0, 0]), int(img[0, 1])
         cv2.circle(out, (px, py), 4, (255, 255, 255), -1, cv2.LINE_AA)
         cv2.circle(out, (px, py), 5, (40, 40, 40), 1, cv2.LINE_AA)
-        cv2.putText(out, f"{t_mark:g}s", (px + 8, py + 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(out, f"{t_mark:g}s", (px + 8, py + 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+        draw_text(out, f"{t_mark:g}s", px + 9, py - 6, (0, 0, 0), 12, True)
+        draw_text(out, f"{t_mark:g}s", px + 8, py - 7, (255, 255, 255), 12, True)
 
 
-def _draw_plan_charts(out: np.ndarray, decoded) -> None:
-    """Bottom-left mini-charts: planned velocity (m/s) and acceleration
-    (m/s²) over the plan horizon. Lets the user see at a glance whether
-    the model is planning to brake / accelerate, and where in time.
-
-    Shares the same x-axis (plan time, 0..10 s).
-    """
-    from simsteer.core.constants import T_IDXS
-    H, W = out.shape[:2]
-    chart_w, chart_h = 240, 80
-    pad = 6
-    # Stack two charts vertically in the lower-left, above the
-    # calibration HUD which sits at the bottom edge.
-    x0 = 10
-    y_top_chart = H - 220
-    y_bot_chart = y_top_chart + chart_h + 8
-
-    t_idxs = np.asarray(T_IDXS, dtype=np.float32)
-    v = decoded.plan[:, 3].astype(np.float64)
-    a = decoded.plan[:, 6].astype(np.float64)
-
-    def _draw_axes(x, y, w, h, title, y_min, y_max, color_zero_line=False):
-        # Background panel.
-        cv2.rectangle(out, (x - 2, y - 2), (x + w + 2, y + h + 2),
-                      (30, 30, 30), -1)
-        cv2.rectangle(out, (x - 2, y - 2), (x + w + 2, y + h + 2),
-                      (200, 200, 200), 1)
-        # Title + y-axis bounds.
-        cv2.putText(out, title, (x, y - 4), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4, (220, 220, 220), 1, cv2.LINE_AA)
-        cv2.putText(out, f"{y_max:+.1f}", (x + w - 28, y + 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (160, 160, 160),
-                    1, cv2.LINE_AA)
-        cv2.putText(out, f"{y_min:+.1f}", (x + w - 28, y + h - 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (160, 160, 160),
-                    1, cv2.LINE_AA)
-        if color_zero_line and y_min < 0 < y_max:
-            y_zero = y + int(h * (y_max / (y_max - y_min)))
-            cv2.line(out, (x, y_zero), (x + w, y_zero),
-                     (110, 110, 110), 1, cv2.LINE_AA)
-
-    def _plot_series(values, x, y, w, h, y_min, y_max, color):
-        n = len(values)
-        if n < 2:
-            return
+def _draw_plan_charts(out, decoded, x, y, width, height=110):
+    """Two quiet, time-aligned plan charts inside the developer column."""
+    chart_h = (height - 34) // 2
+    for index, (values, title) in enumerate([
+        (decoded.plan[:, 3], "Plan speed, m/s"),
+        (decoded.plan[:, 6], "Plan accel, m/s²"),
+    ]):
+        top = y + index * (chart_h + 17)
+        draw_text(out, title, x, top, (164, 164, 164), 10)
+        low = 0.0 if index == 0 else min(-5.0, float(values.min()) - .5)
+        high = max(40.0, float(values.max()) * 1.1) if index == 0 else max(3.0, float(values.max()) + .5)
+        plot_y = top + 17
+        draw_text(out, f"{high:+.0f}", x, plot_y - 3, (140, 140, 140), 9)
+        draw_text(out, f"{low:+.0f}", x, plot_y + chart_h - 13, (140, 140, 140), 9)
+        plot_x, plot_w = x + 30, width - 34
+        for val in (low, 0.0, high):
+            if low <= val <= high:
+                py = plot_y + int(chart_h * (high - val) / (high - low))
+                cv2.line(out, (plot_x, py), (plot_x + plot_w, py), (42, 43, 41), 1)
         pts = []
         for i, val in enumerate(values):
-            px = x + int(w * i / (n - 1))
-            v_clip = max(y_min, min(y_max, float(val)))
-            py = y + int(h * (1 - (v_clip - y_min) / (y_max - y_min)))
+            px = plot_x + int(plot_w * i / max(1, len(values) - 1))
+            py = plot_y + int(chart_h * (high - np.clip(val, low, high)) / (high - low))
             pts.append((px, py))
         for i in range(1, len(pts)):
-            cv2.line(out, pts[i - 1], pts[i], color, 2, cv2.LINE_AA)
-
-    # Velocity chart: 0..40 m/s
-    v_lo, v_hi = 0.0, max(40.0, float(v.max()) * 1.1)
-    _draw_axes(x0, y_top_chart, chart_w, chart_h, "plan v (m/s)",
-               v_lo, v_hi)
-    _plot_series(v, x0, y_top_chart, chart_w, chart_h, v_lo, v_hi,
-                 (80, 220, 80))
-
-    # Acceleration chart: -5..+3 m/s²
-    a_lo = min(-5.0, float(a.min()) - 0.5)
-    a_hi = max(3.0, float(a.max()) + 0.5)
-    _draw_axes(x0, y_bot_chart, chart_w, chart_h, "plan a (m/s^2)",
-               a_lo, a_hi, color_zero_line=True)
-    # Color the accel line per sample so it visually matches the path.
-    n = len(a)
-    for i in range(1, n):
-        px0 = x0 + int(chart_w * (i - 1) / (n - 1))
-        px1 = x0 + int(chart_w * i / (n - 1))
-        a0 = max(a_lo, min(a_hi, float(a[i - 1])))
-        a1 = max(a_lo, min(a_hi, float(a[i])))
-        py0 = y_bot_chart + int(chart_h * (1 - (a0 - a_lo) / (a_hi - a_lo)))
-        py1 = y_bot_chart + int(chart_h * (1 - (a1 - a_lo) / (a_hi - a_lo)))
-        seg_color = _accel_to_color(0.5 * (a[i - 1] + a[i]))
-        cv2.line(out, (px0, py0), (px1, py1), seg_color, 2, cv2.LINE_AA)
+            color = (100, 220, 100) if index == 0 else _accel_to_color(float(values[i]))
+            cv2.line(out, pts[i - 1], pts[i], color, 1, cv2.LINE_AA)
 
 
 def _draw_horizon_line(out: np.ndarray, calib: Calibration) -> None:
@@ -399,10 +349,8 @@ def _draw_lead_chevrons(out: np.ndarray, calib: Calibration, decoded) -> None:
         # Distance + relative velocity label above the chevron.
         label = f"L{i+1}  {x_m:5.1f} m  {v_rel:+.1f} m/s"
         ty = max(py - size // 2 - 10, 14)
-        cv2.putText(out, label, (px - 60, ty),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(out, label, (px - 60, ty),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+        draw_text(out, label, px - 59, ty - 11, (0, 0, 0), 12, True)
+        draw_text(out, label, px - 60, ty - 12, color, 12, True)
 
 
 
@@ -421,7 +369,8 @@ def _draw_desire_indicator(out: np.ndarray, decoded) -> None:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
 
 
-def _draw_lanes_and_edges(out: np.ndarray, calib: Calibration, decoded) -> None:
+def _draw_lanes_and_edges(out: np.ndarray, calib: Calibration, decoded,
+                          developer: bool = False) -> None:
     """Draw the model's 4 lane lines + 2 road edges as polylines that
     ride the road surface the model sees.
 
@@ -443,6 +392,8 @@ def _draw_lanes_and_edges(out: np.ndarray, calib: Calibration, decoded) -> None:
     surf_z = np.interp(xs, plan_x, plan_z)
     probs = decoded.lane_lines_prob
     for i in range(decoded.lane_lines.shape[0]):
+        if not developer and i not in (1, 2):
+            continue
         if i < len(probs) and float(probs[i]) < 0.2:
             continue
         ys = decoded.lane_lines[i, :, 0].astype(np.float64)
@@ -450,6 +401,8 @@ def _draw_lanes_and_edges(out: np.ndarray, calib: Calibration, decoded) -> None:
         pts = _polyline_pts(calib, xs, ys, zs_device=surf_z, max_x=max_x)
         if pts is not None:
             cv2.polylines(out, [pts], False, LANE_COLORS[i], 2, cv2.LINE_AA)
+    if not developer:
+        return
     for i in range(decoded.road_edges.shape[0]):
         ys = decoded.road_edges[i, :, 0].astype(np.float64)
         pts = _polyline_pts(calib, xs, ys, zs_device=surf_z,
@@ -458,51 +411,111 @@ def _draw_lanes_and_edges(out: np.ndarray, calib: Calibration, decoded) -> None:
             cv2.polylines(out, [pts], False, ROAD_EDGE_COLOR, 2, cv2.LINE_AA)
 
 
-def draw_overlay(frame_bgr: np.ndarray, decoded, calib: Calibration) -> np.ndarray:
+def draw_overlay(frame_bgr: np.ndarray, decoded, calib: Calibration, *,
+                 engaged: bool = False, mode: str = "user") -> np.ndarray:
     out = frame_bgr.copy()
     calib.update_for_frame(out.shape)
-
-    # Horizon line (cyan) — shows where the projection thinks the road
-    # vanishing point is. Compare to where the road actually meets the sky.
-    _draw_horizon_line(out, calib)
-
-    # Path wedge (translucent, drawn under the plan center + lanes).
-    # Colored by planned longitudinal accel — braking segments turn red,
-    # accelerating segments blue.
+    developer = mode == "dev"
+    if developer:
+        _draw_horizon_line(out, calib)
     plan_xyz = decoded.plan[:, :3].astype(np.float64)
-    plan_a = decoded.plan[:, 6].astype(np.float64)
-    _draw_path_wedge(out, calib, plan_xyz, plan_accel=plan_a)
-
-    # Plan center line — pass Z so it follows hills/dips.
+    if engaged:
+        accel = decoded.plan[:, 6].astype(np.float64) if developer else None
+        _draw_path_wedge(out, calib, plan_xyz, plan_accel=accel)
     plan_pts = _polyline_pts(calib, plan_xyz[:, 0], plan_xyz[:, 1],
                              zs_device=plan_xyz[:, 2])
     if plan_pts is not None:
-        cv2.polylines(out, [plan_pts], False, (0, 255, 0), 2, cv2.LINE_AA)
-
-    # Lane lines (4) + road edges (2) — the model's other outputs,
-    # drawn over the green path wedge.
-    _draw_lanes_and_edges(out, calib, decoded)
-
-    # Timestep markers along the plan path — small dots at 1, 2, 3, 5,
-    # 8 seconds into the future. Helps eyeball where the plan thinks
-    # we'll be in N seconds and whether that's reasonable.
-    _draw_timestep_markers(out, calib, decoded.plan)
-
-    # Lead vehicles — proper road-projected chevrons, sized by distance
-    # and faded by confidence.
+        cv2.polylines(out, [plan_pts], False,
+                      (100, 230, 100) if engaged else (255, 255, 255), 2, cv2.LINE_AA)
+    _draw_lanes_and_edges(out, calib, decoded, developer)
+    if developer:
+        _draw_timestep_markers(out, calib, decoded.plan)
     _draw_lead_chevrons(out, calib, decoded)
-
-    # Lead probabilities + desire state — top of the frame.
-    _draw_lead_indicator(out, decoded)
-    _draw_desire_indicator(out, decoded)
-
-    # Bottom-left mini-charts of planned velocity + acceleration. The
-    # accel chart is colored to match the path wedge above (red/blue/
-    # green by sign), so visually you can correlate a red section of
-    # the road wedge with a dip in the accel chart.
-    _draw_plan_charts(out, decoded)
-
     return out
+
+
+def _wrap_diagnostics(lines, width, size):
+    rows = []
+    for text, color in lines:
+        current = ""
+        for word in text.split():
+            candidate = f"{current} {word}".strip()
+            if current and text_width(candidate, size) > width:
+                rows.append((current, color))
+                current = word
+            else:
+                current = candidate
+        if current:
+            rows.append((current, color))
+    return rows
+
+
+def draw_developer_panel(img, decoded, calib, state, yuv_narrow=None, yuv_wide=None):
+    """Model inputs, camera, charts, the complete diagnostic dump and keys.
+
+    The two model branches sit side by side so the column leaves room for
+    every readout. Its typography adapts to the replay/capture height.
+    """
+    h, w = img.shape[:2]
+    top = bar_height(state, "dev") + 12
+    width = min(460, max(280, w // 3 if h >= 650 else int(w * .46)))
+    x = w - width - 12
+    if top >= h - 40 or x < 0:
+        return
+    cv2.rectangle(img, (x, top), (w - 12, h - 12), (24, 26, 23), -1)
+    x += 12
+    width -= 24
+    y = top + 10
+    inputs = [(yuv_narrow, "Narrow"), (yuv_wide, "Wide")]
+    inputs = [(arr, name) for arr, name in inputs if arr is not None]
+    if inputs:
+        tile_w = (width - 8 * (len(inputs) - 1)) // len(inputs)
+        tile_h = min(105 if h >= 650 else 48, tile_w // 2)
+        for i, (arr, name) in enumerate(inputs):
+            preview = cv2.resize(yuv6_to_bgr(arr), (tile_w, tile_h), interpolation=cv2.INTER_AREA)
+            px = x + i * (tile_w + 8)
+            if y + tile_h < h - 12:
+                img[y:y + tile_h, px:px + tile_w] = preview
+                draw_text(img, name, px + 4, y + 3, (255, 255, 255), 10, True)
+        y += tile_h + 8
+    size = 12 if h >= 650 else 10
+    for label, value in [
+        ("FOV", f"V {calib.fov_v_deg:.1f}°  H {calib.fov_h_deg:.1f}°"),
+        ("Pitch / Yaw", f"{calib.pitch_deg:+.1f}°  {calib.yaw_deg:+.1f}°"),
+        ("Height / Lateral", f"{calib.height_m:.2f} m  {calib.lateral_sign:+.0f}"),
+    ]:
+        draw_text(img, label, x, y, (164, 164, 164), size)
+        draw_text(img, value, x + width - text_width(value, size) - 3, y,
+                  (235, 235, 235), size)
+        y += size + 5
+    chart_height = 110 if h >= 650 else 68
+    if y + chart_height < h - 50:
+        _draw_plan_charts(img, decoded, x, y + 2, width, chart_height)
+        y += chart_height + 10
+    probs = "  ".join(f"L{i + 1} {float(p):.2f}" for i, p in enumerate(decoded.lead_prob))
+    desires = decoded.desire_state
+    index = int(desires.argmax())
+    desire = DESIRE_LABELS[index] if index < len(DESIRE_LABELS) else str(index)
+    draw_text(img, f"{probs}   {desire} {float(desires[index]):.2f}", x, y,
+              (164, 164, 164), 10, max_width=width)
+    y += 18
+    # Only the final fps/version line is identical to the bar readout.
+    lines = [(text, color) for text, color in state.dev_lines
+             if "SimSteer v" not in text]
+    keys_y = h - 51
+    for font_size in (12, 11, 10, 9, 8):
+        rows = _wrap_diagnostics(lines, width, font_size)
+        if len(rows) * (font_size + 3) <= keys_y - y:
+            break
+    for text, color in rows:
+        draw_text(img, text, x, y, color, font_size, max_width=width)
+        y += font_size + 3
+    if state.calibration and state.calibration.score is not None:
+        draw_text(img, f"Score {state.calibration.score:.2f}", x, y, (235, 235, 235), 10)
+    draw_text(img, "H  Normal    I  Input    V  View    C  Save    0  Reset", x, keys_y,
+              (200, 200, 200), 10, max_width=width)
+    draw_text(img, "[/]  FOV    ,/.  Pitch    ;/'  Height    M  Mirror", x, keys_y + 16,
+              (200, 200, 200), 10, max_width=width)
 
 
 def draw_calibration_hud(img: np.ndarray, calib: Calibration) -> None:

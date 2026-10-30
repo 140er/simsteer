@@ -54,9 +54,9 @@ from simsteer.core.control import (
     ControllerConfig, LateralController, LongitudinalController,
 )
 from simsteer.core.learners.livecalib import (
-    BLOCK_SIZE, INPUTS_NEEDED, CalStatus, LiveCalib,
+    CalStatus, LiveCalib,
 )
-from simsteer.core.learners.liveparams import LiveParams, TRUSTED_MIN_SAMPLES
+from simsteer.core.learners.liveparams import LiveParams
 from simsteer.core.model import DrivingModel
 from simsteer.core.postprocess import decode
 from simsteer.core.preprocess import FrameQueue, yuv6_to_bgr
@@ -67,11 +67,11 @@ from simsteer.runtime.output.base import DeviceManager
 from simsteer.runtime.replay import LiveClock
 from simsteer.runtime.telemetry import Telemetry
 from simsteer.ui.hud import (
-    COL_ACCENT_BLUE, COL_ACCENT_GREEN, COL_ACCENT_RED, COL_ACCENT_VIOLET,
-    HudRenderer, HudState,
+    COL_ACCENT_BLUE, COL_ACCENT_GREEN, COL_ACCENT_RED, HudRenderer, HudState,
 )
+from simsteer.ui.state import calibration_view, toggle_developer_mode
 from simsteer.ui.overlay import (
-    WINDOW_NAME, draw_calibration_hud, draw_model_input_inset, draw_overlay,
+    WINDOW_NAME, draw_developer_panel, draw_overlay,
     handle_calibration_key, setup_window, show_scaled,
 )
 from simsteer.ui.tuner import Tuner
@@ -213,9 +213,10 @@ def run(settings: Settings, game: GameProfile | str, *,
     # knobs, Setup + Hotkeys tabs, Recalibrate). Runs in its own daemon
     # Tk thread; mutates calib/ctrl_cfg/manual which the loop reads each
     # frame. Set settings.no_tuner to skip.
+    tuner = None
     if not settings.no_tuner and not headless:
         try:
-            Tuner(calib, ctrl_cfg, manual, live_params=live_params,
+            tuner = Tuner(calib, ctrl_cfg, manual, live_params=live_params,
                   game=game_id, device=pad, settings=settings, probe=probe,
                   live_calib=live_calib, wizard=wizard, cal_routine=cal_routine)
             print("tuner: slider window opened (set no_tuner to skip)")
@@ -482,19 +483,12 @@ def run(settings: Settings, game: GameProfile | str, *,
                         captured_shape=fq.last_captured_shape or frame.shape,
                         cropped_shape=fq.last_cropped_shape or frame.shape,
                         view_w=mv_w, view_h=mv_h, model_height_m=model_h)
-                    overlay = draw_overlay(mv_bgr, decoded, mv_calib)
-                    if show_input:
-                        small = cv2.resize(frame, (mv_w // 3, mv_h // 3),
-                                           interpolation=cv2.INTER_AREA)
-                        H, W = overlay.shape[:2]
-                        sh, sw = small.shape[:2]
-                        overlay[10:10 + sh, W - 10 - sw:W - 10] = small
+                    overlay = draw_overlay(mv_bgr, decoded, mv_calib,
+                                           engaged=engaged_now, mode=settings.hud_mode)
                 else:
                     cap_calib = replace(calib, height_m=model_h)
-                    overlay = draw_overlay(frame, decoded, cap_calib)
-                    if show_input:
-                        draw_model_input_inset(overlay, fq.last_yuv_narrow,
-                                               fq.last_yuv_wide)
+                    overlay = draw_overlay(frame, decoded, cap_calib,
+                                           engaged=engaged_now, mode=settings.hud_mode)
 
                 # --- HUD ---
                 hud_state = _build_hud_state(
@@ -512,7 +506,13 @@ def run(settings: Settings, game: GameProfile | str, *,
                     throttle_out=throttle_out, brake_out=brake_out, nav=nav,
                     cal_routine=cal_routine, wizard=wizard, now=now)
                 hud_renderer.draw(overlay, hud_state, mode=settings.hud_mode)
-                draw_calibration_hud(overlay, calib)
+                if settings.hud_mode == "dev":
+                    draw_developer_panel(
+                        overlay, decoded, calib, hud_state,
+                        fq.last_yuv_narrow if show_input else None,
+                        fq.last_yuv_wide if show_input else None)
+                if tuner is not None:
+                    tuner.update_state(hud_state)
                 show_scaled(overlay, settings.max_width)
 
                 # --- Keys (game-focused global + overlay-focused cv2) ---
@@ -532,9 +532,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                     elif key == ord("i") and hk("input_inset"):
                         show_input = not show_input
                     elif key == ord("h") and hk("hud_mode"):
-                        settings.hud_mode = ("dev" if settings.hud_mode == "user"
-                                             else "user")
-                        settings.save()
+                        toggle_developer_mode(settings)
                         print(f"hud: {settings.hud_mode!r}")
                     elif key == ord("r") and hk("recalibrate"):
                         if pad is not None and pad.engaged:
@@ -651,13 +649,6 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
         eng_label, eng_col = "DISENGAGED", COL_ACCENT_BLUE
 
     cam_ready = live_calib.cal_status == CalStatus.CALIBRATED
-    lp_ready = live_params.trusted()
-    fov_ready = fov_resolver.done or not fov_resolver.enabled
-    dashboard = (not cam_ready) or (not lp_ready) or (not fov_ready)
-    cam_frac = min(1.0, (live_calib.blocks * BLOCK_SIZE + live_calib._block_n)
-                   / float(INPUTS_NEEDED * BLOCK_SIZE))
-    lp_frac = min(1.0, max(live_params.samples, live_params.session_samples)
-                  / float(TRUSTED_MIN_SAMPLES))
 
     banner = (banner_text if banner_text and now < banner_until else "")
 
@@ -712,12 +703,6 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
     if blocked_reason and not (pad and pad.engaged):
         dev_lines.insert(1, (f"cannot engage: {blocked_reason}", COL_ACCENT_BLUE))
 
-    wiz_text, wiz_color, wiz_hint = "", COL_ACCENT_VIOLET, ""
-    if wizard.active:
-        wb = wizard.banner()
-        if wb is not None:
-            wiz_text, wiz_color = wb[0], wb[1]
-        wiz_hint = wizard.hint(v_real) or ""
 
     return HudState(
         engaged=bool(pad and pad.engaged),
@@ -725,27 +710,27 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
         engaged_color=eng_col,
         banner_text=banner,
         banner_color=banner_color,
-        wizard_active=wizard.active,
-        wizard_text=wiz_text,
-        wizard_color=wiz_color,
-        wizard_progress=wizard.progress_pct() if wizard.active else 0.0,
-        wizard_hint=wiz_hint,
-        warnings=[],
+        calibration=calibration_view(wizard=wizard, routine=cal_routine,
+                                     v_ego=v_real, engaged=bool(pad and pad.engaged)),
+        warnings=[blocked_reason] if blocked_reason and not (pad and pad.engaged) else [],
         v_ego_mps=v_real,
-        cal_camera_frac=cam_frac if dashboard else None,
-        cal_camera_status=("READY" if cam_ready else "WARMING"),
-        cal_steering_frac=lp_frac if dashboard else None,
-        cal_steering_status=("READY" if lp_ready else "WARMING"),
-        cal_fov_frac=fov_resolver.progress if dashboard else None,
-        cal_fov_status=("READY" if fov_ready else "MEASURING"),
+        max_speed_mps=ctrl_cfg.max_speed_mps,
+        acc_enabled=ctrl_cfg.lead_follow_enabled,
+        telemetry_status="Connected" if v_real is not None else "Unavailable",
         probe_active=(probe.last_gate == "active"),
         manual_override=(manual.steer_override or manual.long_override),
         lane_change=lc_chip,
-        lead_following=(long_ctrl.last_lead_prob > ctrl_cfg.lead_min_prob),
+        lead_following=(ctrl_cfg.lead_follow_enabled
+                        and long_ctrl.last_lead_prob > ctrl_cfg.lead_min_prob),
         aeb=bool(long_ctrl.last_aeb),
         fps=fps,
         version=__version__,
-        mode_hint="H: dev view" if settings.hud_mode == "user" else "H: user view",
+        lookahead_s=ctrl_cfg.lookahead_s,
+        fit_a=live_params.a_linear,
+        fit_b=live_params.b_quad,
+        fit_c=live_params.c_bias,
+        fit_samples=max(live_params.samples, live_params.session_samples),
+        fit_locked=live_params.frozen,
         dev_lines=dev_lines,
     )
 
