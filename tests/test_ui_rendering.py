@@ -98,6 +98,9 @@ def test_runtime_h_key_and_tuner_switch_share_state(monkeypatch, tmp_path):
 
     def draw(self, img, state, mode):
         modes.append(mode)
+        # The flow's instruction already explains its engagement gate.
+        assert state.calibration is not None
+        assert state.warnings == []
         original(self, img, state, mode)
 
     monkeypatch.setattr(loop.HudRenderer, "draw", draw)

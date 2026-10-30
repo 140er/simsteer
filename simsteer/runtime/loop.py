@@ -812,7 +812,12 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
         banner_color=banner_color,
         calibration=calibration_view(flow=flow, v_ego=v_real,
                                      engaged=bool(pad and pad.engaged)),
-        warnings=[blocked_reason] if blocked_reason and not (pad and pad.engaged) else [],
+        warnings=(
+            [blocked_reason]
+            if blocked_reason and not (pad and pad.engaged)
+            and blocked_reason != flow.engage_block()
+            else []
+        ),
         v_ego_mps=v_real,
         max_speed_mps=ctrl_cfg.max_speed_mps,
         acc_enabled=ctrl_cfg.lead_follow_enabled,
