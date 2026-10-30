@@ -689,7 +689,12 @@ class Tuner:
         )
         if panel and not engaged and label == "Disengaged":
             label = "Calibrating" if panel.tone == "calibrating" else panel.step_name
-        color = GREEN if engaged else BLUE if panel else INK
+        if label in ("No gamepad", "No telemetry", "Low fps") or (panel and panel.tone == "failed"):
+            color = RED
+        elif engaged or (panel and panel.tone == "passed"):
+            color = GREEN
+        else:
+            color = BLUE if panel else INK
         self._state_label.configure(text=label, text_color=color)
         calibrated = (
             bool(self.calib_flow.calibrated)

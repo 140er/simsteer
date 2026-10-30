@@ -75,7 +75,9 @@ class HudRenderer:
         label = status_label(s)
         color = s.engaged_color
         if cal and label in ("Calibrating", cal.step_name):
-            color = COL_ACCENT_BLUE if cal.tone != "failed" else COL_ACCENT_RED
+            color = {"passed": COL_ACCENT_GREEN, "failed": COL_ACCENT_RED}.get(
+                cal.tone, COL_ACCENT_BLUE
+            )
         if label in ("No gamepad", "No telemetry", "Low fps"):
             color = COL_ACCENT_RED
         draw_text(img, label, 16, 10, color, 16, True, max_width=max(80, w // 4))
