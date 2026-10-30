@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -261,6 +261,7 @@ class _Persisted:
     b: float = B_INIT
     c: float = C_INIT
     samples: int = 0
+    axis_sign: int | None = None
 
 
 class LiveParams:
@@ -268,9 +269,13 @@ class LiveParams:
                  game: str | None = None,
                  device_kind: str | None = None,
                  seeds: Seeds | None = None,
-                 gates: str = "strict") -> None:
+                 gates: str = "strict",
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self.game = game
         self.seeds: Seeds = seeds or {}
+        # Timestamps below, and the controller's trim freeze that reads
+        # them, use this clock so replay decisions repeat exactly.
+        self.clock = clock
         # Per-device persistence: the rack response (and especially
         # the AXIS->WHEEL sign) differs between the ViGEm gamepad and
         # the vJoy wheel in the same game — ETS2 treats them as
@@ -298,6 +303,7 @@ class LiveParams:
                   f"a={loaded.a:.3f} b={loaded.b:.4f} c={loaded.c:+.4f}")
         # State vector x = [a, b, c]: axis = a·wheel + b·wheel·v² + c.
         self.x = np.array([loaded.a, loaded.b, loaded.c], dtype=np.float64)
+        self.axis_sign = loaded.axis_sign
         # Initial state-covariance diagonal (P0). Per-game — Forza/AC
         # use bigger values to converge from defaults faster, ETS2
         # uses the tighter values that worked there. The b prior is
@@ -361,6 +367,9 @@ class LiveParams:
         # now). Lighter than a boolean flag because it lets the gate
         # auto-clear without a separate tick.
         self.last_intervened_ts: float = 0.0
+        # Frames where the fit predicted the axis, accepted or not. The
+        # calibration check reads `last_innovation` when this grows.
+        self.predictions = 0
 
     # ----- raw parameters -----
 
@@ -554,7 +563,7 @@ class LiveParams:
         # Always mark as intervened, even if we skip the math below,
         # so a streak of small-wheel intervention frames still freezes
         # the trim integrator.
-        self.last_intervened_ts = time.monotonic()
+        self.last_intervened_ts = self.clock()
         if abs(wheel) < INTERVENTION_MIN_WHEEL:
             return
         implied_a = (target_axis
@@ -667,6 +676,7 @@ class LiveParams:
         predicted = float(H @ self.x)
         actual = axis_lagged
         innovation = actual - predicted
+        self.predictions += 1
         innov_gate = (MAX_INNOVATION_WARM if self.trusted()
                       else gates["max_innovation_cold"])
         if abs(innovation) > innov_gate:
@@ -719,7 +729,7 @@ class LiveParams:
         # Trajectory log + last-update timestamp for HUD diagnostics.
         # Appended only on accepted updates so the buffer reflects what
         # the filter actually saw, not every frame.
-        self.last_update_ts = time.monotonic()
+        self.last_update_ts = self.clock()
         self.history.append((self.last_update_ts,
                              float(self.x[0]), float(self.x[1]),
                              float(self.x[2])))
@@ -748,7 +758,7 @@ class LiveParams:
             self.save()
             self._dirty = 0
 
-    def reset(self, wipe_disk: bool = False) -> None:
+    def reset(self, wipe_disk: bool = False, clear_axis_sign: bool = False) -> None:
         """Wipe in-memory RLS state to the per-(game, device) seed.
         With `wipe_disk=True`, also remove the persisted JSON so the
         next session starts fresh — used by the overlay `R` hotkey
@@ -757,10 +767,18 @@ class LiveParams:
         it (useful for tuner-triggered resets that want a known-good
         backup on disk).
 
+        `clear_axis_sign` also discards direction evidence for a new
+        calibration; ordinary fit resets retain the measured input sign.
+
         Uses the per-(game, device) seed for x — the same starting
         point a fresh cold start would use, not the universal
         A_INIT/B_INIT/C_INIT."""
+        if clear_axis_sign:
+            self.axis_sign = None
         a, b, c = _seed_for(self.seeds, self.device_kind)
+        if self.axis_sign is not None:
+            a = self.axis_sign * max(abs(a), A_ABS_MIN_RUNTIME)
+            b = self.axis_sign * abs(b)
         self.x = np.array([a, b, c], dtype=np.float64)
         self.P = np.diag(self._gates["P_init"])
         self.samples = 0
@@ -805,6 +823,16 @@ class LiveParams:
         lifetime activity."""
         self.P = np.diag(self._gates["P_init"])
         self._consecutive_bad_fit = 0
+
+    def set_axis_sign(self, sign: int) -> None:
+        """Use the independently measured input direction as the seed.
+        A trusted fit otherwise cannot promptly escape an inverted axis."""
+        if sign not in (-1, 1):
+            raise ValueError("axis sign must be -1 or 1")
+        self.axis_sign = sign
+        if self.a_linear * sign <= 0:
+            self.reset(wipe_disk=True)
+        self.save()
 
     # ----- persistence -----
 
@@ -902,7 +930,10 @@ class LiveParams:
                      and abs(c) <= _GATES_DEFAULT["c_abs_max"])
         if not in_bounds:
             return _seeded()
-        return _Persisted(a=a, b=b, c=c, samples=samples)
+        axis_sign = data.get("axis_sign")
+        if axis_sign not in (-1, 1):
+            axis_sign = None
+        return _Persisted(a=a, b=b, c=c, samples=samples, axis_sign=axis_sign)
 
     def save(self, path: Path | None = None) -> None:
         if path is None:
@@ -918,6 +949,7 @@ class LiveParams:
                 "b": self.b_quad,
                 "c": self.c_bias,
                 "samples": self.samples,
+                "axis_sign": self.axis_sign,
             }, indent=2))
         except OSError:
             pass
@@ -950,6 +982,7 @@ class LiveParams:
                   f"seeded for game={self.game!r}: "
                   f"a={loaded.a:.3f} b={loaded.b:.4f} c={loaded.c:+.4f}")
         self.x = np.array([loaded.a, loaded.b, loaded.c], dtype=np.float64)
+        self.axis_sign = loaded.axis_sign
         self.P = np.diag(self._gates["P_init"])
         self.samples = loaded.samples
         self.session_samples = 0

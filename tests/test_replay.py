@@ -83,7 +83,11 @@ def test_loop_replays_clip_deterministically(clip, tmp_path, fake_model, capsys)
     rows = [json.loads(line) for line in lines]
     assert [r["t"] for r in rows] == [round(i / FPS, 4) for i in range(N_FRAMES)]
     assert {"v_ego", "steer_axis", "curvature", "telemetry"} <= rows[0].keys()
-    assert len({r["steer_axis"] for r in rows}) > 1
+    assert len({r["curvature"] for r in rows}) > 1
+    # This short clip has not verified steering direction. Keep actual
+    # control neutral while still observing the changing model plan.
+    assert {r["steer_axis"] for r in rows} == {0.0}
+    assert {r["steering_model_sign"] for r in rows} == {None}
 
 
 def test_run_direct_with_injected_parts(clip, tmp_path):
