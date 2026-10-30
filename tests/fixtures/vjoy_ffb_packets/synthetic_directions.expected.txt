@@ -1,0 +1,29 @@
+0.000 CreateEffect ebi=1 type=ConstantForce
+0.001 SetParameters ebi=1 flags=AXES|DIRECTION|TYPESPECIFICPARAMS|NODOWNLOAD axes=1 direction=CARTESIAN{0} constant(magnitude=4000)
+0.002 SetParameters ebi=1 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|STARTDELAY duration=100000 sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 start_delay=0
+0.003 Start ebi=1 iterations=1 flags=0
+0.020 CreateEffect ebi=2 type=ConstantForce
+0.021 SetParameters ebi=2 flags=AXES|DIRECTION|TYPESPECIFICPARAMS|NODOWNLOAD axes=1 direction=CARTESIAN{0} constant(magnitude=4000)
+0.022 SetParameters ebi=2 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|TYPESPECIFICPARAMS|STARTDELAY duration=100000 sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 constant(magnitude=-4000) start_delay=0
+0.023 Start ebi=2 iterations=1 flags=0
+0.040 CreateEffect ebi=3 type=ConstantForce
+0.041 SetParameters ebi=3 flags=AXES|DIRECTION|TYPESPECIFICPARAMS|NODOWNLOAD axes=1 direction=CARTESIAN{0} constant(magnitude=4000)
+0.042 SetParameters ebi=3 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|TYPESPECIFICPARAMS|STARTDELAY duration=100000 sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 constant(magnitude=2828) start_delay=0
+0.043 Start ebi=3 iterations=1 flags=0
+0.060 CreateEffect ebi=4 type=ConstantForce
+0.061 SetParameters ebi=4 flags=AXES|DIRECTION|TYPESPECIFICPARAMS|NODOWNLOAD axes=1 direction=CARTESIAN{0} constant(magnitude=4000)
+0.062 SetParameters ebi=4 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|TYPESPECIFICPARAMS|STARTDELAY duration=100000 sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 constant(magnitude=-4000) start_delay=0
+0.063 Start ebi=4 iterations=1 flags=0
+0.080 CreateEffect ebi=5 type=ConstantForce
+0.081 SetParameters ebi=5 flags=AXES|DIRECTION|TYPESPECIFICPARAMS|NODOWNLOAD axes=1 direction=CARTESIAN{0} constant(magnitude=4000)
+0.082 SetParameters ebi=5 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|TYPESPECIFICPARAMS|STARTDELAY duration=100000 sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 constant(magnitude=0) start_delay=0
+0.083 Start ebi=5 iterations=1 flags=0
+0.100 CreateEffect ebi=6 type=Sine
+0.101 SetParameters ebi=6 flags=AXES|DIRECTION|TYPESPECIFICPARAMS|NODOWNLOAD axes=1 direction=CARTESIAN{0} periodic(magnitude=2000 offset=300 phase=0 period=50000)
+0.102 SetParameters ebi=6 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|TYPESPECIFICPARAMS|STARTDELAY duration=100000 sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 periodic(magnitude=2000 offset=-300 phase=18000 period=50000) start_delay=0
+0.103 Start ebi=6 iterations=1 flags=0
+0.120 CreateEffect ebi=7 type=SawtoothUp
+0.121 SetParameters ebi=7 flags=AXES|DIRECTION|TYPESPECIFICPARAMS|NODOWNLOAD axes=1 direction=CARTESIAN{0} periodic(magnitude=2000 offset=300 phase=0 period=50000)
+0.122 SetParameters ebi=7 flags=DURATION|SAMPLEPERIOD|GAIN|TRIGGERBUTTON|TRIGGERREPEATINTERVAL|TYPESPECIFICPARAMS|STARTDELAY duration=100000 sample_period=0 gain=10000 trigger_button=NONE trigger_repeat=0 periodic(magnitude=2000 offset=-300 phase=18000 period=50000) start_delay=0
+0.123 Start ebi=7 iterations=1 flags=0
+0.140 SetParameters ebi=1 flags=TYPESPECIFICPARAMS constant(magnitude=-4000)
