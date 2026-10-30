@@ -158,6 +158,7 @@ Only do the game(s) you'll actually drive.
   *Options → Controls → Steering deadzone → 0%.* The app warns on startup
   if it detects a non-zero value.
 - **Camera**: interior cab (F1).
+- For the optional bumper-camera mod, copy `comma_wide_cam.scs` into `Documents\Euro Truck Simulator 2\mod\` and enable **Comma Wide Cam** in your profile's Mod Manager.
 - **Window mode**: windowed or borderless — **not** exclusive fullscreen
   (screen capture needs a composited window).
 - **Controller binding**: with SimSteer running, ETS2 sees the virtual
