@@ -25,6 +25,7 @@ import json
 import math
 import os
 import platform
+import signal
 import sys
 import threading
 import time
@@ -52,6 +53,9 @@ FOCUS_CHECK_S = 0.05
 # pauses between movements do not drag the read rate down.
 ACTIVE_GAP_S = 0.05
 REACQUIRE_S = 0.5
+# Windows.Gaming.Input reports controllers asynchronously after init.
+SDL_SETTLE_S = 2.0
+SDL_STABLE_S = 0.5
 
 EXIT_OK = 0
 EXIT_CANCELLED = 1
@@ -203,6 +207,26 @@ def hresult_failed(hr: int) -> bool:
     return bool(hr & 0x80000000)
 
 
+DIGFFS_FLAGS = {
+    0x00000001: "EMPTY",
+    0x00000002: "STOPPED",
+    0x00000004: "PAUSED",
+    0x00000010: "ACTUATORSON",
+    0x00000020: "ACTUATORSOFF",
+    0x00000040: "POWERON",
+    0x00000080: "POWEROFF",
+    0x00000100: "SAFETYSWITCHON",
+    0x00000200: "SAFETYSWITCHOFF",
+    0x00000400: "USERFFSWITCHON",
+    0x00000800: "USERFFSWITCHOFF",
+    0x80000000: "DEVICELOST",
+}
+
+
+def ff_state_flags(state: int) -> list[str]:
+    return [name for bit, name in DIGFFS_FLAGS.items() if state & bit]
+
+
 def spring_parameters(level: float) -> dict[str, int]:
     """Spring centred on zero whose force never exceeds `level` percent.
 
@@ -278,6 +302,7 @@ def summarize_samples(
     buttons: set[int] = set()
     bg_buttons: set[int] = set()
     max_gap = 0.0
+    focus_known = any(s[3] is not None for s in samples)
     foreign_count = 1 if samples[0][3] else 0
 
     for prev, cur in pairwise(samples):
@@ -312,7 +337,7 @@ def summarize_samples(
         read_hz=update_rate(change_times, active_gap),
         background_read_hz=update_rate(bg_change_times, active_gap),
         max_gap_ms=round(max_gap * 1000, 2),
-        foreign_focus_fraction=round(foreign_count / len(samples), 3),
+        foreign_focus_fraction=round(foreign_count / len(samples), 3) if focus_known else None,
         background_ok=any(bg_changes),
         axes=[
             _axis_entry(names[i], lows[i], highs[i], changes[i], bg_changes[i])
@@ -336,15 +361,24 @@ def _axis_entry(name: str, low, high, changes: int, bg_changes: int) -> dict[str
     }
 
 
-def summarize_backend(device_summaries: Sequence[dict]) -> dict[str, Any]:
+def summarize_backend(devices: Sequence[dict]) -> dict[str, Any]:
+    """Backend verdict from its Fanatec devices, else its physical ones, so
+    a vJoy device fed by another app cannot pass a backend. Each device
+    dict carries its `summary`."""
+    basis, chosen = "fanatec", [d for d in devices if d.get("fanatec")]
+    if not chosen:
+        basis, chosen = "physical", [d for d in devices if not d.get("virtual")]
+    if not chosen:
+        basis, chosen = "all", list(devices)
+    summaries = [d["summary"] for d in chosen]
+
     def best(key: str):
-        values = [d[key] for d in device_summaries if d.get(key) is not None]
+        values = [s[key] for s in summaries if s.get(key) is not None]
         return max(values) if values else None
 
     return {
-        "background_ok": any(d["background_ok"] for d in device_summaries)
-        if device_summaries
-        else None,
+        "summary_basis": basis if summaries else None,
+        "background_ok": any(s["background_ok"] for s in summaries) if summaries else None,
         "read_hz": best("read_hz"),
         "background_read_hz": best("background_read_hz"),
         "poll_hz": best("poll_hz"),
@@ -445,21 +479,24 @@ DIDFT_ANYINSTANCE = 0x00FFFF00
 DIDFT_FFACTUATOR = 0x01000000
 DIDFT_OPTIONAL = 0x80000000
 DIDF_ABSAXIS = 0x00000001
+DIEFT_ALL = 0x00000000
 DIDOI_ASPECTPOSITION = 0x00000100
 DIDC_FORCEFEEDBACK = 0x00000100
 DIPH_DEVICE = 0
+DIPH_BYOFFSET = 1
 DIPROP_FFGAIN = 7
 DIPROP_AUTOCENTER = 9
 DIPROPAUTOCENTER_OFF = 0
 DISFFC_STOPALL = 0x00000002
 DISFFC_SETACTUATORSON = 0x00000010
-DIEFF_OBJECTOFFSETS = 0x00000002
+DIEFF_OBJECTIDS = 0x00000001
 DIEFF_CARTESIAN = 0x00000010
 DIEP_DURATION = 0x00000001
 DIEP_TYPESPECIFICPARAMS = 0x00000100
 DIEP_START = 0x20000000
 DIEB_NOTRIGGER = 0xFFFFFFFF
 DI_FFNOMINALMAX = 10000
+DIERR_UNSUPPORTED = 0x80004001
 DIERR_OTHERAPPHASPRIO = 0x80070005
 DIERR_INPUTLOST = 0x8007001E
 DIERR_NOTACQUIRED = 0x8007000C
@@ -518,7 +555,10 @@ USED_METHODS: tuple[tuple[str, str], ...] = (
     ("IDirectInputDevice8W", "GetDeviceState"),
     ("IDirectInputDevice8W", "SetDataFormat"),
     ("IDirectInputDevice8W", "SetCooperativeLevel"),
+    ("IDirectInputDevice8W", "GetObjectInfo"),
     ("IDirectInputDevice8W", "CreateEffect"),
+    ("IDirectInputDevice8W", "EnumEffects"),
+    ("IDirectInputDevice8W", "GetForceFeedbackState"),
     ("IDirectInputDevice8W", "SendForceFeedbackCommand"),
     ("IDirectInputDevice8W", "Poll"),
     ("IDirectInputEffect", "Release"),
@@ -591,6 +631,17 @@ class DIDEVCAPS(ctypes.Structure):
         ("dwFirmwareRevision", DWORD),
         ("dwHardwareRevision", DWORD),
         ("dwFFDriverVersion", DWORD),
+    ]
+
+
+class DIEFFECTINFOW(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", DWORD),
+        ("guid", GUID),
+        ("dwEffType", DWORD),
+        ("dwStaticParams", DWORD),
+        ("dwDynamicParams", DWORD),
+        ("tszName", WCHAR260),
     ]
 
 
@@ -750,7 +801,9 @@ class DirectInput:
         # are rejected. It stays hidden and needs no message loop.
         self.hwnd = user32.CreateWindowExW(0, "STATIC", "SimSteer wheel probe", 0, 0, 0, 0, 0, None, None, self.hinstance, None)
         if not self.hwnd:
-            raise OSError(f"CreateWindowExW failed: error {ctypes.get_last_error()}")
+            error = ctypes.get_last_error()
+            self.close()
+            raise OSError(f"CreateWindowExW failed: error {error}")
 
     def enum_devices(self, ff_only: bool = False) -> list[DIDEVICEINSTANCEW]:
         found: list[DIDEVICEINSTANCEW] = []
@@ -825,6 +878,26 @@ class DInputDevice:
         _check("EnumObjects", self.call("EnumObjects", [callback_type, ctypes.c_void_p, DWORD], callback, None, DIDFT_ALL))
         return found
 
+    def effects(self) -> list[dict[str, str]]:
+        found: list[dict[str, str]] = []
+        callback_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.POINTER(DIEFFECTINFOW), ctypes.c_void_p)
+
+        def on_effect(info, _ref):
+            found.append({"name": wide(info.contents.tszName), "guid": str(info.contents.guid)})
+            return 1
+
+        callback = callback_type(on_effect)
+        _check("EnumEffects", self.call("EnumEffects", [callback_type, ctypes.c_void_p, DWORD], callback, None, DIEFT_ALL))
+        return found
+
+    def object_at(self, offset: int) -> DIDEVICEOBJECTINSTANCEW | None:
+        """The object our data format put at `offset`, or None. EnumObjects
+        reports native offsets, which differ from the data format's."""
+        obj = DIDEVICEOBJECTINSTANCEW()
+        obj.dwSize = ctypes.sizeof(obj)
+        hr = self.call("GetObjectInfo", [ctypes.POINTER(DIDEVICEOBJECTINSTANCEW), DWORD, DWORD], ctypes.byref(obj), offset, DIPH_BYOFFSET)
+        return None if hresult_failed(hr) else obj
+
     def set_cooperative_level(self, hwnd: int, flags: int) -> None:
         _check("SetCooperativeLevel", self.call("SetCooperativeLevel", [ctypes.c_void_p, DWORD], hwnd, flags))
 
@@ -852,6 +925,13 @@ class DInputDevice:
         value = DIPROPDWORD(DIPROPHEADER(ctypes.sizeof(DIPROPDWORD), ctypes.sizeof(DIPROPHEADER), 0, DIPH_DEVICE), data)
         return self.call("SetProperty", [ctypes.c_void_p, ctypes.POINTER(DIPROPDWORD)], prop, ctypes.byref(value))
 
+    def ff_state(self) -> dict[str, Any]:
+        state = DWORD()
+        hr = self.call("GetForceFeedbackState", [ctypes.POINTER(DWORD)], ctypes.byref(state))
+        if hresult_failed(hr):
+            return {"result": hresult_name(hr)}
+        return {"result": hresult_name(hr), "raw": f"0x{state.value:08X}", "flags": ff_state_flags(state.value)}
+
     def ff_command(self, flags: int) -> int:
         return self.call("SendForceFeedbackCommand", [DWORD], flags)
 
@@ -873,12 +953,16 @@ class DInputDevice:
                 self.ptr = None
 
 
-def describe_dinput_device(
-    dev: DInputDevice, objects: list[DIDEVICEOBJECTINSTANCEW], caps: DIDEVCAPS
-) -> tuple[dict[str, Any], list[int], list[int]]:
-    axes = sorted((o.dwOfs // 4, wide(o.tszName) or JOY_AXIS_LABELS[o.dwOfs // 4]) for o in objects if o.dwType & DIDFT_AXIS and o.dwOfs < JOY_POV_OFS)
-    buttons = [o.dwOfs - JOY_BUTTON_OFS for o in objects if o.dwType & DIDFT_BUTTON and JOY_BUTTON_OFS <= o.dwOfs < JOY_BUTTON_OFS + JOY_BUTTONS]
+def describe_dinput_device(dev: DInputDevice, caps: DIDEVCAPS) -> tuple[dict[str, Any], list[int], list[int]]:
+    objects = dev.objects()
+    axes = []
+    for i in range(JOY_AXES):
+        obj = dev.object_at(i * 4)
+        if obj is not None:
+            axes.append((i, wide(obj.tszName) or JOY_AXIS_LABELS[i]))
+    buttons = [i for i in range(JOY_BUTTONS) if dev.object_at(JOY_BUTTON_OFS + i) is not None]
     actuators = [wide(o.tszName) for o in objects if o.dwType & DIDFT_FFACTUATOR]
+    axes_total = sum(1 for o in objects if o.dwType & DIDFT_AXIS)
     return device_entry(
         backend="dinput",
         key=f"dinput:{dev.inst.guidInstance}",
@@ -890,8 +974,10 @@ def describe_dinput_device(
         type=device_type_name(dev.inst.dwDevType),
         ffb=bool(caps.dwFlags & DIDC_FORCEFEEDBACK),
         ff_actuators=actuators,
+        axes_total=axes_total,
+        axis_slots=[JOY_AXIS_LABELS[i] for i, _ in axes],
         instance=str(dev.inst.guidInstance),
-    ), [i for i, _ in axes], sorted(buttons)
+    ), [i for i, _ in axes], buttons
 
 
 class BackendUnavailable(Exception):
@@ -923,13 +1009,19 @@ class DInputBackend:
                 dev = self.di.create_device(inst)
                 dev.set_data_format()
                 caps = dev.capabilities()
-                entry, axis_idx, button_idx = describe_dinput_device(dev, dev.objects(), caps)
+                entry, axis_idx, button_idx = describe_dinput_device(dev, caps)
+                if entry["ffb"]:
+                    try:
+                        entry["ff_effects"] = dev.effects()
+                    except DIError as e:
+                        entry["ff_effects"] = e.name
                 dev.set_cooperative_level(self.di.hwnd, DISCL_NONEXCLUSIVE | DISCL_BACKGROUND)
                 entry["acquire"] = hresult_name(dev.acquire())
-            except DIError as e:
-                self.errors.append({"device": wide(inst.tszProductName), "stage": e.stage, "error": e.name})
+            except (DIError, OSError) as e:
+                stage, name = (e.stage, e.name) if isinstance(e, DIError) else ("open", str(e))
+                self.errors.append({"device": wide(inst.tszProductName), "stage": stage, "error": name})
                 if dev is not None:
-                    dev.close()
+                    _quietly(dev.close)
                 continue
             self.devices.append(entry)
             self._open.append({"dev": dev, "entry": entry, "axes": axis_idx, "buttons": button_idx, "lost_at": None, "retry_at": 0.0})
@@ -989,6 +1081,11 @@ class SdlBackend:
 
     def open(self) -> list[dict]:
         os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
+        # SDL2's DirectInput driver opens force feedback devices exclusively,
+        # sends DISFFC_RESET and turns autocenter on (SDL_dinputjoystick.c),
+        # which can move the rim and lock a game out. With it off SDL reads
+        # through Windows.Gaming.Input, which sends no force commands.
+        os.environ["SDL_DIRECTINPUT_ENABLED"] = "0"
         os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
         try:
             import pygame
@@ -997,36 +1094,66 @@ class SdlBackend:
         self.pg = pygame
         if sys.platform != "win32" and not os.environ.get("DISPLAY"):
             os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-        pygame.display.init()
-        pygame.joystick.init()
+        try:
+            pygame.display.init()
+            pygame.joystick.init()
+        except pygame.error as e:
+            raise BackendUnavailable(f"SDL init failed: {e}") from e
         self.info = {
             "pygame": pygame.version.ver,
             "pygame_ce": bool(getattr(pygame, "IS_CE", False)),
             "sdl": ".".join(map(str, pygame.get_sdl_version())),
             "allow_background_events": os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"],
+            "directinput_driver": os.environ["SDL_DIRECTINPUT_ENABLED"],
+            "sdl_window": False,
         }
+        self._settle()
         for i in range(pygame.joystick.get_count()):
-            js = pygame.joystick.Joystick(i)
-            js.init()
-            vid, pid = sdl_vid_pid(js.get_guid())
-            if self.only_vid is not None and vid != self.only_vid:
-                js.quit()
-                continue
-            entry = device_entry(
-                backend="sdl",
-                key=f"sdl:{js.get_instance_id()}",
-                name=js.get_name(),
-                vid=vid,
-                pid=pid,
-                axis_names=[f"axis{a}" for a in range(js.get_numaxes())],
-                buttons=js.get_numbuttons(),
-                hats=js.get_numhats(),
-                guid=js.get_guid(),
-            )
-            self.devices.append(entry)
-            self._joysticks[js.get_instance_id()] = (js, entry)
+            self._open_index(i)
         pygame.event.clear()
         return self.devices
+
+    def _settle(self, clock: Callable[[], float] = time.monotonic) -> None:
+        pg = self.pg
+        t0 = last_change = clock()
+        count = pg.joystick.get_count()
+        while clock() - t0 < SDL_SETTLE_S:
+            pg.event.pump()
+            now = pg.joystick.get_count()
+            if now != count:
+                count, last_change = now, clock()
+            elif count and clock() - last_change >= SDL_STABLE_S:
+                break
+            time.sleep(0.02)
+        self.info["settle_s"] = round(clock() - t0, 2)
+
+    def _open_index(self, index: int) -> dict | None:
+        pg = self.pg
+        try:
+            js = pg.joystick.Joystick(index)
+        except pg.error as e:
+            self.errors.append({"device_index": index, "stage": "open", "error": str(e)})
+            return None
+        if js.get_instance_id() in self._joysticks:
+            return None
+        vid, pid = sdl_vid_pid(js.get_guid())
+        if self.only_vid is not None and vid != self.only_vid:
+            js.quit()
+            return None
+        entry = device_entry(
+            backend="sdl",
+            key=f"sdl:{js.get_instance_id()}",
+            name=js.get_name(),
+            vid=vid,
+            pid=pid,
+            axis_names=[f"axis{a}" for a in range(js.get_numaxes())],
+            buttons=js.get_numbuttons(),
+            hats=js.get_numhats(),
+            guid=js.get_guid(),
+        )
+        self.devices.append(entry)
+        self._joysticks[js.get_instance_id()] = (js, entry)
+        return entry
 
     def poll(self, t: float, events: list) -> list[tuple[str, tuple, tuple]]:
         pg = self.pg
@@ -1035,7 +1162,9 @@ class SdlBackend:
                 _, entry = self._joysticks.pop(ev.instance_id)
                 events.append({"t": round(t, 4), "backend": self.name, "device": entry["name"], "event": "removed"})
             elif ev.type == pg.JOYDEVICEADDED:
-                events.append({"t": round(t, 4), "backend": self.name, "device_index": ev.device_index, "event": "added"})
+                entry = self._open_index(ev.device_index)
+                if entry is not None:
+                    events.append({"t": round(t, 4), "backend": self.name, "device": entry["name"], "event": "added"})
         out = []
         for js, entry in list(self._joysticks.values()):
             try:
@@ -1057,6 +1186,9 @@ BACKENDS: dict[str, type] = {"sdl": SdlBackend, "dinput": DInputBackend}
 
 # ---------------------------------------------------------------------------
 # Focus tracking (Windows only)
+
+
+TERMINALS = {"windowsterminal.exe", "conhost.exe", "openconsole.exe", "cmd.exe", "powershell.exe", "pwsh.exe"}
 
 
 class FocusTracker:
@@ -1083,7 +1215,7 @@ class FocusTracker:
             self._k.QueryFullProcessImageNameW.argtypes = [c_void_p, DWORD, c_wchar_p, POINTER(DWORD)]
             self._k.CloseHandle.argtypes = [c_void_p]
             self.home = self._u.GetForegroundWindow()
-            self.home_window = self._describe(self.home)
+            self.home_window = self._describe(self.home) if self.home else {"title": None, "exe": None}
 
     def _describe(self, hwnd) -> dict[str, Any]:
         title = ctypes.create_unicode_buffer(256)
@@ -1114,7 +1246,10 @@ class FocusTracker:
     def report(self) -> dict[str, Any]:
         if not self.available:
             return {"available": False}
-        return {"available": True, "start_window": self.home_window, "windows": self.windows}
+        out = {"available": True, "start_window": self.home_window, "windows": self.windows}
+        if (self.home_window.get("exe") or "").lower() not in TERMINALS:
+            out["warning"] = "the probe did not start from a focused terminal, so background_ok may be wrong"
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -1199,7 +1334,10 @@ def beep(freq: int, ms: int) -> None:
     if sys.platform == "win32":
         import winsound
 
-        winsound.Beep(freq, ms)
+        try:
+            winsound.Beep(freq, ms)
+        except RuntimeError:
+            pass
 
 
 def countdown(seconds: int, what: str, sleep: Callable[[float], None] = time.sleep) -> None:
@@ -1295,12 +1433,10 @@ def run_logging(args, only_vid: int | None) -> tuple[dict, int]:
             backend.close()
 
     for section in sections.values():
-        summaries = []
         for d in section["devices"]:
             d["summary"] = summarize_samples(samples.get(d["key"], []), d["axis_names"])
-            summaries.append(d["summary"])
         if section["available"]:
-            section.update(summarize_backend(summaries))
+            section.update(summarize_backend(section["devices"]))
 
     report = build_report(
         mode="log",
@@ -1323,11 +1459,13 @@ def run_logging(args, only_vid: int | None) -> tuple[dict, int]:
 
 
 class SpringGuard:
-    """Stops the spring from atexit and from the console control handler.
+    """Stops the spring from atexit, the console control handler and the
+    main thread.
 
-    The handler runs on its own thread, so effect calls are serialised by a
-    lock. It returns FALSE so Python still raises KeyboardInterrupt on
-    Ctrl+C and the normal cleanup runs too.
+    The handler runs on its own thread, so effect calls are serialised by
+    `lock`. It returns FALSE so Python still raises KeyboardInterrupt on
+    Ctrl+C. Stop and STOPALL are safe to repeat, so every path sends them
+    until the effect is released.
     """
 
     def __init__(self, effect: int, device: DInputDevice) -> None:
@@ -1335,36 +1473,58 @@ class SpringGuard:
         self.device = device
         self.lock = threading.Lock()
         self.stopped = False
+        self.released = False
+        self.reason: str | None = None
         self._handler = None
+        self._set_handler = None
 
     def install(self) -> None:
-        atexit.register(self.stop)
+        atexit.register(self.stop, "atexit")
         handler_type = ctypes.WINFUNCTYPE(ctypes.c_int, DWORD)
         self._handler = handler_type(self._on_console_event)
-        kernel32 = ctypes.WinDLL("kernel32")
-        kernel32.SetConsoleCtrlHandler.argtypes = [handler_type, ctypes.c_int]
-        kernel32.SetConsoleCtrlHandler(self._handler, 1)
+        set_handler = ctypes.WinDLL("kernel32").SetConsoleCtrlHandler
+        set_handler.argtypes = [handler_type, ctypes.c_int]
+        set_handler.restype = ctypes.c_int
+        set_handler(self._handler, 1)
+        self._set_handler = set_handler
 
-    def _on_console_event(self, _event: int) -> int:
-        self.stop()
+    def _on_console_event(self, event: int) -> int:
+        self.stop(f"console event {event}")
         return 0
 
-    def stop(self) -> None:
-        got = self.lock.acquire(timeout=0.25)
+    def _send_stop(self) -> None:
+        _quietly(lambda: _com_call(self.effect, "IDirectInputEffect", "Stop", []))
+        _quietly(lambda: self.device.ff_command(DISFFC_STOPALL))
+
+    def stop(self, reason: str) -> None:
+        got = self.lock.acquire(timeout=1.0)
         try:
+            if self.released:
+                return
             if not self.stopped:
                 self.stopped = True
-                _quietly(lambda: _com_call(self.effect, "IDirectInputEffect", "Stop", []))
-                _quietly(lambda: self.device.ff_command(DISFFC_STOPALL))
+                self.reason = reason
+            self._send_stop()
         finally:
             if got:
                 self.lock.release()
 
+    def release(self) -> None:
+        """Main thread only. Waits for the lock so the handler never touches
+        a released effect."""
+        with self.lock:
+            if self.released:
+                return
+            self.stopped = True
+            self._send_stop()
+            _quietly(lambda: _com_call(self.effect, "IDirectInputEffect", "Unload", []))
+            _quietly(lambda: _com_call(self.effect, "IDirectInputEffect", "Release", [], restype=DWORD))
+            self.released = True
+
     def uninstall(self) -> None:
         atexit.unregister(self.stop)
-        if self._handler is not None:
-            kernel32 = ctypes.WinDLL("kernel32")
-            kernel32.SetConsoleCtrlHandler(self._handler, 0)
+        if self._set_handler is not None:
+            self._set_handler(self._handler, 0)
 
 
 def _quietly(fn: Callable[[], Any]) -> None:
@@ -1372,20 +1532,27 @@ def _quietly(fn: Callable[[], Any]) -> None:
     violation into OSError."""
     try:
         fn()
-    except OSError:
+    except (OSError, KeyboardInterrupt):
         pass
 
 
-def _spring_effect(params: dict[str, int], axis_offset: int) -> tuple[DIEFFECT, list]:
+def autocenter_off_ok(hr: int) -> bool:
+    return not hresult_failed(hr) or hr == DIERR_UNSUPPORTED
+
+
+def _spring_effect(params: dict[str, int], axis_id: int) -> tuple[DIEFFECT, list]:
+    """The axis is named by object ID (DIDEVICEOBJECTINSTANCE.dwType). The DD2
+    rejects its EnumObjects dwOfs with DIEFF_OBJECTOFFSETS (DIERR_INVALIDPARAM),
+    because that is a native offset, not one in our data format."""
     condition = (DICONDITION * 1)(DICONDITION(
         params["offset"], params["coefficient"], params["coefficient"],
         params["saturation"], params["saturation"], params["deadband"],
     ))
-    axes = (DWORD * 1)(axis_offset)
+    axes = (DWORD * 1)(axis_id)
     direction = (LONG * 1)(0)
     eff = DIEFFECT()
     eff.dwSize = ctypes.sizeof(DIEFFECT)
-    eff.dwFlags = DIEFF_CARTESIAN | DIEFF_OBJECTOFFSETS
+    eff.dwFlags = DIEFF_CARTESIAN | DIEFF_OBJECTIDS
     eff.dwDuration = params["duration_us"]
     eff.dwGain = params["gain"]
     eff.dwTriggerButton = DIEB_NOTRIGGER
@@ -1400,7 +1567,7 @@ def _spring_effect(params: dict[str, int], axis_offset: int) -> tuple[DIEFFECT, 
 def pick_ffb_device(devices: Sequence[dict], only_vid: int | None) -> dict | None:
     """Fanatec only unless --only-vid names another vendor. Never vJoy."""
     wanted = only_vid if only_vid is not None else FANATEC_VID
-    for d in devices:
+    for d in sorted(devices, key=lambda d: d.get("type") != "driving"):
         if d["vid"] == wanted and not is_vjoy(d["vid"], d["pid"]):
             return d
     return None
@@ -1423,7 +1590,7 @@ def run_ffb_test(
         ffb["steps"].append({"stage": stage, "result": hresult_name(hr)})
         return hr
 
-    di = dev = effect = guard = sdl = None
+    di = dev = guard = sdl = None
     listed: list[dict] = []
     try:
         di = DirectInput()
@@ -1449,7 +1616,7 @@ def run_ffb_test(
         try:
             confirm("Press Enter to start, Ctrl+C to cancel: ")
         except EOFError:
-            ffb.update(result="cancelled", error="stdin is not interactive; the FFB test needs a person at the rig")
+            ffb.update(result="cancelled", error="no confirmation (stdin closed or interrupted); the FFB test needs a person at the rig")
             return ffb, listed
         countdown(countdown_s, "Spring starts")
 
@@ -1468,57 +1635,71 @@ def run_ffb_test(
         dev = di.create_device(inst)
         dev.set_data_format()
         dev.set_cooperative_level(di.hwnd, DISCL_EXCLUSIVE | DISCL_BACKGROUND)
+        before = step("SetProperty(AUTOCENTER_OFF) before Acquire", dev.set_property_dword(DIPROP_AUTOCENTER, DIPROPAUTOCENTER_OFF))
         step("Acquire", dev.acquire())
+        ffb["ff_state_after_acquire"] = dev.ff_state()
+        after = step("SetProperty(AUTOCENTER_OFF)", dev.set_property_dword(DIPROP_AUTOCENTER, DIPROPAUTOCENTER_OFF))
+        if not (autocenter_off_ok(before) or autocenter_off_ok(after)):
+            ffb.update(result="error", error=f"could not turn autocenter off: {hresult_name(after)}", stage="SetProperty(AUTOCENTER)")
+            return ffb, listed
         objects = dev.objects()
         actuators = [o for o in objects if o.dwType & DIDFT_FFACTUATOR and o.dwType & DIDFT_AXIS]
-        ffb["actuators"] = [{"name": wide(o.tszName), "offset": o.dwOfs} for o in actuators]
+        ffb["actuators"] = [{"name": wide(o.tszName), "id": f"0x{o.dwType:08X}"} for o in actuators]
         if not actuators:
             ffb.update(result="error", error="device reports no force feedback actuator axis", stage="EnumObjects")
             return ffb, listed
         hr, gain = dev.property_dword(DIPROP_FFGAIN)
         ffb["device_gain"] = gain if not hresult_failed(hr) else hresult_name(hr)
         step("SendForceFeedbackCommand(SETACTUATORSON)", dev.ff_command(DISFFC_SETACTUATORSON))
-        step("SetProperty(AUTOCENTER_OFF)", dev.set_property_dword(DIPROP_AUTOCENTER, DIPROPAUTOCENTER_OFF))
+        ffb["ff_state_actuators_on"] = dev.ff_state()
 
-        eff, _buffers = _spring_effect(params, actuators[0].dwOfs)
-        effect = dev.create_effect(GUID_Spring, eff)
-        guard = SpringGuard(effect, dev)
+        eff, _buffers = _spring_effect(params, actuators[0].dwType)
+        guard = SpringGuard(dev.create_effect(GUID_Spring, eff), dev)
         guard.install()
 
         updates = 0
         t0 = time.perf_counter()
         with guard.lock:
-            _check("Start", step("Start", _com_call(effect, "IDirectInputEffect", "Start", [DWORD, DWORD], 1, 0)))
-        while time.perf_counter() - t0 < FFB_RUN_S:
+            if not guard.stopped:
+                _check("Start", step("Start", _com_call(guard.effect, "IDirectInputEffect", "Start", [DWORD, DWORD], 1, 0)))
+        while not guard.stopped and time.perf_counter() - t0 < FFB_RUN_S:
             time.sleep(FFB_UPDATE_S)
             with guard.lock:
                 if guard.stopped:
                     break
-                hr = _com_call(effect, "IDirectInputEffect", "SetParameters", [ctypes.POINTER(DIEFFECT), DWORD],
+                hr = _com_call(guard.effect, "IDirectInputEffect", "SetParameters", [ctypes.POINTER(DIEFFECT), DWORD],
                                ctypes.byref(eff), DIEP_DURATION | DIEP_TYPESPECIFICPARAMS | DIEP_START)
             if hresult_failed(hr):
                 raise DIError("SetParameters", hr)
             updates += 1
-        guard.stop()
-        ffb.update(result="ok", updates=updates, played_s=round(time.perf_counter() - t0, 3))
+        played = round(time.perf_counter() - t0, 3)
+        if guard.reason:
+            ffb.update(result="cancelled", error=f"stopped by {guard.reason}", updates=updates, played_s=played)
+        else:
+            guard.stop("done")
+            ffb.update(result="ok", updates=updates, played_s=played)
+        ffb["ff_state_after_stop"] = dev.ff_state()
     except DIError as e:
         ffb.update(result="error", error=e.name, hresult=f"0x{e.hr:08X}", stage=e.stage)
         if e.hr == DIERR_OTHERAPPHASPRIO and e.stage == "Acquire":
-            ffb["hint"] = "another app (likely the game) holds the wheel exclusively"
+            ffb["hint"] = "another app holds the wheel exclusively: the game" + (", or SDL held by --with-sdl" if sdl else "")
     except OSError as e:
         ffb.update(result="error", error=str(e))
     except KeyboardInterrupt:
         ffb.update(result="cancelled", error="interrupted")
     finally:
-        if guard is not None:
-            guard.stop()
-            _quietly(guard.uninstall)
-        if effect:
-            _quietly(lambda: _com_call(effect, "IDirectInputEffect", "Unload", []))
-            _quietly(lambda: _com_call(effect, "IDirectInputEffect", "Release", [], restype=DWORD))
-        for obj in (dev, di, sdl):
-            if obj is not None:
-                _quietly(obj.close)
+        # A second Ctrl+C must not cut teardown short; the console handler
+        # still stops the effect meanwhile.
+        previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            if guard is not None:
+                guard.release()
+                _quietly(guard.uninstall)
+            for obj in (dev, di, sdl):
+                if obj is not None:
+                    _quietly(obj.close)
+        finally:
+            signal.signal(signal.SIGINT, previous)
     return ffb, listed
 
 
@@ -1543,6 +1724,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:
+        say("Interrupted.")
+        return EXIT_INTERRUPTED
+
+
+def _main(argv: Sequence[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.ffb_level is not None and not args.ffb_test:

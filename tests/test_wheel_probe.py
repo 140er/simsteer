@@ -157,12 +157,25 @@ def test_empty_samples_summary():
 
 
 def test_backend_summary():
-    a = wp.summarize_samples(ramp(300, 1000.0, [lambda i: i]))
-    b = wp.summarize_samples(ramp(300, 1000.0, [lambda i: 0]))
-    out = wp.summarize_backend([a, b])
-    assert out["background_ok"] is True
+    moving = wp.summarize_samples(ramp(300, 1000.0, [lambda i: i]))
+    still = wp.summarize_samples(ramp(300, 1000.0, [lambda i: 0]))
+    out = wp.summarize_backend([{"fanatec": True, "summary": moving}, {"fanatec": True, "summary": still}])
+    assert out["background_ok"] is True and out["summary_basis"] == "fanatec"
     assert out["read_hz"] == pytest.approx(1000.0, rel=1e-6)
     assert wp.summarize_backend([])["background_ok"] is None
+
+
+def test_backend_summary_ignores_a_busy_vjoy_device():
+    moving = wp.summarize_samples(ramp(300, 1000.0, [lambda i: i]))
+    still = wp.summarize_samples(ramp(300, 1000.0, [lambda i: 0]))
+    out = wp.summarize_backend([
+        {"fanatec": False, "virtual": True, "summary": moving},
+        {"fanatec": True, "virtual": False, "summary": still},
+    ])
+    assert out["summary_basis"] == "fanatec"
+    assert out["background_ok"] is False and out["read_hz"] is None
+    only_vjoy = wp.summarize_backend([{"fanatec": False, "virtual": True, "summary": moving}])
+    assert only_vjoy["summary_basis"] == "all"
 
 
 # --- ID parsing -----------------------------------------------------------
@@ -241,7 +254,10 @@ DINPUT_H_SLOTS = {
     ("IDirectInputDevice8W", "GetDeviceState"): 9,
     ("IDirectInputDevice8W", "SetDataFormat"): 11,
     ("IDirectInputDevice8W", "SetCooperativeLevel"): 13,
+    ("IDirectInputDevice8W", "GetObjectInfo"): 14,
     ("IDirectInputDevice8W", "CreateEffect"): 18,
+    ("IDirectInputDevice8W", "EnumEffects"): 19,
+    ("IDirectInputDevice8W", "GetForceFeedbackState"): 21,
     ("IDirectInputDevice8W", "SendForceFeedbackCommand"): 22,
     ("IDirectInputDevice8W", "Poll"): 25,
     ("IDirectInputEffect", "Release"): 2,
@@ -273,7 +289,8 @@ def test_com_calls_only_use_listed_methods():
 def test_flag_values_from_dinput_h():
     assert wp.DIEP_START == 0x20000000
     assert wp.DIEP_TYPESPECIFICPARAMS == 0x100
-    assert wp.DIEFF_OBJECTOFFSETS == 0x2 and wp.DIEFF_CARTESIAN == 0x10
+    assert wp.DIEFF_OBJECTIDS == 0x1 and wp.DIEFF_CARTESIAN == 0x10
+    assert wp.DIPH_BYOFFSET == 1
     assert wp.DISCL_EXCLUSIVE | wp.DISCL_BACKGROUND == 0x9
     assert wp.DISCL_NONEXCLUSIVE | wp.DISCL_BACKGROUND == 0xA
 
@@ -291,6 +308,7 @@ def test_struct_sizes_match_dinput_h():
     assert ctypes.sizeof(wp.DIDEVICEOBJECTINSTANCEW) == 576
     assert ctypes.sizeof(wp.DIDEVCAPS) == 44
     assert ctypes.sizeof(wp.DICONDITION) == 24
+    assert ctypes.sizeof(wp.DIEFFECTINFOW) == 552
     assert ctypes.sizeof(wp.DIPROPDWORD) == 20
     assert ctypes.sizeof(wp.JOYSTATE) == 176
     assert ctypes.sizeof(wp.DIOBJECTDATAFORMAT) == (24 if IS_64 else 16)
@@ -315,10 +333,11 @@ def test_data_format_covers_axes_povs_buttons():
 
 def test_spring_effect_struct():
     params = wp.spring_parameters(5)
-    eff, _keep = wp._spring_effect(params, 0)
-    assert eff.dwFlags == wp.DIEFF_CARTESIAN | wp.DIEFF_OBJECTOFFSETS
+    # The DD2 reports its wheel actuator as object ID 0x01000002.
+    eff, _keep = wp._spring_effect(params, 0x01000002)
+    assert eff.dwFlags == wp.DIEFF_CARTESIAN | wp.DIEFF_OBJECTIDS
     assert eff.dwDuration == 200_000
-    assert eff.cAxes == 1 and eff.rgdwAxes[0] == 0
+    assert eff.cAxes == 1 and eff.rgdwAxes[0] == 0x01000002
     assert eff.cbTypeSpecificParams == ctypes.sizeof(wp.DICONDITION)
     cond = ctypes.cast(eff.lpvTypeSpecificParams, ctypes.POINTER(wp.DICONDITION)).contents
     assert (cond.lOffset, cond.lPositiveCoefficient, cond.lNegativeCoefficient) == (0, 500, 500)
@@ -510,7 +529,7 @@ class FakeDevice:
         return 0
 
 
-def test_spring_guard_stops_once_and_still_sends_stopall_when_stop_fails(monkeypatch):
+def test_spring_guard_repeats_stop_sends_stopall_when_stop_fails_and_never_touches_released(monkeypatch):
     calls = []
 
     def fake_com(ptr, iface, method, argtypes, *args, **kw):
@@ -520,8 +539,154 @@ def test_spring_guard_stops_once_and_still_sends_stopall_when_stop_fails(monkeyp
     monkeypatch.setattr(wp, "_com_call", fake_com)
     dev = FakeDevice()
     guard = wp.SpringGuard(effect=1, device=dev)
-    guard.stop()
-    guard.stop()
-    assert calls == ["Stop"]
-    assert dev.commands == [wp.DISFFC_STOPALL]
     assert guard._on_console_event(0) == 0
+    guard.stop("done")
+    assert calls == ["Stop", "Stop"]
+    assert dev.commands == [wp.DISFFC_STOPALL] * 2
+    assert guard.reason == "console event 0"
+    guard.release()
+    assert calls[-3:] == ["Stop", "Unload", "Release"] and guard.released
+    guard.stop("late")
+    guard.release()
+    assert calls.count("Release") == 1 and len(dev.commands) == 3
+
+
+def test_autocenter_off_rule():
+    assert wp.autocenter_off_ok(0) and wp.autocenter_off_ok(1)
+    assert wp.autocenter_off_ok(0x80004001)
+    assert not wp.autocenter_off_ok(0x80070057)
+
+
+def test_pick_ffb_device_prefers_driving_type():
+    other = wp.device_entry(**dict(PEDALS, key="dinput:p"), type="supplemental")
+    base = wp.device_entry(**WHEEL, type="driving")
+    assert wp.pick_ffb_device([other, base], None) is base
+
+
+def test_ff_state_flags():
+    assert wp.ff_state_flags(0x00000212) == ["STOPPED", "ACTUATORSON", "SAFETYSWITCHOFF"]
+    assert wp.ff_state_flags(0) == []
+
+
+class FakePygame:
+    """Joysticks appear only after a few pumps, as SDL's WGI driver does."""
+
+    JOYDEVICEADDED, JOYDEVICEREMOVED = 1541, 1542
+    error = RuntimeError
+
+    def __init__(self, guids, appear_after=3):
+        self.guids = list(guids)
+        self.pumps = 0
+        self.appear_after = appear_after
+        self.queue = []
+        pg = self
+
+        class Joystick:
+            def __init__(self, index):
+                self.index = index
+
+            def init(self):
+                pass
+
+            def quit(self):
+                pass
+
+            def get_instance_id(self):
+                return 100 + self.index
+
+            def get_guid(self):
+                return pg.guids[self.index]
+
+            def get_name(self):
+                return f"pad{self.index}"
+
+            def get_numaxes(self):
+                return 2
+
+            def get_numbuttons(self):
+                return 1
+
+            def get_numhats(self):
+                return 0
+
+            def get_axis(self, i):
+                return 0.0
+
+            def get_button(self, i):
+                return 0
+
+        class _Joy:
+            Joystick = None
+
+            @staticmethod
+            def init():
+                pass
+
+            @staticmethod
+            def get_count():
+                return len(pg.guids) if pg.pumps >= pg.appear_after else 0
+
+        class _Event:
+            @staticmethod
+            def pump():
+                pg.pumps += 1
+
+            @staticmethod
+            def clear():
+                pg.queue.clear()
+
+            @staticmethod
+            def get():
+                out, pg.queue[:] = list(pg.queue), []
+                return out
+
+        class _Display:
+            @staticmethod
+            def init():
+                pass
+
+        _Joy.Joystick = Joystick
+        self.joystick, self.event, self.display = _Joy, _Event, _Display
+        self.version = type("v", (), {"ver": "fake"})
+        self.IS_CE = True
+
+    @staticmethod
+    def get_sdl_version():
+        return (2, 32, 10)
+
+    def quit(self):
+        pass
+
+
+FANATEC_GUID = "03000000" + "b70e0000" + "07000000" + "11010000"
+OTHER_GUID = "03000000" + "6d040000" + "1bc20000" + "11010000"
+
+
+def test_sdl_waits_for_late_devices_and_opens_hotplugged_ones(monkeypatch):
+    fake = FakePygame([FANATEC_GUID, OTHER_GUID])
+    monkeypatch.setitem(sys.modules, "pygame", fake)
+    monkeypatch.setattr(wp.time, "sleep", lambda s: None)
+    backend = wp.SdlBackend(only_vid=None)
+    devices = backend.open()
+    assert [d["vid"] for d in devices] == [0x0EB7, 0x046D]
+    assert devices[0]["fanatec"] is True
+    assert wp.os.environ["SDL_DIRECTINPUT_ENABLED"] == "0"
+    assert backend.info["directinput_driver"] == "0"
+
+    fake.guids.append(FANATEC_GUID)
+    fake.queue.append(type("e", (), {"type": fake.JOYDEVICEADDED, "device_index": 2})())
+    events = []
+    rows = backend.poll(1.0, events)
+    assert [e["event"] for e in events] == ["added"]
+    assert len(rows) == 3
+
+    fake.queue.append(type("e", (), {"type": fake.JOYDEVICEREMOVED, "instance_id": 101})())
+    events = []
+    rows = backend.poll(2.0, events)
+    assert [e["event"] for e in events] == ["removed"] and len(rows) == 2
+
+
+def test_sdl_only_vid_filters_late_devices(monkeypatch):
+    monkeypatch.setitem(sys.modules, "pygame", FakePygame([FANATEC_GUID, OTHER_GUID]))
+    monkeypatch.setattr(wp.time, "sleep", lambda s: None)
+    assert [d["vid"] for d in wp.SdlBackend(only_vid=0x046D).open()] == [0x046D]
