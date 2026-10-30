@@ -26,8 +26,8 @@ FOV never changes while either runs:
      ratio curve bends near the true FOV, so a straight line through all
      four lands degrees off. If all ratios sit on one side of 1, the
      candidates move that way, at most `MAX_SHIFTS` times.
-     A response that reverses direction between candidates cannot
-     support interpolation, so it keeps the coarse estimate.
+     A crossing next to a response reversal cannot support
+     interpolation, so it keeps the coarse estimate.
 
 On the synthetic clips the model reads a few percent slow at the true
 FOV, so the answer lands a few degrees narrow there. Whether real game
@@ -188,15 +188,17 @@ class FovSolver:
     def _solve_candidates(self) -> float | None:
         x = self.candidates
         y = [median(r) for r in self._cand_ratios]
-        if any(a <= b for a, b in zip(y, y[1:])):
-            self.result = self.estimate
-            return self.result
         crossings = [x[i] + (x[i + 1] - x[i]) * (y[i] - 1.0) / (y[i] - y[i + 1])
                      for i in range(len(x) - 1)
-                     if y[i] >= 1.0 >= y[i + 1] and y[i] > y[i + 1]]
+                     if y[i] >= 1.0 >= y[i + 1] and y[i] > y[i + 1]
+                     and (i == 0 or y[i - 1] > y[i])
+                     and (i + 2 == len(y) or y[i + 1] > y[i + 2])]
         if crossings:
             # Noise can make two; the one nearest the estimate wins.
             self.result = _clamp(min(crossings, key=lambda c: abs(c - self.estimate)))
+            return self.result
+        if any(a <= b for a, b in zip(y, y[1:])):
+            self.result = self.estimate
             return self.result
         if self.shifts < MAX_SHIFTS and (min(y) > 1.0 or max(y) < 1.0):
             self.shifts += 1

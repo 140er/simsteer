@@ -363,14 +363,18 @@ def test_candidate_measurement_handles_periodic_motion_and_resume(resume_at):
     assert all(seen == {0, 1, 2, 3} for seen in phases.values())
 
 
-def test_inconsistent_candidate_response_keeps_the_coarse_estimate():
-    responses = {69.0: 1.15, 73.0: 1.04, 77.0: 1.07, 81.0: 0.85}
+@pytest.mark.parametrize("responses, expected", [
+    ([1.15, 1.04, 1.07, 0.85], TRUE_FOV),
+    ([1.04, 1.10, 1.02, 0.96], 78.333333),
+])
+def test_crossing_needs_a_consistent_local_response(responses, expected):
+    response_by_fov = dict(zip((69.0, 73.0, 77.0, 81.0), responses))
 
     def views(frame, calib):
         return np.full((6, 1, 1), calib.fov_h_deg), np.zeros((6, 1, 1))
 
     def vision(img, big):
-        return 22.0 * responses[float(img[0, 6, 0, 0])], 0.1
+        return 22.0 * response_by_fov[float(img[0, 6, 0, 0])], 0.1
 
     solver = FovSolver(vision, views)
     cal = Calibration(fov_h_deg=95.0)
@@ -378,7 +382,7 @@ def test_inconsistent_candidate_response_keeps_the_coarse_estimate():
         solver.update(np.zeros((1, 1)), cal, model_vx(95.0), 22.0, 0.0)
         if solver.done:
             break
-    assert solver.result == solver.estimate == pytest.approx(TRUE_FOV)
+    assert solver.result == pytest.approx(expected)
 
 
 # ----- resume -----
