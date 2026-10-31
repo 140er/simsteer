@@ -19,6 +19,7 @@ dependencies = [
     "vgamepad>=0.1.0; sys_platform == 'win32'",
     "mss>=9.0",
     "customtkinter>=5.2,<6.0",
+    "pillow>=10.1",
 ]
 
 [project.optional-dependencies]

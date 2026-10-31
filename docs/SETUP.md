@@ -53,6 +53,7 @@ pip install -r requirements.txt
 | `mss>=9.0` | fallback screen capture |
 | `vgamepad>=0.1.0` | ViGEm virtual Xbox 360 pad (gamepad output) |
 | `customtkinter>=5.2,<6.0` | the tuner window |
+| `pillow>=10.1` | HUD text rendering |
 
 **Wheel-mode only:** if you intend to use the vJoy wheel device
 (`--device wheel`) instead of the gamepad, also:
