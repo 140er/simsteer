@@ -23,7 +23,7 @@ BUSY_NAMES -= {"ovrserver_x64.exe", "virtualdesktop.streamer.exe"}
 IDLE_HELPERS = {"nvidia share.exe", "nvidia overlay.exe", "gamebar.exe", "ovrserver_x64.exe",
                 "sunshine.exe", "parsecd.exe", "virtualdesktop.streamer.exe", "wallpaper32.exe",
                 "wallpaper64.exe", "losslessscaling.exe", "obs.exe", "obs32.exe", "obs64.exe",
-                "streamlabs obs.exe", "streamlabs desktop.exe"}
+                "streamlabs obs.exe", "streamlabs desktop.exe", "bcastdvr.exe", "gamebarftserver.exe"}
 
 
 def owned_descendants(processes, owned):
@@ -100,7 +100,7 @@ def require_free(snapshot, owned=(), idle_seconds=120, *, check_idle=True, now=N
         raise RigError("Invalid guard warnings; not starting")
     trusted = owned_descendants(snapshot["processes"], owned)
     for activity in snapshot.get("activity", []):
-        if activity.get("active") and activity.get("pid") not in trusted:
+        if (activity.get("active") or (not activity.get("observable", True) and activity.get("signals"))) and activity.get("pid") not in trusted:
             raise RigError("Active recording/streaming detected (" + activity["kind"] + "); not starting")
     for process in snapshot["processes"]:
         if process["pid"] in trusted:
@@ -111,7 +111,8 @@ def require_free(snapshot, owned=(), idle_seconds=120, *, check_idle=True, now=N
     foreground = snapshot.get("foreground") or {}
     foreground_pid = foreground.get("pid")
     foreground_process = next((row for row in snapshot["processes"] if row["pid"] == foreground_pid), {})
-    if (foreground.get("fullscreen") and foreground_pid not in trusted and
+    if ((foreground.get("exclusive") or (foreground.get("fullscreen") and
+             not foreground.get("maximized") and not foreground.get("caption"))) and foreground_pid not in trusted and
             foreground_process.get("name", "").lower() not in IDLE_HELPERS and
             foreground.get("class") not in ("Progman", "WorkerW", "Shell_TrayWnd")):
         raise RigError("Owner may be gaming (unowned fullscreen foreground window); not starting")
@@ -126,7 +127,7 @@ def require_free(snapshot, owned=(), idle_seconds=120, *, check_idle=True, now=N
 
 def blocking_prompt(windows):
     groups = (
-        (("allow game launch", "allow this game to launch", "launch game with these options"),
+        (("allow game launch", "allow this game to launch", "launch game with these options", "launch confirmation"),
          "Steam launch confirmation detected; approve or cancel the launch manually outside the test session"),
         (("sign in", "sign-in", "log in", "login", "world of trucks", "steam guard"),
          "Sign-in screen detected; test sessions never sign in to accounts"),
@@ -144,6 +145,11 @@ def blocking_prompt(windows):
                 return message
         if window.get("class", "").lower() == "vguipopupwindow" and window.get("owner") and window.get("title", "").lower() == "steam":
             return "Steam launch confirmation/modal detected; resolve it manually outside the test session"
+        if (window.get("class", "").lower() in ("sdl_app", "chrome_widgetwin_1") and
+                window.get("steam") and (window.get("owner") or "launch options" in text or "launch game" in text)):
+            return "Steam launch confirmation/modal detected; resolve it manually outside the test session"
+        if window.get("class", "").lower() == "sdl_app" and window.get("title", "").lower() == "launch options":
+            return "Steam launch confirmation detected; resolve launch options manually outside the test session"
     return None
 
 

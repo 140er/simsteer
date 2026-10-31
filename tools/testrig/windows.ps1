@@ -63,15 +63,49 @@ try {
         }
     })
 } catch { $errors.Add('UpdateOrchestrator: ' + $_.Exception.Message) }
-$processes = @(Get-CimInstance Win32_Process | ForEach-Object {
+$allProcesses = @(Get-CimInstance Win32_Process)
+$captureIds = @($allProcesses | Where-Object {
+    $_.Name -match '^(obs(32|64)?|streamlabs (obs|desktop)|nvidia (share|overlay)|nvsphelper64|gamebar|gamebarftserver|bcastdvr|discord|teams|ms-teams)\.exe$'
+} | ForEach-Object { [int]$_.ProcessId })
+$captureServices = @{}
+try {
+    Get-CimInstance Win32_Service -Filter "Name LIKE 'BcastDVRUserService%'" | Where-Object {
+        $_.State -eq 'Running' -and $_.ProcessId -gt 0
+    } | ForEach-Object {
+        $captureServices[[int]$_.ProcessId] = 'Game Bar capture service'
+        $captureIds += [int]$_.ProcessId
+    }
+} catch { $warnings.Add('Game Bar capture service counters are not observable') }
+$cpu = @{}
+$encoder = @{}
+if ($captureIds.Count) {
+    try {
+        Get-CimInstance Win32_PerfFormattedData_PerfProc_Process | Where-Object { $captureIds -contains [int]$_.IDProcess } | ForEach-Object {
+            $cpu[[int]$_.IDProcess] = [double]$_.PercentProcessorTime
+        }
+    } catch { $warnings.Add('Capture CPU counters are not observable') }
+    try {
+        Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine | Where-Object {
+            $_.Name -match 'pid_(\d+)_.*engtype_VideoEncode' -and [double]$_.UtilizationPercentage -gt 0
+        } | ForEach-Object {
+            if ($_.Name -match 'pid_(\d+)_') { $encoder[[int]$Matches[1]] = $true }
+        }
+    } catch { $warnings.Add('Capture encoder counters are not observable') }
+}
+$bootId = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToFileTimeUtc().ToString()
+$processes = @($allProcesses | ForEach-Object {
     [pscustomobject]@{
         pid = [int]$_.ProcessId; parent = [int]$_.ParentProcessId; name = $_.Name
         path = $_.ExecutablePath; command = $_.CommandLine
         created = $(if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc().ToString() } else { $null })
+        cpu_percent = $cpu[[int]$_.ProcessId]; encoder_active = [bool]$encoder[[int]$_.ProcessId]
+        capture_tool = $captureServices[[int]$_.ProcessId]
     }
 })
 @{
     processes = $processes
+    boot_id = $bootId
+    warnings = @($warnings)
     restart = @{
         checked_at = [DateTime]::UtcNow.ToString('o')
         signals = @($signals); warnings = @($warnings); tasks = $tasks; errors = @($errors)

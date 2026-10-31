@@ -7,6 +7,7 @@ import sys
 
 from . import RigError
 from .guard import require_free
+from .display import recover_leftover_displays
 from .session import Session
 from .state import lock
 from .windows import Windows
@@ -70,19 +71,23 @@ def main(argv=None, *, backend=None):
     session = None
     try:
         backend = backend or Windows()
+        root = args.state_dir
+        if root is None and os.environ.get("LOCALAPPDATA"):
+            root = Path(os.environ["LOCALAPPDATA"]) / "SimSteer/testrig"
+        root = root.absolute() if root else None
+        initial = None
+        if args.game == "guard" or args.action in ("guard", "status", "start", "prepare"):
+            initial = backend.snapshot()
+            for directory in recover_leftover_displays(root, backend, initial):
+                print("testrig: recovered previous-boot display layout: " + directory, file=sys.stderr)
         if args.game == "guard" or args.action == "guard":
-            warnings = require_free(backend.snapshot(), idle_seconds=args.idle_seconds or 120)
+            warnings = require_free(initial, idle_seconds=args.idle_seconds or 120)
             for note in warnings:
                 print("testrig: warning: " + note, file=sys.stderr)
             print(json.dumps({"guard": "clear", "warnings": warnings}))
             return 0
-        root = args.state_dir
         if root is None:
-            local = os.environ.get("LOCALAPPDATA")
-            if not local:
-                raise RigError("LocalAppData is unavailable; specify a private --state-dir")
-            root = Path(local) / "SimSteer/testrig"
-        root = root.absolute()
+            raise RigError("LocalAppData is unavailable; specify a private --state-dir")
         if args.action == "status":
             result = Session(args.game, root / args.game / args.session, backend).status(live=True)
             print(json.dumps(result, indent=2))

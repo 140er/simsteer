@@ -9,9 +9,9 @@ import struct
 import subprocess
 import time
 import uuid
-import re
 
 from . import RigError
+from .capture import capture_activity, output_log_active
 
 
 def require_windows():
@@ -176,7 +176,17 @@ class Windows:
         windows = self.windows()
         foreground = signature(user, "GetForegroundWindow", [], W.HWND)()
         result["foreground"] = next((row for row in windows if row["hwnd"] == foreground), {})
-        result["activity"], result["warnings"] = self.activity(result["processes"], windows)
+        state = C.c_int()
+        query = signature(dll("shell32"), "SHQueryUserNotificationState", [C.POINTER(C.c_int)], C.c_int32)
+        if query(C.byref(state)):
+            result.setdefault("warnings", []).append("Exclusive fullscreen state is not observable")
+        else:
+            result["foreground"]["exclusive"] = state.value == 3 and bool(result["foreground"].get("fullscreen"))
+        steam_pids = {row["pid"] for row in result["processes"] if row["name"].lower() in ("steam.exe", "steamwebhelper.exe")}
+        for row in windows:
+            row["steam"] = row["pid"] in steam_pids
+        result["activity"], warnings = self.activity(result["processes"], windows)
+        result.setdefault("warnings", []).extend(warnings)
         return result
 
     def windows(self):
@@ -189,6 +199,8 @@ class Windows:
         signature(user, "GetWindowTextW", [W.HWND, W.LPWSTR, C.c_int], C.c_int)
         signature(user, "GetClassNameW", [W.HWND, W.LPWSTR, C.c_int], C.c_int)
         signature(user, "GetWindow", [W.HWND, W.UINT], W.HWND)
+        signature(user, "IsZoomed", [W.HWND], W.BOOL)
+        signature(user, "GetWindowLongPtrW", [W.HWND, C.c_int], C.c_ssize_t)
         signature(user, "GetWindowRect", [W.HWND, C.POINTER(W.RECT)], W.BOOL)
         signature(user, "MonitorFromWindow", [W.HWND, W.DWORD], W.HANDLE)
         class MonitorInfo(C.Structure):
@@ -213,7 +225,9 @@ class Windows:
                 fullscreen = (rect.left <= info.monitor.left and rect.top <= info.monitor.top and
                               rect.right >= info.monitor.right and rect.bottom >= info.monitor.bottom)
             row = {"hwnd": int(hwnd), "pid": pid.value, "title": text.value, "text": "", "class": kind.value,
-                   "fullscreen": fullscreen, "owner": int(user.GetWindow(hwnd, 4) or 0)}
+                   "fullscreen": fullscreen, "owner": int(user.GetWindow(hwnd, 4) or 0),
+                   "maximized": bool(user.IsZoomed(hwnd)),
+                   "caption": bool(user.GetWindowLongPtrW(hwnd, -16) & 0x00c00000)}
             child_text = []
 
             @callback_type
@@ -240,26 +254,11 @@ class Windows:
 
     def activity(self, processes, windows):
         """Read visible output controls and current-session logs, never credentials."""
-        records, warnings = [], []
+        records, warnings = capture_activity(processes, windows, tail)
         for process in processes:
             name, pid = process["name"].lower(), process["pid"]
             text = " ".join(row["title"] + " " + row["text"] for row in windows if row["pid"] == pid).lower()
-            if name in ("obs.exe", "obs32.exe", "obs64.exe", "streamlabs obs.exe", "streamlabs desktop.exe"):
-                active = any(value in text for value in ("stop recording", "pause recording", "stop streaming"))
-                appdata = os.environ.get("APPDATA")
-                found = False
-                if appdata and name.startswith("obs"):
-                    logs = list((Path(appdata) / "obs-studio/logs").glob("*.txt"))
-                    if logs:
-                        log = max(logs, key=lambda path: path.stat().st_mtime)
-                        if log.stat().st_mtime >= process.get("born", 0):
-                            contents = tail(log)
-                            active |= output_log_active(contents, "recording") or output_log_active(contents, "streaming")
-                            found = True
-                if not active and not found:
-                    warnings.append("OBS output activity is not observable; verify recording/streaming is stopped")
-                records.append({"pid": pid, "active": active, "kind": "OBS recording/streaming"})
-            elif name == "steam.exe":
+            if name == "steam.exe":
                 for root in self.steam_paths():
                     log = root / "logs/streaming_log.txt"
                     if log.exists() and log.stat().st_mtime >= process.get("born", 0):
@@ -267,7 +266,7 @@ class Windows:
                                         "kind": "Steam Remote Play streaming"})
             elif name in ("streaming_client.exe", "steam_streaming.exe"):
                 records.append({"pid": pid, "active": True, "kind": "Steam Remote Play streaming"})
-            elif name in ("sunshine.exe", "parsecd.exe", "nvidia share.exe", "nvidia overlay.exe"):
+            elif name in ("sunshine.exe", "parsecd.exe"):
                 active = any(value in text for value in ("stop recording", "stop streaming", "stop broadcasting", "stop hosting"))
                 logs = []
                 if name == "sunshine.exe" and process.get("path"):
@@ -281,11 +280,6 @@ class Windows:
                         active |= (connection_log_active(contents) if name == "sunshine.exe" else
                                    output_log_active(contents, "streaming"))
                 records.append({"pid": pid, "active": active, "kind": "desktop recording/streaming"})
-            elif name in ("discord.exe", "ms-teams.exe", "teams.exe"):
-                active = any(value in text for value in ("stop sharing", "stop streaming", "you are sharing", "you're sharing", "go live — streaming"))
-                records.append({"pid": pid, "active": active, "kind": "screen sharing"})
-                if not active:
-                    warnings.append("Chat screen-sharing activity may be hidden; verify sharing is stopped")
         return records, warnings
 
     def launch_uri(self, uri):
@@ -412,16 +406,6 @@ def tail(path):
             return stream.read().decode("utf-8", errors="replace")
     except OSError:
         return ""
-
-
-def output_log_active(text, kind):
-    active = False
-    for line in text.lower().splitlines():
-        if re.search(rf"(?:{kind}.*(?:stop|end)|(?:stop|end).*{kind})", line):
-            active = False
-        elif re.search(rf"(?:{kind}.*(?:start|begin)|(?:start|begin).*{kind})", line):
-            active = True
-    return active
 
 
 def connection_log_active(text):

@@ -32,13 +32,17 @@ name for the next test.
 
 Exit code 0 means the requested operation completed. Code 2 means refusal or
 failure; stderr explains the blocked step. JSON on stdout includes the phase and
-state file location. Keep state, backups, logs and reports private.
+state file location. An otherwise completed restore with owner conflicts also
+returns 2, with phase `restored-with-conflicts` and the conflicting paths on
+stderr. Retrying preserves that result; inspect the retained originals rather
+than assuming that all settings were restored. Keep state, backups, logs and
+reports private.
 
 ## Guard and ownership
 
-Both `python -m tools.testrig guard` and `<game> guard` are accepted. The read-only
-guard refuses known games/VR apps, an unowned fullscreen foreground window,
-observable active recording/streaming, or user activity within the last 120 seconds
+Both `python -m tools.testrig guard` and `<game> guard` are accepted. The guard
+refuses known games/VR apps, an unowned borderless fullscreen foreground window,
+active capture signals, or user activity within the last 120 seconds
 (`--idle-seconds` can select 60–3600). It checks the current interactive console
 session and refuses service or remote desktops. Keep remote automation input-free
 while the owner is away. The guard runs before backups, before edits, and again
@@ -57,11 +61,30 @@ Steam-installed tools such as Wallpaper Engine do not block merely by being
 resident. Owned game helper ancestry is recognized too. Active-output checks use
 visible OBS output controls/current OBS logs, Steam streaming logs/helpers,
 Sunshine client connections, compatible Parsec logs, and visible sharing controls
-where available. Idle OBS is allowed. These checks cannot observe every game,
-localized/custom-rendered control, hidden Discord/Teams share, GPU recording mode,
-or streaming-service configuration. The fullscreen heuristic is conservative and
-also refuses unrelated fullscreen apps. `GetLastInputInfo` does not cover wheel or
-pad input. Verify the activity checks for the intended environment before live use.
+where available. Idle OBS is allowed. Capture coverage is:
+
+| Tool | Signals read |
+| --- | --- |
+| OBS Studio | Visible output controls; current standard or portable log for recording, streaming, replay buffer and virtual camera; media-file growth in configured profile output folders |
+| Streamlabs | Visible output controls; current `logs` or `node-obs/logs` output log; configured output folders from compatible profile INI or `settings.json` output-path keys |
+| NVIDIA Share/Overlay and capture helper | Visible recording/streaming indicators; process encoder and CPU counters |
+| Game Bar and `bcastdvr` | Visible recording indicators; explicit record command flags; process encoder and CPU counters, including the running capture service's PID (service presence alone is allowed) |
+| Discord/Teams | Visible Go Live/sharing/stop-sharing controls; process encoder and CPU counters |
+
+For those capture processes, positive output controls/log events, growing media
+files or VideoEncode GPU activity refuse startup. When output state is unreadable,
+explicit recording command flags or CPU usage of at least 25% of one core also
+refuse. Unreadable output state without active signs produces a warning, continues,
+and records the warning in session status. An open app alone never proves capture.
+CPU/GPU counters, custom paths, localized or custom-rendered controls, and hidden
+sharing UI may be unavailable. These are supported signals, not a guarantee that
+every recording mode is observable; verify them before live use.
+
+A maximized browser/editor with a caption is allowed by the unknown-game
+heuristic, including on a monitor without a taskbar. Known game names still block;
+the shell's exclusive Direct3D fullscreen indication also blocks. Unknown borderless
+fullscreen apps remain conservative refusals. `GetLastInputInfo` does not cover
+wheel or pad input.
 
 Launch uses `steam://rungameid/<appid>`. Ownership is recorded before checking
 readiness: only newly created expected executables, with matching paths, creation
@@ -167,7 +190,8 @@ The display worker performs this sequence:
 2. Enable only the selected VDD with `Enable-PnpDevice` and verify its state. Match
    its PnP instance against the CCD adapter interface path and GDI source name,
    rather than the hardware ID returned by `EnumDisplayDevices`. Multiple matching
-   outputs are refused.
+   outputs are refused. Wait up to 10 seconds for the adapter's asynchronous CCD
+   source to appear; an unavailable source fails with a bounded error.
 3. Extend the desktop, retaining every physical display at its existing resolution
    and relative position, and use `ChangeDisplaySettingsEx(CDS_SET_PRIMARY)` to put
    the VDD at the origin as primary. Verify physical displays remain secondary.
@@ -192,8 +216,11 @@ assume an existing capture selection follows a new primary display automatically
 An independent session worker also runs when no display option is selected. It
 holds its startup parent's process handle and watches the simulation using process
 handles, keeping PowerShell inventory off the overlay's message pump. A dedicated
-keyboard/mouse hook thread filters injected automation and checks input availability
-through `GetLastInputInfo`. Real owner input closes the cover and restores the
+keyboard/mouse hook thread decides owner activity and filters injected automation.
+`GetLastInputInfo` provides an availability and heartbeat cross-check: a changed
+input tick not seen by either hook within one second, or a stalled hook pump,
+aborts as owner presence. Injected hook events participate in the heartbeat but
+do not count as owner input. Real owner input closes the cover and restores the
 display, then stops the owned game and recovers configuration. This does not capture
 key values or pointer positions. Creating `display-stop` in the session directory
 also requests complete cleanup. After readiness the worker stays alive until stop,
@@ -201,6 +228,14 @@ owner input, game exit or its bounded `--max-seconds` lifetime (default/max 1800
 A killed worker or OS failure can prevent
 cleanup code from running; `restore` uses the saved receipt to recover. Do not
 delete its state until topology, VDD disable and file restoration all verify.
+
+Before `status`, `guard`, `prepare` or `start`, the CLI scans the selected state
+root for incomplete VDD receipts from an earlier Windows boot. It restores those
+display layouts first, disables the recorded VDD, and reports the recovery. A
+failure refuses the command. Current-boot active sessions are left alone. There
+is no automatic startup task: after an unexpected reboot, run one of these
+commands with the original state root before using the rig. This recovery restores
+displays only; use the session's `restore` command for game settings.
 
 ## Recovery and verification
 
@@ -214,12 +249,29 @@ reads/replacements retry for about two seconds. Backups are verified before edit
 and restoration. Symlinks, junctions and other reparse points are refused.
 
 Restoration operates on individual files and never deletes a game/owner folder.
-A file is restored only when its live hash still matches the session's recorded
-write. A file already matching its original hash needs no write. An owner-changed
-file is left as is, its original backup is retained under `displaced/`, and status
-reports the conflict. Files the tool created are removed only if their hash still
-matches what it wrote. Changed saves, untracked game outputs and empty directories
-are retained. This also applies inside the disposable ETS2 home.
+After the owned writers exit, the journal seals each edited file's last session
+hash. Game rewrites between the tool's write and the known session end belong to
+the session unless owner input was seen. They are restored to the original bytes.
+Crash recovery uses the recorded writer lifetime rather than extending it to the
+recovery command. An uncertain failed shutdown disables rewrite attribution;
+exact-hash recovery continues and other rewrites become conflicts. Once sealed,
+later edits cannot be attributed to the game.
+
+A file already matching its original hash needs no write. Other files are changed
+only while their live hash matches an allowed session hash, checked again just
+before replacement or unlink. If owner input was seen, a game/owner rewrite is
+treated as a conflict. That file is left as is, its original backup is retained
+under `displaced/`, and stop/restore returns 2 with `restored-with-conflicts`.
+The displacement intent commits before moving the backup, so an interruption
+resumes safely and does not block unrelated files. Backup and displaced paths are
+confined to their private session subdirectories.
+
+Changed generated files inside the disposable ETS2 home are retained with result
+`left_session_file`, without an owner-conflict warning. Untracked game outputs,
+saves and empty directories are retained. Temporary replacements have exact
+session/row names recorded before creation. Recovery removes only those manifest
+entries whose content matches their recorded hashes; a changed temporary is
+preserved and reported for inspection.
 
 Restored bytes are verified twice. Read-only files are handled individually and
 their original mode is restored; sharing failures retry briefly, report the exact

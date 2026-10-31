@@ -10,7 +10,7 @@ from . import RigError
 from .discovery import GAMES, Installation, discover
 from .games import ADAPTERS, expected_paths
 from .guard import blocking_prompt, require_free, same_process, utc_now
-from .state import Journal, read_json
+from .state import Journal, RestoreConflicts, read_json
 
 
 DEFAULTS = {"track": "magione", "car": "lotus_elise_sc", "layout": "", "hfov": 120.0,
@@ -87,7 +87,7 @@ class Session:
     def prepare(self, supplied):
         if self.data:
             self.check_options(supplied)
-            if self.data["phase"] in ("stopped", "restored"):
+            if self.data["phase"] in ("stopped", "restored", "restored-with-conflicts"):
                 raise RigError("Session finished; use a new --session")
             if self.data["phase"] in ("prepared", "starting", "running"):
                 return self.status()
@@ -113,7 +113,8 @@ class Session:
         self.adapter.validate(installed, options)
         self.journal.data = {"version": Journal.VERSION, "id": uuid.uuid4().hex, "game": self.game,
                              "phase": "backing-up", "created_at": utc_now(), "options": options,
-                             "installation": installed.as_dict(), "owned": [], "backups": []}
+                             "installation": installed.as_dict(), "owned": [], "backups": [],
+                             "boot_id": snapshot.get("boot_id")}
         self.ensure_steam(snapshot)
         self.save()
         self.journal.backup(self.adapter.targets(installed, options))
@@ -156,6 +157,9 @@ class Session:
                     continue
                 self.data["owned"].append(process.copy())
                 changed = True
+        if any(any(same_process(item, row) for row in rows) for item in self.data["owned"]):
+            self.data["last_owned_at"] = self.backend.wall_time()
+            changed = True
         if changed:
             self.save()  # ownership commits BEFORE argument validation/cleanup
 
@@ -214,6 +218,10 @@ class Session:
                      if any(same_process(row, item) for item in self.data["owned"])]
             self.guard(snapshot, check_idle=False)
             windows = self.backend.windows()
+            steam_pids = {row["pid"] for row in snapshot["processes"]
+                          if row.get("name", "").lower() in ("steam.exe", "steamwebhelper.exe")}
+            for window in windows:
+                window["steam"] = window["pid"] in steam_pids
             prompt = blocking_prompt(windows)
             if prompt:
                 raise RigError(prompt)
@@ -265,11 +273,15 @@ class Session:
         if not self.data or self.data["phase"] == "restored":
             return self.status()
         errors = []
-        if self.data.get("worker_requested"):
-            (self.journal.directory / "display-stop").touch()
+        receipt = self.owner_receipt()
+        self.data["owner_input_seen"] = bool(self.data.get("owner_input_seen") or receipt.get("owner_input_seen"))
+        had_live_owned = False
+        ended_at = None
         try:
             snapshot = self.backend.snapshot()
             self.adopt(snapshot)
+            had_live_owned = any(any(same_process(item, row) for row in snapshot["processes"])
+                                 for item in self.data["owned"])
             for process in reversed(self.data["owned"]):
                 if not any(same_process(process, row) for row in snapshot["processes"]):
                     continue
@@ -283,6 +295,9 @@ class Session:
             expected = {norm(path) for path in expected_paths(self.game, self.installed)}
             if any(norm(row.get("path") or "") in expected for row in snapshot["processes"]):
                 errors.append("Game/launcher is still running; settings restoration refused")
+            if not any(any(same_process(item, row) for row in snapshot["processes"])
+                       for item in self.data["owned"]):
+                ended_at = self.backend.wall_time() if had_live_owned else None
         except Exception as exc:
             errors.append(str(exc))
         finally:
@@ -291,7 +306,18 @@ class Session:
                     self.backend.stop_display(self.journal)
                 except Exception as exc:
                     errors.append("Display cleanup: " + str(exc))
+        receipt = self.owner_receipt()
+        self.data["owner_input_seen"] |= bool(receipt.get("owner_input_seen"))
+        if self.data["owned"] and not self.data.get("session_end"):
+            # Without a live verified writer, never extend the lifetime to the
+            # recovery command: later owner edits must remain conflicts.
+            bound = ended_at or receipt.get("game_exited_at") or self.data.get("last_owned_at")
+            if bound and not errors:
+                self.journal.record_session_end(bound, owner_input_seen=self.data["owner_input_seen"])
         if errors:
+            # A failed shutdown cannot authorize attributing later edits on a
+            # retry. Keep exact-hash recovery, and report rewrites as conflicts.
+            self.data["attribution_disabled"] = True
             self.data["phase"] = "cleanup-required"
             self.data["error"] = "; ".join(errors)
             self.save()
@@ -299,6 +325,26 @@ class Session:
         self.data["phase"] = "stopped"
         self.save()
         return self.status()
+
+    def owner_receipt(self):
+        path = self.journal.directory / "display-state.json"
+        receipt = read_json(path) if path.exists() else {}
+        if receipt and receipt.get("session") != self.data["id"]:
+            raise RigError("Owner-input receipt belongs to another session")
+        monitor = getattr(self.backend, "owner_monitor", None)
+        if monitor:
+            try:
+                receipt["owner_input_seen"] = bool(receipt.get("owner_input_seen") or monitor.active())
+            except RigError:
+                receipt["owner_input_seen"] = True
+        return receipt
+
+    def conflict_error(self):
+        paths = [row["path"] for row in self.data["backups"] if row.get("result") == "owner_changed"]
+        if paths:
+            self.data.update(phase="restored-with-conflicts", error="Restore conflicts: " + "; ".join(paths[:8]))
+            self.save()
+            raise RestoreConflicts(self.data["error"])
 
     def stop(self):
         # Ending a session also restores its config and display arrangement.
@@ -308,6 +354,8 @@ class Session:
     def _restore(self):
         if not self.data or self.data["phase"] == "restored":
             return self.status()
+        if self.data["phase"] == "restored-with-conflicts":
+            self.conflict_error()
         stop_error = None
         try:
             self._stop()
@@ -334,6 +382,7 @@ class Session:
             self.save()
             raise stop_error
         self.journal.purge_backups()
+        self.conflict_error()
         self.data["phase"] = "restored"
         self.data.pop("error", None)
         self.save()
@@ -342,6 +391,8 @@ class Session:
     def restore(self):
         try:
             return self._restore()
+        except RestoreConflicts:
+            raise
         except (OSError, RigError) as exc:
             if self.data:
                 self.data.update(phase="cleanup-required", error=str(exc))
@@ -352,7 +403,7 @@ class Session:
             raise RigError(f"Restore requires cleanup: {exc}") from exc
 
     def failure_cleanup(self, error):
-        if not self.data or self.data["phase"] == "restored":
+        if not self.data or self.data["phase"] in ("restored", "restored-with-conflicts"):
             return
         self.data["error"] = str(error)
         try:
@@ -362,7 +413,8 @@ class Session:
         try:
             self.restore()
         except Exception as cleanup:
-            self.data["phase"] = "cleanup-required"
+            if not isinstance(cleanup, RestoreConflicts):
+                self.data["phase"] = "cleanup-required"
             self.data["error"] = f"{error}; cleanup: {cleanup}"
             try:
                 self.save()

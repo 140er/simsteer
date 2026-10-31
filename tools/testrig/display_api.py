@@ -4,6 +4,7 @@ import base64
 import ctypes as C
 from ctypes import wintypes as W
 import struct
+import time
 
 from . import RigError
 from .windows import desktop_pixels, dll, powershell, signature
@@ -168,11 +169,25 @@ class NativeDisplay:
         if status:
             raise RigError(f"Display mode change failed for {name} (result {status})")
 
+    def wait_virtual(self, instance, *, clock=time.monotonic, pause=time.sleep):
+        deadline = clock() + 10
+        detail = "output is unavailable"
+        while True:
+            try:
+                matches = {row["name"] for row in self.sources() if device_instance(row["adapter_path"]) == instance.casefold()}
+            except RigError as exc:
+                detail, matches = str(exc), set()
+            if len(matches) > 1:
+                raise RigError("Cannot match the VDD PnP instance to one CCD/GDI output; multiple outputs are refused")
+            if matches:
+                return next(iter(matches))
+            remaining = deadline - clock()
+            if remaining <= 0:
+                raise RigError("VDD CCD/GDI output timed out after 10s; " + detail)
+            pause(min(0.2, remaining))
+
     def extend_primary(self, instance, original, width, height):
-        matches = {row["name"] for row in self.sources() if device_instance(row["adapter_path"]) == instance.casefold()}
-        if len(matches) != 1:
-            raise RigError("Cannot match the VDD PnP instance to one CCD/GDI output; multiple or unavailable outputs are refused")
-        virtual = next(iter(matches))
+        virtual = self.wait_virtual(instance)
         physical = self.physical_displays(original)
         if virtual in {item["name"] for item in physical}:
             raise RigError("The VDD was already active in the original topology")

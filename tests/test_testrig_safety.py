@@ -39,6 +39,13 @@ def failed_cleanup(session, backend):
     backend.busy = None
 
 
+def owner_input_seen(session):
+    receipt = session.journal.directory / "display-state.json"
+    row = read_json(receipt)
+    row["owner_input_seen"] = True
+    atomic_json(receipt, row)
+
+
 def test_delayed_restore_keeps_owner_progress_and_new_files(rig):
     session, backend = rig
     session.start({}, 30)
@@ -76,12 +83,15 @@ def test_owner_changed_edited_file_is_left_and_baseline_retained(rig):
     failed_cleanup(session, backend)
     target.write_bytes(b"owner changed controls")
     recovered = Session("ac", backend.directory, backend)
-    result = recovered.restore()
+    with pytest.raises(RigError, match="conflict"):
+        recovered.restore()
+    result = recovered.status()
     assert target.read_bytes() == b"owner changed controls"
     assert any("owner changed" in entry.get("message", "") for entry in result["restoration"])
     archives = list((backend.directory / "displaced").glob("*"))
     assert any(path.is_file() and path.read_bytes() == baseline for path in archives)
-    recovered.restore()
+    with pytest.raises(RigError, match="conflict"):
+        recovered.restore()
     assert target.read_bytes() == b"owner changed controls"
 
 
@@ -135,7 +145,8 @@ def test_locked_restore_is_partial_restartable_and_keeps_owner_changes(rig, monk
     other = backend.gamepath / "cfg/race.ini"
     other.write_bytes(b"owner edit after partial restore")
     locked = False
-    Session("ac", backend.directory, backend).restore()
+    with pytest.raises(RigError, match="conflict"):
+        Session("ac", backend.directory, backend).restore()
     assert target.read_bytes() == baseline
     assert other.read_bytes() == b"owner edit after partial restore"
 
@@ -258,9 +269,11 @@ def test_json_retry_exhaustion_keeps_previous_valid_file(tmp_path, monkeypatch):
 def test_created_file_changed_by_owner_is_not_removed(rig):
     session, backend = rig
     session.start({}, 30)
+    owner_input_seen(session)
     file = backend.document_game / "cfg/video.ini"
     file.write_bytes(b"owner replacement")
-    session.stop()
+    with pytest.raises(RigError, match="conflict"):
+        session.stop()
     assert file.read_bytes() == b"owner replacement"
 
 
@@ -415,5 +428,6 @@ def test_owner_replaced_managed_file_with_directory_is_untouched(rig):
     target.unlink()
     target.mkdir()
     (target / "owner-data").write_bytes(b"keep")
-    session.stop()
+    with pytest.raises(RigError, match="conflict"):
+        session.stop()
     assert (target / "owner-data").read_bytes() == b"keep"

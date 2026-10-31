@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import tempfile
@@ -134,6 +135,10 @@ class OwnerChanged(RigError):
     pass
 
 
+class RestoreConflicts(RigError):
+    """Recovery completed, but owner changes need an explicit review."""
+
+
 class Journal:
     VERSION = 2
 
@@ -168,6 +173,8 @@ class Journal:
         if self.data is None and self.recovery:
             raise RigError("State and recovery manifest are unreadable or legacy. Preserve backup/ and displaced/; "
                            "recover individual files using the README manual recovery recipe. " + self.recovery["message"])
+        if self.data:
+            self.validate_paths()
 
     def save(self):
         # The independent manifest also carries launch/display identities, so a
@@ -207,12 +214,89 @@ class Journal:
         self.data["backups_complete"] = True
         self.save()
 
+    def storage_path(self, row, key):
+        value = row.get(key)
+        if not value:
+            return None
+        folder = "backup" if key == "stored" else "displaced"
+        path = Path(value)
+        reject_links(path)
+        if not path.is_absolute() or path.parent.resolve() != (self.directory / folder).resolve():
+            raise RigError(f"Manifest {key} path must be inside this session's {folder}/: {path}")
+        return path
+
+    def validate_paths(self):
+        for row in self.data.get("backups", []):
+            self.storage_path(row, "stored")
+            self.storage_path(row, "archive")
+            if row.get("temporary"):
+                self.temporary_path(row)
+
+    def _verify_backup(self, row):
+        stored = self.storage_path(row, "stored")
+        archive = self.storage_path(row, "archive")
+        if row.get("archive_pending") or (stored and not stored.exists() and
+                (self.directory / "displaced" / stored.name).exists()):
+            # Also recover a move made by the earlier journal implementation.
+            archive = archive or self.directory / "displaced" / stored.name
+            row.update(archive=str(archive), archive_pending=True)
+            self._owner_changed(row)
+        if row.get("result") in ("restored", "owner_changed", "left_session_file") or row["baseline"]["kind"] == "absent":
+            return
+        if not stored or fingerprint(stored) != row["baseline"]:
+            raise RigError(f"Backup hash mismatch: {stored}; this file requires recovery")
+
     def verify_backups(self):
+        self.validate_paths()
         for row in self.data["backups"]:
-            if row.get("result") in ("restored", "owner_changed") or row["baseline"]["kind"] == "absent":
+            self._verify_backup(row)
+
+    def temporary_path(self, row):
+        identifier = self.data.get("id", "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", identifier):
+            raise RigError("Invalid session identity for temporary-file recovery")
+        index = next(index for index, item in enumerate(self.data["backups"]) if item is row)
+        expected = Path(row["path"]).parent / f".testrig-{identifier}-{index}.tmp"
+        path = Path(row.get("temporary") or expected)
+        reject_links(path)
+        if path != expected:
+            raise RigError("Temporary path is not the exact journaled session filename")
+        return path
+
+    def cleanup_temporary(self, row):
+        if not row.get("temporary"):
+            return
+        path = self.temporary_path(row)
+        if not path.exists():
+            return
+        allowed = row.get("temporary_hashes", [])
+        def unlink():
+            if file_fingerprint(path) not in allowed:
+                raise RigError(f"Journaled temporary file changed; preserved for inspection: {path}")
+            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+            path.unlink()
+        retry_sharing(unlink)
+
+    def record_session_end(self, ended_at, *, owner_input_seen=False):
+        """Seal hashes once, while the owned writers' lifetime is still known."""
+        self.data["owner_input_seen"] = bool(self.data.get("owner_input_seen") or owner_input_seen)
+        if self.data.get("session_end"):
+            self.save()
+            return
+        self.data["session_end"] = ended_at
+        for row in self.data["backups"]:
+            if (self.data["owner_input_seen"] or self.data.get("attribution_disabled") or
+                    row.get("result") or self.directory in Path(row["path"]).parents):
                 continue
-            if not row.get("stored") or fingerprint(Path(row["stored"])) != row["baseline"]:
-                raise RigError(f"Backup hash mismatch: {row['stored']}; restoration refused")
+            path = Path(row["path"])
+            try:
+                live = file_fingerprint(path)
+                if (row.get("written_at_ns") and live["kind"] == "file" and
+                        row["written_at_ns"] <= path.stat().st_mtime_ns <= int(ended_at * 1_000_000_000)):
+                    row["left_by_session"] = live
+            except (OSError, RigError) as exc:
+                self.data.setdefault("warnings", []).append(f"Cannot attribute session write for {path}: {exc}")
+        self.save()
 
     def _expect(self, path, allowed):
         if file_fingerprint(path) not in allowed:
@@ -221,7 +305,14 @@ class Journal:
     def _replace(self, path, content, allowed, mode):
         reject_links(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix=".testrig-", dir=path.parent)
+        row = next(row for row in self.data["backups"] if row["path"] == str(path))
+        self.cleanup_temporary(row)
+        self.data.setdefault("id", uuid.uuid4().hex)
+        temporary = self.temporary_path(row)
+        row.update(temporary=str(temporary), temporary_hashes=[
+            {"kind": "file", "sha256": hashlib.sha256(value).hexdigest()} for value in (b"", content)])
+        self.save()  # deterministic name and expected content BEFORE creation
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(content)
@@ -235,10 +326,7 @@ class Journal:
                 os.replace(temporary, path)
             retry_sharing(replace)
         finally:
-            temporary = Path(temporary)
-            if temporary.exists():
-                os.chmod(temporary, stat.S_IRUSR | stat.S_IWUSR)
-                retry_sharing(lambda: temporary.unlink(missing_ok=True))
+            self.cleanup_temporary(row)
 
     def write(self, path, content):
         """Record the exact bytes BEFORE editing any game file."""
@@ -253,21 +341,34 @@ class Journal:
         self._expect(path, [previous])
         if row["baseline"]["kind"] == "file" and fingerprint(Path(row["stored"])) != row["baseline"]:
             raise RigError(f"Backup hash mismatch: {row['stored']}")
-        row.update(previous=previous, written={"kind": "file", "sha256": hashlib.sha256(content).hexdigest()})
+        self.validate_paths()
+        row.update(previous=previous, written={"kind": "file", "sha256": hashlib.sha256(content).hexdigest()},
+                   written_at_ns=time.time_ns())
         self.save()
         self._replace(path, content, [previous], (row["mode"] or 0o600) | stat.S_IWUSR)
         row["previous"] = None
         self.save()
 
     def _owner_changed(self, row):
-        if row.get("stored"):
-            archive = self.directory / "displaced" / Path(row["stored"]).name
+        if self.directory in Path(row["path"]).parents:
+            row.update(result="left_session_file")
+            row.pop("message", None)
+            row.pop("error", None)
+            return
+        stored = self.storage_path(row, "stored")
+        archive = self.storage_path(row, "archive")
+        if stored or row.get("archive_pending"):
+            archive = archive or self.directory / "displaced" / stored.name
+            row.update(archive=str(archive), archive_pending=True)
+            self.save()  # intent commits BEFORE the only copy is moved
             archive.parent.mkdir(parents=True, exist_ok=True)
-            if Path(row["stored"]).exists():
-                retry_sharing(lambda: os.replace(row["stored"], archive))
-            if archive.exists():
-                row["archive"] = str(archive)
-                row["stored"] = None
+            if stored and stored.exists():
+                if fingerprint(stored) != row["baseline"] or (archive.exists() and fingerprint(archive) != row["baseline"]):
+                    raise RigError("Displaced original hash mismatch; preserve both files for recovery")
+                retry_sharing(lambda: os.replace(stored, archive))
+            if fingerprint(archive) != row["baseline"]:
+                raise RigError(f"Displaced original is unavailable: {archive}")
+            row.update(stored=None, archive_pending=False)
         row.update(result="owner_changed", message=f"owner changed {row['path']}; left as is")
         row.pop("error", None)
 
@@ -276,15 +377,19 @@ class Journal:
                 for row in self.data.get("backups", []) if row.get("result") or row.get("error")]
 
     def restore(self):
-        self.verify_backups()
+        self.validate_paths()
         errors = []
         for row in self.data["backups"]:
             target = Path(row["path"])
             try:
-                if row.get("result") == "owner_changed":
+                self.cleanup_temporary(row)
+                self._verify_backup(row)
+                if row.get("result") in ("owner_changed", "left_session_file"):
                     continue
                 live = file_fingerprint(target)
                 allowed = [value for value in (row.get("written"), row.get("previous")) if value]
+                if not self.data.get("owner_input_seen") and row.get("left_by_session"):
+                    allowed.append(row["left_by_session"])
                 if live == row["baseline"]:
                     row["result"] = "restored"
                 elif row.get("result") == "restored" or live not in allowed:
@@ -301,11 +406,15 @@ class Journal:
                         retry_sharing(unlink)
                     row["result"] = "restored"
                 row.pop("error", None)
-            except OwnerChanged:
-                self._owner_changed(row)
             except (OSError, RigError) as exc:
-                row["error"] = f"Restore deferred for {target}: {exc}"
-                errors.append(row["error"])
+                try:
+                    if isinstance(exc, OwnerChanged):
+                        self._owner_changed(row)
+                    else:
+                        raise exc
+                except (OSError, RigError) as deferred:
+                    row["error"] = f"Restore deferred for {target}: {deferred}"
+                    errors.append(row["error"])
             try:
                 self.save()
             except OSError as exc:
@@ -323,11 +432,15 @@ class Journal:
 
     def purge_backups(self):
         """Only known backup files are removed, after verified restoration."""
+        self.validate_paths()
         for row in self.data["backups"]:
             if row.get("result") != "restored":
                 continue
             if row.get("stored"):
-                remove(Path(row["stored"]))
+                path = self.storage_path(row, "stored")
+                if path.exists() and fingerprint(path) != row["baseline"]:
+                    raise RigError(f"Backup hash mismatch during cleanup: {path}")
+                remove(path)
                 row["stored"] = None
         backup = self.directory / "backup"
         if backup.exists() and not any(backup.iterdir()):

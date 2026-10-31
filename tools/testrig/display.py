@@ -12,7 +12,7 @@ from . import RigError
 from .display_api import BlackOverlay, NativeDisplay
 from .guard import same_process
 from .state import atomic_json, read_json
-from .state import Journal
+from .state import Journal, lock, reject_links
 from .discovery import GAMES
 from .windows import ProcessHandle, Windows
 
@@ -179,7 +179,7 @@ def stop_worker(journal, backend):
 
 
 def watch_session(directory, state, parent, lifecycle, activity, *, open_process=ProcessHandle,
-                  clock=time.monotonic, pause=time.sleep):
+                  clock=time.monotonic, pause=time.sleep, wall=time.time):
     """GUI loop uses lightweight handles, never PowerShell/CIM inventory."""
     handles = {}
     start = clock()
@@ -188,13 +188,17 @@ def watch_session(directory, state, parent, lifecycle, activity, *, open_process
             if state["options"]["overlay"]:
                 lifecycle.overlay.pump()
             if activity.active():
+                lifecycle.row["owner_input_seen"] = True
+                if getattr(activity, "failure", None):
+                    lifecycle.row["warnings"].append(activity.failure)
+                lifecycle.save(lifecycle.row)
                 return "owner-input", True
             current = read_json(directory / "state.json")
             if current["id"] != state["id"]:
                 return "session-changed", False
             if (directory / "display-stop").exists():
                 return "explicit-stop", True
-            if current["phase"] in ("stopped", "restoring", "restored", "cleanup-required"):
+            if current["phase"] in ("stopped", "restoring", "restored", "restored-with-conflicts", "cleanup-required"):
                 return "cleanup", False
             if current["phase"] == "running":
                 executable = ntpath.normcase(str(Path(current["installation"]["game"]) / GAMES[current["game"]].runner))
@@ -206,6 +210,8 @@ def watch_session(directory, state, parent, lifecycle, activity, *, open_process
                         handles[key] = open_process(row)
                     active |= handles[key].alive()
                 if not active:
+                    lifecycle.row["game_exited_at"] = wall()
+                    lifecycle.save(lifecycle.row)
                     return "game-exited", True
             elif not parent.alive():
                 return "startup-caller-exited", True
@@ -234,6 +240,7 @@ def worker(directory):
                 raise RigError("Display startup was cancelled before the mutation handshake")
             time.sleep(0.1)
         activity = OwnerInput()
+        backend.owner_monitor = activity
         lifecycle.start()
         reason, recover = watch_session(directory, state, parent, lifecycle, activity)
         lifecycle.row["stop_reason"] = reason
@@ -241,6 +248,9 @@ def worker(directory):
             lifecycle.row["warnings"].append("Session deadline expired")
     except BaseException as exc:
         lifecycle.row["errors"].append(str(exc))
+        # An unreadable/dead input monitor cannot authorize rolling back a
+        # rewrite whose author is unknown.
+        lifecycle.row["owner_input_seen"] = True
         recover = True
     finally:
         try:
@@ -248,17 +258,24 @@ def worker(directory):
             lifecycle.close()
         finally:
             parent.close()
-            if activity:
-                activity.close()
-    if recover and not supervisor_alive:
-        recover_session(directory, backend, lifecycle)
+    try:
+        if activity:
+            try:
+                lifecycle.row["owner_input_seen"] = bool(lifecycle.row.get("owner_input_seen") or activity.active())
+            except RigError:
+                lifecycle.row["owner_input_seen"] = True
+            lifecycle.save(lifecycle.row)
+        if recover and not supervisor_alive:
+            recover_session(directory, backend, lifecycle)
+    finally:
+        if activity:
+            activity.close()
     return int(bool(lifecycle.row["errors"]))
 
 
 def recover_session(directory, backend, lifecycle):
     """A worker failure after start returned must also recover game/config state."""
     from .session import Session
-    from .state import lock
     try:
         with lock(directory.parents[1]):
             state = Journal(directory).data
@@ -275,6 +292,41 @@ def recover_session(directory, backend, lifecycle):
             return
         lifecycle.row["errors"].append("Game/config recovery requires restore: " + str(exc))
         lifecycle.save(lifecycle.row)
+
+
+def recover_leftover_displays(root, backend, snapshot):
+    """Before a new command, recover incomplete display intents from older boots."""
+    if not root or not root.exists() or not snapshot.get("boot_id"):
+        return []
+    pending = []
+    for game in ("ac", "ets2"):
+        parent = root / game
+        reject_links(parent)
+        if not parent.exists():
+            continue
+        for directory in parent.iterdir():
+            reject_links(directory)
+            if not directory.is_dir() or not (directory / "display-state.json").exists():
+                continue
+            journal = Journal(directory)
+            if not journal.data or journal.data.get("boot_id") in (None, snapshot["boot_id"]):
+                continue
+            receipt = read_json(directory / "display-state.json")
+            if receipt.get("session") != journal.data["id"]:
+                raise RigError("Previous-boot display receipt belongs to another session; restore manually")
+            if receipt.get("enable_intent") and not all(receipt.get(key) for key in
+                    ("topology_restored", "vdd_disabled", "overlay_closed")):
+                pending.append(directory)
+    recovered = []
+    if pending:
+        with lock(root):
+            for directory in pending:
+                journal = Journal(directory)
+                backend.stop_display(journal)
+                journal.data.setdefault("warnings", []).append("Recovered an incomplete display layout from a previous boot")
+                journal.save()
+                recovered.append(str(directory))
+    return recovered
 
 
 def main(argv=None):
