@@ -69,7 +69,10 @@ import numpy as np
 from simsteer.core.finite import NonFiniteError, require_finite
 
 from simsteer.paths import state_path
-from simsteer.state import atomic_save_json, read_json_object, state_warning
+from simsteer.state import (
+    atomic_save_json, bounded_int, bounded_number, delete_state,
+    read_json_object, snapshot_exists, state_warning,
+)
 from simsteer.core.warp import euler_from_rot, rot_from_euler
 
 if TYPE_CHECKING:
@@ -588,8 +591,7 @@ class LiveCalib:
         if self._game is not None:
             try:
                 p = state_path("livecalib_state", self._game)
-                if p.exists():
-                    p.unlink()
+                delete_state(p)
             except OSError:
                 pass
 
@@ -664,42 +666,69 @@ class LiveCalib:
                        previous_axis=self._last_game_steer, samples=self.samples,
                        wide_n=self._wide_n, block_n=self._block_n, rejected=self.rejected)
 
+    def state_dict(self) -> dict:
+        self.validate_state()
+        return {
+            "rpys": [[float(x) for x in r] for r in self._rpys],
+            "heights": [float(h) for h in self._heights],
+            "wide_sum": [float(x) for x in self._wide_sum],
+            "wide_n": int(self._wide_n),
+            "wide_from_device_estimate": (
+                [float(x) for x in self.wide_from_device_estimate]
+                if self.wide_from_device_estimate is not None else None),
+            "block_rpy_sum": [float(x) for x in self._block_rpy_sum],
+            "block_height_sum": float(self._block_height_sum),
+            "block_n": int(self._block_n),
+            "samples": int(self.samples),
+            "rejected": int(self.rejected),
+            "cal_status": int(self.cal_status),
+        }
+
     def save_state(self, game: str) -> None:
-        """Serialize the committed block history (and the in-flight block
-        accumulator) so a Quit/relaunch resumes calibration where it left
-        off. Called on every block commit; failures are swallowed."""
         try:
-            self.validate_state()
-            payload = {
-                "rpys": [[float(x) for x in r] for r in self._rpys],
-                "heights": [float(h) for h in self._heights],
-                "wide_sum": [float(x) for x in self._wide_sum],
-                "wide_n": int(self._wide_n),
-                "wide_from_device_estimate": (
-                    [float(x) for x in self.wide_from_device_estimate]
-                    if self.wide_from_device_estimate is not None else None),
-                "block_rpy_sum": [float(x) for x in self._block_rpy_sum],
-                "block_height_sum": float(self._block_height_sum),
-                "block_n": int(self._block_n),
-                "samples": int(self.samples),
-                "rejected": int(self.rejected),
-                "cal_status": int(self.cal_status),
-            }
-            atomic_save_json(state_path("livecalib_state", game), payload)
+            atomic_save_json(state_path("livecalib_state", game), self.state_dict())
         except NonFiniteError as exc:
             logging.getLogger(__name__).warning("Not saving non-finite state: %s", exc)
         except OSError:
             pass
 
-    def load_state(self, game: str) -> None:
+    def load_state(self, game: str, path=None) -> None:
         """Restore the block history saved by `save_state`. No-op if no
         state file exists (fresh user / fresh game)."""
-        p = state_path("livecalib_state", game)
-        if not p.exists():
+        p = path if path is not None else state_path("livecalib_state", game)
+        if not snapshot_exists(p):
             return
         try:
             data = read_json_object(p)
-            require_finite("livecalib.load", state=data)
+            for name in ("wide_n", "block_n", "samples", "rejected"):
+                if name in data:
+                    maximum = BLOCK_SIZE - 1 if name == "block_n" else (1 << 31) - 1
+                    data[name] = bounded_int(data[name], maximum=maximum)
+            if "cal_status" in data:
+                bounded_int(data["cal_status"], maximum=int(CalStatus.INVALID))
+            for name in ("rpys", "heights", "wide_sum", "wide_from_device_estimate", "block_rpy_sum"):
+                value = data.get(name)
+                if value is None and name == "wide_from_device_estimate":
+                    continue
+                if name not in data:
+                    continue
+                if not isinstance(value, list) or len(value) > INPUTS_WANTED:
+                    raise ValueError("invalid camera history")
+                for item in value:
+                    if name == "rpys":
+                        if not isinstance(item, list) or len(item) != 3:
+                            raise ValueError("invalid camera pose")
+                        for angle in item:
+                            bounded_number(angle, -math.pi, math.pi)
+                    else:
+                        if name == "heights":
+                            bounded_number(item, 0.0001, 100)
+                        else:
+                            limit = math.pi * ({"wide_sum": (1 << 31) - 1,
+                                                "block_rpy_sum": BLOCK_SIZE}.get(name, 1))
+                            bounded_number(item, -limit, limit)
+            if "block_height_sum" in data:
+                bounded_number(data["block_height_sum"], 0, 100 * BLOCK_SIZE)
         except (OSError, ValueError, TypeError, OverflowError):
             state_warning(p, "unreadable; using defaults")
             return
@@ -719,9 +748,9 @@ class LiveCalib:
             require_finite("livecalib.load", rpys=rpys, heights=heights, wide=wide,
                            estimate=estimate, block=block, height=height)
             if any(r.shape != (3,) for r in [*rpys, wide, block]):
-                return
+                raise ValueError("invalid camera vectors")
             if estimate is not None and estimate.shape != (3,):
-                return
+                raise ValueError("invalid wide camera vector")
         except (ValueError, TypeError, OverflowError):
             state_warning(p, "unreadable; using defaults")
             return

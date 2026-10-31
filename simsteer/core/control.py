@@ -62,7 +62,7 @@ from simsteer.core.finite import require_finite
 from simsteer.core.constants import T_IDXS
 from simsteer.core.learners.liveparams import LiveParams
 from simsteer.paths import load_with_fallback, state_path
-from simsteer.state import atomic_save_json, dataclass_values, read_json_object, state_warning
+from simsteer.state import snapshot_exists, atomic_save_json, dataclass_values, read_json_object, state_warning
 from simsteer.core.postprocess import Decoded, desired_curvature_lag_adjusted
 
 CONFIG_PATH = state_path("controller")
@@ -264,7 +264,7 @@ class ControllerConfig:
         if path is None:
             path = load_with_fallback("controller", game)
         cfg = cls(**(seed or {}))
-        if path is not None and path.exists():
+        if path is not None and snapshot_exists(path):
             try:
                 cfg = cls(**{**asdict(cfg), **dataclass_values(cls, read_json_object(path))})
                 if not (cfg.wheelbase_m > 0 and cfg.default_speed > 0

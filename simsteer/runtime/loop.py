@@ -60,13 +60,14 @@ from simsteer.core.postprocess import decode
 from simsteer.core.preprocess import FrameQueue, model_views, yuv6_to_bgr
 from simsteer.games.base import GameProfile, get_profile
 from simsteer.paths import data_dir
-from simsteer.state import take_state_warnings
+from simsteer.state import flush_state, take_state_warnings, with_background_saves
+from simsteer.state_import import import_legacy_state
 from simsteer.runtime.capture import Capture, CaptureConfig
 from simsteer.runtime.fov import FovSolver, model_vision
 from simsteer.runtime.faults import neutral_decoded
 from simsteer.runtime.output.base import DeviceManager
 from simsteer.runtime.replay import LiveClock
-from simsteer.runtime.telemetry import Telemetry
+from simsteer.runtime.telemetry import Telemetry, vehicle_context
 from simsteer.ui.hud import (
     COL_ACCENT_BLUE, COL_ACCENT_GREEN, COL_ACCENT_RED, HudRenderer, HudState,
 )
@@ -142,6 +143,7 @@ def _setup_window_or_exit(w: int, h: int) -> None:
             f"Run with --headless or install opencv-python. ({e.err})") from None
 
 
+@with_background_saves
 def run(settings: Settings, game: GameProfile | str, *,
         source=None,
         make_telemetry: Callable[[], Telemetry] | None = None,
@@ -168,6 +170,7 @@ def run(settings: Settings, game: GameProfile | str, *,
         print(f"unknown game: {game!r}")
         return 2
     game_id = profile.id
+    import_legacy_state()
     state_root = data_dir()
     if source is None:
         source = Capture(CaptureConfig(target_fps=20))
@@ -220,7 +223,7 @@ def run(settings: Settings, game: GameProfile | str, *,
             "controller": asdict(ctrl_cfg), "device": settings.device,
             "device_id": settings.vjoy_device,
             "binding": getattr(pad, "binding_identity", None),
-            "vehicle": getattr(tel, "vehicle_id", lambda: None)(),
+            **vehicle_context(tel),
             "capabilities": asdict(profile.capabilities)},
         make_fov_solver=lambda: FovSolver(vision, model_views),
         fov_config=profile_reader(profile.camera.fov_source))
@@ -834,6 +837,9 @@ def run(settings: Settings, game: GameProfile | str, *,
                 log_f.close()
             if window_open:
                 cv2.destroyAllWindows()
+    # Output is neutral and capture is closed. A replacement process must
+    # observe the final snapshots before it starts loading its own state.
+    flush_state()
     if restart_args:
         try:
             subprocess.Popen(restart_args)

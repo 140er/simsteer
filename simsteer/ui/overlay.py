@@ -62,8 +62,7 @@ def setup_window(initial_w: int | None = None, initial_h: int | None = None) -> 
 def show_scaled(img: np.ndarray, max_width: int) -> None:
     """Downscale the framebuffer for display when wider than max_width.
     The window itself is resizable, but we cap the underlying buffer so a
-    3440-wide capture doesn't try to render at native size into a 2560-wide
-    monitor before the user has dragged it.
+    large capture remains bounded while the user resizes the window.
     """
     h, w = img.shape[:2]
     if w > max_width:

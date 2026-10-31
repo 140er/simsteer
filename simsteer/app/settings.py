@@ -11,10 +11,11 @@ Lives in the per-user data directory (via `simsteer.paths.data_dir()`).
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
+from pathlib import Path
 from typing import get_type_hints
 
 from simsteer.paths import data_dir
-from simsteer.state import atomic_save_json, loaded_value as _loaded_value, read_json_object, state_warning
+from simsteer.state import snapshot_exists, atomic_save_json, loaded_value as _loaded_value, read_json_object, state_warning
 
 
 _SETTINGS_FILE = "settings.json"
@@ -80,13 +81,13 @@ class Settings:
             setattr(self, name, value)
 
     @classmethod
-    def load(cls) -> "Settings":
+    def load(cls, path: Path | None = None) -> "Settings":
         """Read settings from disk. Missing file -> defaults, no
         warning. Unknown fields ignored (forward compat). Bad fields
         fall back to defaults (don't crash launch on a corrupted file).
         """
-        p = data_dir() / _SETTINGS_FILE
-        if not p.exists():
+        p = path if path is not None else data_dir() / _SETTINGS_FILE
+        if not snapshot_exists(p):
             return cls()
         try:
             raw = read_json_object(p)
@@ -103,7 +104,12 @@ class Settings:
             if k not in valid:
                 continue
             try:
-                kwargs[k] = _loaded_value(v, hints[k])
+                value = _loaded_value(v, hints[k])
+                limits = {"vjoy_device": (1, 16), "forza_port": (1, 65535),
+                          "max_width": (160, 32768)}
+                if k in limits and not limits[k][0] <= value <= limits[k][1]:
+                    raise ValueError("setting out of range")
+                kwargs[k] = value
             except (TypeError, ValueError, OverflowError):
                 print(f"warning: invalid setting {k!r}; using default")
                 state_warning(p, "has invalid values; using defaults")

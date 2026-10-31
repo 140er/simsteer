@@ -47,7 +47,7 @@ from simsteer.core.learners.livecalib import (
 from simsteer.core.learners.liveparams import TRUSTED_MIN_SAMPLES
 from simsteer.core.model_identity import pinned_model_identity
 from simsteer.paths import state_path
-from simsteer.state import atomic_save_json, read_json_object, state_warning
+from simsteer.state import atomic_save_json, bounded_int, bounded_number, read_json_object, state_warning
 from simsteer.runtime.fov import (
     CANDIDATE_OFFSETS, CANDIDATE_SAMPLES, ESTIMATE_SAMPLES, FovSolver,
 )
@@ -66,6 +66,14 @@ def contexts_match(saved: dict | None, current: dict) -> bool:
     old_camera, camera = saved.get("camera", {}), current.get("camera", {})
     if not isinstance(old_camera, dict) or not isinstance(camera, dict):
         return False
+    # Readers without a usable identity omit it. Earlier snapshots used
+    # null for this same limitation; that alone is not a context change.
+    def normalized(context):
+        controls = dict(context.get("controls", {}))
+        if controls.get("vehicle") is None:
+            controls.pop("vehicle", None)
+        return {**context, "controls": controls}
+    saved, current = normalized(saved), normalized(current)
     if old_camera.get("simple_warp", True) or camera.get("simple_warp", True):
         return saved == current
     old_camera, camera = old_camera.copy(), camera.copy()
@@ -335,9 +343,11 @@ class CalibFlow:
 
     def confirm_check(self) -> None:
         """An explicit engage request acknowledges an invalidated check."""
+        if self._vehicle_pending():
+            return
         if (self.step in (Step.CHECK, Step.DONE)
                 and not contexts_match(self._check_context, self._context())):
-            self._invalidate_check("calibration context changed")
+            self._invalidate_check("calibration changed")
         if self.step is Step.CHECK:
             self._check_requested = True
 
@@ -357,6 +367,20 @@ class CalibFlow:
             self._enter(Step.STEERING)
         else:
             self._enter(Step.CHECK)
+
+    def _vehicle_pending(self) -> bool:
+        """Keep a known-vehicle certificate while its reader is starting."""
+        saved = self._check_context or {}
+        old_vehicle = saved.get("controls", {}).get("vehicle")
+        controls = self._context_provider()
+        return (old_vehicle is not None and "vehicle" in controls
+                and controls["vehicle"] is None)
+
+    def _context_matches_pending(self) -> bool:
+        current = self._context()
+        if self._vehicle_pending():
+            current["controls"]["vehicle"] = self._check_context["controls"]["vehicle"]
+        return contexts_match(self._check_context, current)
 
     @property
     def camera_learning(self) -> bool:
@@ -479,9 +503,11 @@ class CalibFlow:
         """Why engaging is not allowed yet, or "" when it is."""
         if self.step is Step.FAILED:
             return "calibration failed: R restarts"
+        if self._vehicle_pending():
+            return "Waiting for vehicle identity"
         if (self.step in (Step.CHECK, Step.DONE)
                 and not contexts_match(self._check_context, self._context())):
-            return "Calibration context changed: press INSERT to check again"
+            return "Check again: press INSERT"
         if not self._check_requested:
             return "Check again: press INSERT"
         if self.step is Step.FOV:
@@ -506,9 +532,12 @@ class CalibFlow:
             self._invalidate_check("camera calibration changed")
             self._enter(Step.CAMERA)
             return
-        if self.step in (Step.CHECK, Step.DONE) and not contexts_match(self._check_context, self._context()):
-            self._invalidate_check("calibration changed")
-            return
+        if self.step in (Step.CHECK, Step.DONE):
+            if not self._context_matches_pending():
+                self._invalidate_check("calibration changed")
+                return
+            if self._vehicle_pending():
+                return
         if abs(self.calib.fov_h_deg - self._fov_reference) > 0.05:
             # Set by hand (tuner, keys): carry the camera history over, and
             # during the FOV step take it as the player's answer.
@@ -957,7 +986,37 @@ class CalibFlow:
             self._reset_state()
             return False
 
+    @staticmethod
+    def validate_snapshot(d: dict) -> None:
+        bounded_int(d.get("version"), 2, CALIB_VERSION)
+        for name in ("game", "device", "step"):
+            if not isinstance(d.get(name), str):
+                raise ValueError("invalid calibration metadata")
+        Step(d["step"])
+        bounded_int(d.get("attempts", 0))
+        for name in ("result", "legacy_result", "check_context", "check"):
+            if d.get(name) is not None and not isinstance(d[name], dict):
+                raise ValueError("invalid calibration evidence")
+        if "check_requested" in d and type(d["check_requested"]) is not bool:
+            raise ValueError("invalid Check request")
+        for name in ("fov", "steering"):
+            if name in d and not isinstance(d[name], dict):
+                raise ValueError("invalid calibration progress")
+        for name in ("prompt", "lane_changes"):
+            bounded_int(d.get("steering", {}).get(name, 0))
+        for name in ("prompt_s", "regime_s"):
+            bounded_number(d.get("steering", {}).get(name, 0), 0, 1e12)
+        if not isinstance(d.get("redo_note", ""), str):
+            raise ValueError("invalid calibration message")
+        if d.get("check_model") is not None:
+            model = d["check_model"]
+            if not isinstance(model, list) or len(model) != 3:
+                raise ValueError("invalid frozen fit")
+            for coefficient in model:
+                bounded_number(coefficient, -1e12, 1e12)
+
     def _restore(self, d: dict) -> bool:
+        self.validate_snapshot(d)
         if (d.get("version") not in (2, 3, 4, 5, CALIB_VERSION) or d.get("game") != self.game
                 or d.get("device") != self.device):
             return False
@@ -994,17 +1053,14 @@ class CalibFlow:
         if self.step is Step.FOV and self.fov_proposal is None:
             self._config_pending = self._fov_config is not None
         if self.step in (Step.CHECK, Step.DONE):
-            controls = self._context_provider()
-            vehicle_unknown = "vehicle" in controls and controls["vehicle"] is None
-            if (vehicle_unknown or d.get("version") != CALIB_VERSION
-                    or not contexts_match(self._check_context, self._context())
+            if (d.get("version") != CALIB_VERSION
+                    or not self._context_matches_pending()
                     or self._check_model is None
                     or (self.step is Step.DONE
                         and not certified_result(self.result, self._check_context))):
                 if self.result and self.legacy_result is None:
                     self.legacy_result = self.result
-                self._invalidate_check("vehicle identity unavailable; confirm this setup"
-                                       if vehicle_unknown else "saved evidence is outdated")
+                self._invalidate_check("saved evidence is outdated")
             else:
                 if self.step is Step.CHECK:
                     self.lp.begin_validation(self._check_model)

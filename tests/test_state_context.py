@@ -265,7 +265,7 @@ def test_saved_pass_survives_matching_context():
     assert resumed.calibrated and resumed.ai_steering_ready and not resumed.engage_block()
 
 
-def test_unknown_vehicle_requires_confirmation_after_restart():
+def test_reader_without_vehicle_keeps_matching_certificate_after_restart():
     lc, lp = FakeLiveCalib(), FakeLiveParams()
     context = lambda: {"vehicle": None}
     flow = new_flow(lc, lp, certification_context=context)
@@ -273,10 +273,8 @@ def test_unknown_vehicle_requires_confirmation_after_restart():
     flow._finish_check(evaluate(_drive()))
     assert flow.calibrated
     resumed = new_flow(lc, lp, cal=flow.calib, certification_context=context)
-    assert not resumed.calibrated and not resumed.ai_steering_ready
-    assert "vehicle identity unavailable" in resumed.redo_note
-    resumed.confirm_check()
-    assert resumed.ai_steering_ready and not resumed.calibrated
+    assert resumed.calibrated and resumed.ai_steering_ready
+    assert not resumed.engage_block()
 
 
 @pytest.mark.parametrize("field", ["vehicle", "binding_index"])

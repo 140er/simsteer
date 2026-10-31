@@ -281,10 +281,10 @@ def test_item3_capture_resize_precedes_warp_and_vertical_fov_entry(monkeypatch, 
         assert calib.fov_h_deg == pytest.approx(expected)
         assert calib.fov_v_deg == pytest.approx(72.)
 
-    frames = [np.zeros((1440, 3440, 3), np.uint8), np.zeros((1440, 2560, 3), np.uint8)]
+    frames = [np.zeros((1080, 1920, 3), np.uint8), np.zeros((1200, 1600, 3), np.uint8)]
     run_frames(monkeypatch, tmp_path, frames,
                [dict(speed=10., yaw=0., decoded=healthy_decoded())] * 2, on_push=push)
-    assert seen == [(3440, 1440), (2560, 1440)]
+    assert seen == [(1920, 1080), (1600, 1200)]
 
 
 def test_item4_manual_fov_survives_restart_with_history(monkeypatch, data_dir):
@@ -303,7 +303,7 @@ def test_item4_manual_fov_survives_restart_with_history(monkeypatch, data_dir):
         save_flow()
 
     monkeypatch.setattr(flow, "save", save_after_calibration)
-    cal.fov_h_deg = 120.10235969224264
+    cal.fov_h_deg = 120.0
     flow.tick(Obs(now=1., dt=.05))
     before = json.loads((data_dir / "livecalib_state_ets2.json").read_text())
     restored_cal = Calibration.load(game="ets2")

@@ -32,7 +32,7 @@ import numpy as np
 from simsteer.core.finite import NonFiniteError, require_finite
 
 from simsteer.paths import load_with_fallback, state_path
-from simsteer.state import atomic_save_json, dataclass_values, read_json_object, state_warning
+from simsteer.state import snapshot_exists, atomic_save_json, dataclass_values, read_json_object, state_warning
 
 # Back-compat aliases: existing call sites and tools (tools/test_per_game_state.py)
 # import these names from pilot.calibration. The canonical implementations live
@@ -64,8 +64,8 @@ class Calibration:
       yaw_deg   > 0  =>  camera nose pitched LEFT
     Roll is forced to 0 just like openpilot does.
     """
-    image_w: int = 3440
-    image_h: int = 1440
+    image_w: int = 1920
+    image_h: int = 1080
     # HFOV of the captured frame (your in-game FOV setting). Drives
     # the captured frame's K matrix in `pilot.warp.camera_intrinsics`.
     fov_h_deg: float = 90.0
@@ -238,7 +238,7 @@ class Calibration:
         resolution entirely (used in tests)."""
         if path is None:
             path = load_with_fallback("calibration", game)
-        if path is not None and path.exists():
+        if path is not None and snapshot_exists(path):
             try:
                 data = dataclass_values(cls, read_json_object(path))
                 # Check before migration can replace an invalid saved pose.

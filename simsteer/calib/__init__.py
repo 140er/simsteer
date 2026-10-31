@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from simsteer.calib.flow import CALIB_VERSION, TITLES, Step, flow_path
 from simsteer.calib.score import certified_result
 from simsteer.paths import state_path
-from simsteer.state import read_json_object
+from simsteer.state import delete_state, read_json_object
 
 
 @dataclass(frozen=True)
@@ -68,7 +68,7 @@ def restart(game: str, device: str) -> None:
               state_path("livecalib_state", game),
               state_path("liveparams", f"{game}_{device}")):
         try:
-            p.unlink(missing_ok=True)
+            delete_state(p)
         except OSError:
             pass
 

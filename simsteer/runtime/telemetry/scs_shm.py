@@ -122,11 +122,20 @@ class ScsTelemetry:
         """Raw input steering in [-1, +1] before in-game smoothing/sensitivity."""
         return self._read_float(OFF_TRUCK_USER_STEER)
 
+    @property
+    def vehicle_identity_supported(self) -> bool:
+        if self._mm is None:
+            return True  # Connection/identity is pending.
+        try:
+            return struct.unpack_from("<I", self._mm, OFF_PLUGIN_REV)[0] in (0, 12)
+        except struct.error:
+            return False
+
     def vehicle_id(self) -> str | None:
         """Stable truck type from revision 12; retain it across pauses.
 
         No player identifiers, registration plates or display names enter
-        the calibration context. Unknown layouts require confirmation.
+        the calibration context. Other layouts omit vehicle identity.
         """
         if self._mm is None:
             return None

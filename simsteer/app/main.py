@@ -31,6 +31,7 @@ from pathlib import Path
 from simsteer.app.settings import Settings
 from simsteer.games.base import Registry, registry
 from simsteer.games.profile import GameProfile
+from simsteer.state_import import import_legacy_state
 
 
 def _build_parser(game_ids: list[str]) -> argparse.ArgumentParser:
@@ -167,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 os.environ["SIMSTEER_DATA_DIR"] = user_dir
             shutil.rmtree(replay_dir, ignore_errors=True)
+    import_legacy_state()
     return _main(args, games, None)
 
 

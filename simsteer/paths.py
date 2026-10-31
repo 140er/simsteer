@@ -9,8 +9,8 @@ an extraction directory that is wiped on exit. Writes there are lost. So:
     flags) lives in `data_dir()`: `%LOCALAPPDATA%\\SimSteer\\` on Windows,
     `$XDG_DATA_HOME/SimSteer` (or `~/.local/share/SimSteer`) elsewhere.
 
-Per project policy: NO seeding from bundle into data_dir on first launch.
-Each user calibrates fresh, every game.
+Bundled assets never seed calibration. User-owned legacy state can be
+imported once from the old source/app directory into empty user storage.
 
 This module is package-root infrastructure: it depends on nothing else in
 `simsteer`, so `core`, `runtime`, `games`, and `app` may all import it freely.
@@ -21,6 +21,8 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+
+from simsteer.state import snapshot_exists
 
 
 _APP_NAME = "SimSteer"
@@ -45,8 +47,8 @@ def bundle_dir() -> Path:
 def data_dir() -> Path:
     """Writable state. Created on first call.
 
-    Source and bundled runs use the same per-user location. Repository
-    calibration files are never imported. `SIMSTEER_DATA_DIR` overrides
+    Source and bundled runs use the same per-user location. The startup
+    importer handles user-owned legacy files. `SIMSTEER_DATA_DIR` overrides
     the location for isolated replays and explicit portable setups.
     """
     override = os.environ.get("SIMSTEER_DATA_DIR")
@@ -83,10 +85,10 @@ def load_with_fallback(base_name: str, game: str | None) -> Path | None:
     """Resolve the path to load FROM: per-game first, then legacy.
     Returns None if neither file exists (caller uses defaults)."""
     game_path = state_path(base_name, game)
-    if game_path.exists():
+    if snapshot_exists(game_path):
         return game_path
     legacy = state_path(base_name, None)
-    if legacy.exists():
+    if snapshot_exists(legacy):
         return legacy
     return None
 
