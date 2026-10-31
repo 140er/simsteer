@@ -107,12 +107,12 @@ class AcTelemetry:
         return None if p is None else p.yaw_rate_rad_s
 
     def game_steer(self) -> float | None:
-        """AC has no separate post-filter steering, so this is the input."""
+        """Applied steering in [-1, +1]; AC exposes no separate raw input."""
         p = self._read()
         return None if p is None else p.steer
 
     def user_steer(self) -> float | None:
-        return self.game_steer()
+        return None
 
     def wheel_angle_rad(self, wheelbase_m: float = 1.0) -> float | None:
         p = self._read()

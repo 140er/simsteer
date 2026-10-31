@@ -40,7 +40,8 @@ def test_ac_synthesized_angle_and_sign(speed):
         assert isinstance(tel, Telemetry)
         expected = 0.0 if abs(speed) < 1.0 else math.atan(-0.075 * 4.0 / speed)
         assert tel.wheel_angle_rad(4.0) == pytest.approx(expected)
-        assert tel.user_steer() == tel.game_steer() == pytest.approx(0.25)
+        assert tel.game_steer() == pytest.approx(0.25)
+        assert tel.user_steer() is None
     finally:
         tel.close()
 
@@ -114,7 +115,7 @@ def test_scs_reconnects_without_a_new_reader():
         buf[0] = 1
         struct.pack_into("<Q", buf, 8, 1000)
         struct.pack_into("<f", buf, 948, 22.5)
-        struct.pack_into("<f", buf, 1920, 0.02)
+        struct.pack_into("<f", buf, 1920, 0.02 / math.tau)
         now[0] += 1.1
         assert tel.available
         assert tel.speed_mps() == pytest.approx(22.5)

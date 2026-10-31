@@ -165,7 +165,7 @@ class ForzaTelemetry:
         return None if p is None else p.steer
 
     def user_steer(self) -> float | None:
-        return self.game_steer()
+        return None
 
     def wheel_angle_rad(self, wheelbase_m: float = 1.0) -> float | None:
         p = self._read()

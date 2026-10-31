@@ -62,7 +62,7 @@ def scs_page(tick: int, v: float, yaw: float, steer: float) -> list[tuple[int, b
     return [(0, b"\x01"), (8, struct.pack("<Q", 1000 + tick * 16_666)),
             (948, struct.pack("<f", v)), (956, struct.pack("<f", steer)),
             (972, struct.pack("<f", steer)), (1200, struct.pack("<4f", rot, rot, 0.0, 0.0)),
-            (1920, struct.pack("<f", yaw))]
+            (1920, struct.pack("<f", yaw / math.tau))]
 
 
 def _gap(text: str) -> tuple[float, float]:

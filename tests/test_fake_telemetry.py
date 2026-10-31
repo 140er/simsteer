@@ -6,6 +6,7 @@ import pytest
 
 from simsteer.runtime.telemetry.ac_shm import parse_ac_physics
 from simsteer.runtime.telemetry.forza_udp import parse_forza_dash
+from simsteer.runtime.telemetry.scs_shm import ScsTelemetry
 from tools import fake_telemetry as fake
 
 
@@ -19,6 +20,15 @@ def test_fake_packets_match_the_adapter_contract():
     assert ac.packet_id == 12
     assert ac.speed_mps == pytest.approx(21.5)
     assert ac.yaw_rate_rad_s == pytest.approx(0.03)
+    page = bytearray(32768)
+    for offset, data in fake.scs_page(12, 21.5, 0.03, -0.5):
+        page[offset:offset + len(data)] = data
+    scs = ScsTelemetry(opener=lambda *_: page)
+    try:
+        assert scs.speed_mps() == pytest.approx(21.5)
+        assert scs.yaw_rate_rad_s() == pytest.approx(0.03)
+    finally:
+        scs.close()
 
 
 @pytest.mark.parametrize("extra", [

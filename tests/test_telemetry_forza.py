@@ -73,6 +73,8 @@ def test_udp_reader_keeps_one_socket_through_menus_and_packet_gaps(capsys):
             sender.sendto(packet(), dest)
             wait_for(lambda: tel.available)
             assert tel.speed_mps() == pytest.approx(23.5)
+            assert tel.game_steer() == pytest.approx(-64 / 127)
+            assert tel.user_steer() is None
             assert tel.wheel_angle_rad(4.0) == pytest.approx(math.atan(-0.12 * 4 / 23.5))
             sender.sendto(packet(race_on=False), dest)
             wait_for(lambda: not tel.available)

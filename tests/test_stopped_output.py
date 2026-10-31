@@ -12,6 +12,8 @@ from simsteer.app.settings import Settings
 from simsteer.calib.flow import CalibFlow, Step
 from simsteer.calib.steering import OutputDirection
 from simsteer.core.learners.liveparams import LiveParams
+from simsteer.runtime.telemetry.ac_shm import AcTelemetry
+from simsteer.runtime.telemetry.forza_udp import ForzaTelemetry
 from test_steering_direction import _bends, _flow, _plan, _probe_output
 
 
@@ -19,7 +21,8 @@ def run_plant(monkeypatch, tmp_path, *, polarity=-1, convention=1, inversion=1,
               fps=20, lag_s=0.25, smoothing_s=0.0, moving=False,
               interrupt=None, no_probe=False, drive_s=0.0, flip=False,
               correction=False, no_response=False, raw_lag_frames=0,
-              raw_gain=1.0, deadzone=0.0, player_axis=0.3):
+              raw_gain=1.0, deadzone=0.0, player_axis=0.3,
+              raw_adapter="independent"):
     import simsteer.runtime.loop as loop
 
     dt = 1 / fps
@@ -145,6 +148,13 @@ def run_plant(monkeypatch, tmp_path, *, polarity=-1, convention=1, inversion=1,
         available=True, speed_mps=lambda: st.speed, yaw_rate_rad_s=lambda: 0.0,
         wheel_angle_rad=lambda wb: convention * st.phi,
         game_steer=lambda: st.game, user_steer=lambda: st.raw, close=lambda: None)
+    if raw_adapter == "absent":
+        tel.user_steer = lambda: None
+    elif raw_adapter in ("ac", "forza"):
+        # Use the real adapter contract without opening a transport. Before
+        # the fix these methods alias the delayed, smoothed game response.
+        adapter = AcTelemetry if raw_adapter == "ac" else ForzaTelemetry
+        tel.user_steer = lambda: adapter.user_steer(tel)
     log = tmp_path / "plant.jsonl"
     assert loop.run(Settings(no_tuner=True, no_probe=no_probe), "ets2",
                     source=Source(), make_telemetry=lambda: tel, clock=clock,
@@ -223,6 +233,36 @@ def test_stopped_check_handles_lag_and_heavy_smoothing(monkeypatch, tmp_path, fp
                               lag_s=0.5, smoothing_s=0.8)
     assert flow.output_direction.sign == polarity
     assert st.first_verified < 31 and not any(r["engaged"] for r in rows)
+
+
+@pytest.mark.parametrize("raw_adapter", ["absent", "ac", "forza"])
+@pytest.mark.parametrize("fps", [30, 60])
+@pytest.mark.parametrize("polarity", [-1, 1])
+def test_stopped_check_handles_applied_steering_without_raw_input(
+        monkeypatch, tmp_path, raw_adapter, fps, polarity):
+    flow, st, rows = run_plant(monkeypatch, tmp_path, raw_adapter=raw_adapter,
+                              fps=fps, polarity=polarity,
+                              lag_s=0.3, smoothing_s=0.5, drive_s=5)
+    assert flow.output_direction.sign == polarity, flow.output_direction.reason
+    assert st.first_verified < 31 and st.first_engaged >= st.first_verified
+    assert not any(r["engaged"] for r in rows if r["steering_output_sign"] is None)
+    pulses = [w for w in st.writes if w[4] is None and abs(w[2]) > 0]
+    assert pulses and all(speed < 0.5 and not engaged for _, speed, _, engaged, _ in pulses)
+
+
+@pytest.mark.parametrize("raw_adapter", ["absent", "ac", "forza"])
+@pytest.mark.parametrize("interrupt", ["speed", "player"])
+def test_stopped_check_without_raw_input_aborts_on_movement_or_takeover(
+        monkeypatch, tmp_path, raw_adapter, interrupt):
+    flow, st, rows = run_plant(monkeypatch, tmp_path, raw_adapter=raw_adapter,
+                              lag_s=0.3, smoothing_s=0.5,
+                              interrupt=interrupt, player_axis=0.4)
+    assert any(value for _, _, value, _, _ in st.writes)
+    assert not any(value for t, _, value, _, _ in st.writes if t >= 19)
+    assert not flow.output_direction.ready and not flow.output_direction.active
+    assert st.pad == 0 and not any(r["engaged"] for r in rows)
+    expected = "Stop" if interrupt == "speed" else "Release steering"
+    assert expected in flow.hint(2 if interrupt == "speed" else 0)
 
 
 @pytest.mark.parametrize("fps", [10, 20, 60])
