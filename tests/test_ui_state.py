@@ -214,20 +214,23 @@ def test_restart_only_for_a_changed_game_and_reverting_hides_it(monkeypatch):
     monkeypatch.setattr(os, "_exit", lambda code: None)
     tuner._save_and_restart()
     assert not calls
+    assert tuner.take_restart_request() is None
     tuner._on_game_change(next(k for k, v in tuner._game_choices.items() if v == "ets2"))
     tuner._save_and_restart()
     assert not calls
     assert Settings.load().game == "ets2"
     tuner._on_game_change(next(k for k, v in tuner._game_choices.items() if v == "ats"))
     tuner._save_and_restart()
-    assert len(calls) == 1
+    assert not calls
+    assert tuner.take_restart_request()[-2:] == ["--game", "ats"]
     tuner._on_game_change(next(k for k, v in tuner._game_choices.items() if v == "ets2"))
     tuner._save_and_restart()
-    assert len(calls) == 1
+    assert tuner.take_restart_request() is None
     # Normal speed and ACC changes never request a restart.
     tuner._set_acc(False)
     tuner._save_and_restart()
-    assert len(calls) == 1
+    assert tuner.take_restart_request() is None
+    assert not calls
 
 
 def test_hud_bar_grows_for_calibration_and_developer_only():
@@ -275,11 +278,12 @@ def test_restart_relaunches_selected_game_without_losing_module(monkeypatch, fro
     assert not calls
     tuner._on_game_change(next(k for k, v in tuner._game_choices.items() if v == "ats"))
     tuner._save_and_restart()
-    assert calls[-1] == 0
-    assert calls[0][-2:] == ["--game", "ats"]
-    assert "--no-gamepad" in calls[0]
+    assert not calls
+    args = tuner.take_restart_request()
+    assert args[-2:] == ["--game", "ats"]
+    assert "--no-gamepad" in args
     if not frozen:
-        assert calls[0][1:3] == ["-m", "simsteer"]
+        assert args[1:3] == ["-m", "simsteer"]
 
 
 def test_legacy_completion_banner_is_brief(monkeypatch):

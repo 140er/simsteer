@@ -17,6 +17,8 @@ from __future__ import annotations
 import ctypes
 import time
 
+from simsteer.core.finite import NonFiniteError, require_finite
+
 
 class GamepadError(RuntimeError):
     pass
@@ -118,6 +120,12 @@ class Gamepad:
         """x in [-1, 1]. No-op when disengaged, unless `force=True` —
         used by manual override so the tuner steer slider drives the
         pad even when the AI is disengaged."""
+        x = float(x)
+        try:
+            require_finite("gamepad", steering=x)
+        except NonFiniteError:
+            self.disengage()
+            raise
         if not self._engaged and not force:
             return
         x = max(-1.0, min(1.0, float(x)))
@@ -130,6 +138,12 @@ class Gamepad:
         No-op when disengaged, unless `force=True` — used by manual
         override so the tuner throttle/brake sliders drive the pad even
         when the AI is disengaged."""
+        throttle, brake = float(throttle), float(brake)
+        try:
+            require_finite("gamepad", throttle=throttle, brake=brake)
+        except NonFiniteError:
+            self.disengage()
+            raise
         if not self._engaged and not force:
             return
         throttle = max(0.0, min(1.0, float(throttle)))
