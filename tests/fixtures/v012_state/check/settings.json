@@ -1,0 +1,16 @@
+{
+  "game": "ets2",
+  "device": "gamepad",
+  "passive_fit": false,
+  "no_probe": false,
+  "force_engage": false,
+  "forza_port": 7777,
+  "vjoy_device": 1,
+  "max_width": 1280,
+  "no_tuner": false,
+  "no_gamepad": false,
+  "hud_mode": "user",
+  "disabled_hotkeys": [
+    "hud"
+  ]
+}

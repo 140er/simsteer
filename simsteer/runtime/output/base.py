@@ -58,6 +58,18 @@ class DeviceManager(OutputSafety):
         return self._kind
 
     @property
+    def binding_identity(self) -> dict:
+        """Identity and axis semantics of the active virtual output."""
+        return {
+            "kind": self._kind,
+            "backend": "vjoy" if self.is_wheel else "vigem",
+            "index": self._vjoy_id if self.is_wheel else getattr(self._device, "_xinput_index", None),
+            "steering": "x" if self.is_wheel else "left-stick-x",
+            "throttle": "y" if self.is_wheel else "right-trigger",
+            "brake": "z" if self.is_wheel else "left-trigger",
+        }
+
+    @property
     def is_gamepad(self) -> bool:
         return self._kind == "gamepad"
 

@@ -58,8 +58,8 @@ class Calibration:
       yaw_deg   > 0  =>  camera nose pitched LEFT
     Roll is forced to 0 just like openpilot does.
     """
-    image_w: int = 3440
-    image_h: int = 1440
+    image_w: int = 1920
+    image_h: int = 1080
     # HFOV of the captured frame (your in-game FOV setting). Drives
     # the captured frame's K matrix in `pilot.warp.camera_intrinsics`.
     fov_h_deg: float = 90.0

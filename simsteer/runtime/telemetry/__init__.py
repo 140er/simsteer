@@ -34,6 +34,10 @@ class Telemetry(Protocol):
     Every reader returns `None` from the value methods when the datum
     is momentarily unreadable (plugin handshake not complete, stale
     map), so the loop can fall back to a default rather than crash.
+
+    Readers may also expose `vehicle_id() -> str | None` for binding
+    saved calibration to a vehicle. Readers without identity support omit
+    the vehicle field; capable readers may return None while starting.
     """
 
     @property
@@ -92,6 +96,13 @@ class NoTelemetry:
 
     def close(self) -> None:
         pass
+
+
+def vehicle_context(telemetry) -> dict:
+    reader = getattr(telemetry, "vehicle_id", None)
+    if reader is None or not getattr(telemetry, "vehicle_identity_supported", True):
+        return {}
+    return {"vehicle": reader()}
 
 
 def _scs_shm() -> Telemetry:

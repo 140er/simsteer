@@ -1,0 +1,18 @@
+{
+  "image_w": 1920,
+  "image_h": 1080,
+  "fov_h_deg": 75.0,
+  "height_m": 1.200000000000002,
+  "pitch_deg": 0.5729386976834846,
+  "yaw_deg": 0.5729386976834846,
+  "lateral_sign": -1.0,
+  "cx_frac": 0.5,
+  "cy_frac": 0.5,
+  "crop_top_pct": 0.0,
+  "crop_bottom_pct": 0.0,
+  "simple_warp": true,
+  "simple_warp_version": 2,
+  "model_narrow_fov_h_deg": 52.0,
+  "model_wide_fov_h_deg": 120.0,
+  "synthesize_wider_fov": false
+}

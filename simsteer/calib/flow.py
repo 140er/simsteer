@@ -29,7 +29,6 @@ change.
 from __future__ import annotations
 
 import json
-import math
 import threading
 from collections import Counter, deque
 from collections.abc import Callable
@@ -41,19 +40,23 @@ from simsteer.app import audio
 from simsteer.calib.fov_source import FovReader
 from simsteer.calib.score import CheckPolicy, CheckStats, Verdict, certified_result, evaluate
 from simsteer.calib.steering import OutputDirection, SteeringDirection
-from simsteer.core.calibration import SIMPLE_WARP_VERSION
+from simsteer.core.calibration import Calibration, SIMPLE_WARP_VERSION
 from simsteer.core.learners.livecalib import (
     BLOCK_SIZE, INPUTS_NEEDED, CERTAIN_BLOCKS_NEEDED, MIN_SPEED_FILTER_MPS, CalStatus,
-    CAMERA_GUIDANCE, CameraBlockedReason,
+    CAMERA_GUIDANCE, CameraBlockedReason, blocked_counts_from_state,
 )
 from simsteer.core.learners.liveparams import TRUSTED_MIN_SAMPLES
 from simsteer.core.model_identity import pinned_model_identity
 from simsteer.paths import state_path
+from simsteer.state import (
+    atomic_save_json, bounded_int, bounded_number, dataclass_values, read_json_object, state_warning,
+)
 from simsteer.runtime.fov import (
-    CANDIDATE_OFFSETS, CANDIDATE_SAMPLES, ESTIMATE_SAMPLES, FovSolver,
+    CANDIDATE_OFFSETS, CANDIDATE_SAMPLES, ESTIMATE_SAMPLES, FOV_MIN_DEG, FOV_MAX_DEG,
+    MAX_SHIFTS, FovSolver,
 )
 
-CALIB_VERSION = 5
+CALIB_VERSION = 6
 # Perspective calibration continues to adapt. Compare to the certified pose,
 # not the previous frame, so accumulated drift still revokes the certificate.
 POSE_ANGLE_TOLERANCE_DEG = 0.5
@@ -62,9 +65,19 @@ FULL_CHECK_LOG_INTERVAL_S = 1.0
 
 
 def contexts_match(saved: dict | None, current: dict) -> bool:
-    if not saved:
+    if not isinstance(saved, dict) or not saved:
         return False
     old_camera, camera = saved.get("camera", {}), current.get("camera", {})
+    if not isinstance(old_camera, dict) or not isinstance(camera, dict):
+        return False
+    # Readers without a usable identity omit it. Earlier snapshots used
+    # null for this same limitation; that alone is not a context change.
+    def normalized(context):
+        controls = dict(context.get("controls", {}))
+        if controls.get("vehicle") is None:
+            controls.pop("vehicle", None)
+        return {**context, "controls": controls}
+    saved, current = normalized(saved), normalized(current)
     if old_camera.get("simple_warp", True) or camera.get("simple_warp", True):
         return saved == current
     old_camera, camera = old_camera.copy(), camera.copy()
@@ -353,11 +366,17 @@ class CalibFlow:
 
     def confirm_check(self) -> None:
         """An explicit engage request acknowledges an invalidated check."""
+        if self._vehicle_pending():
+            return
+        if (self.step in (Step.CHECK, Step.DONE)
+                and not contexts_match(self._check_context, self._context())):
+            self._invalidate_check("calibration changed")
         if self.step is Step.CHECK:
             self._check_requested = True
 
     def _invalidate_check(self, reason: str) -> None:
         old_controls = (self._check_context or {}).get("controls", {})
+        old_controls = old_controls if isinstance(old_controls, dict) else {}
         device_changed = (old_controls.get("device_id") is not None
                           and old_controls["device_id"] != self._context_provider().get("device_id"))
         self.redo_note = "Check again: " + reason
@@ -372,6 +391,22 @@ class CalibFlow:
             self._enter(Step.STEERING)
         else:
             self._enter(Step.CHECK)
+
+    def _vehicle_pending(self) -> bool:
+        """Keep a known-vehicle certificate while its reader is starting."""
+        saved = self._check_context or {}
+        old_controls = saved.get("controls", {})
+        old_controls = old_controls if isinstance(old_controls, dict) else {}
+        old_vehicle = old_controls.get("vehicle")
+        controls = self._context_provider()
+        return (old_vehicle is not None and "vehicle" in controls
+                and controls["vehicle"] is None)
+
+    def _context_matches_pending(self) -> bool:
+        current = self._context()
+        if self._vehicle_pending():
+            current["controls"]["vehicle"] = self._check_context["controls"]["vehicle"]
+        return contexts_match(self._check_context, current)
 
     @property
     def camera_learning(self) -> bool:
@@ -497,6 +532,11 @@ class CalibFlow:
         """Why engaging is not allowed yet, or "" when it is."""
         if self.step is Step.FAILED:
             return "calibration failed: R restarts"
+        if self._vehicle_pending():
+            return "Waiting for vehicle identity"
+        if (self.step in (Step.CHECK, Step.DONE)
+                and not contexts_match(self._check_context, self._context())):
+            return "Check again: press INSERT"
         if not self._check_requested:
             return "Check again: press INSERT"
         if self.step is Step.FOV:
@@ -521,9 +561,12 @@ class CalibFlow:
             self._invalidate_check("camera calibration changed")
             self._enter(Step.CAMERA)
             return
-        if self.step in (Step.CHECK, Step.DONE) and not contexts_match(self._check_context, self._context()):
-            self._invalidate_check("calibration changed")
-            return
+        if self.step in (Step.CHECK, Step.DONE):
+            if not self._context_matches_pending():
+                self._invalidate_check("calibration changed")
+                return
+            if self._vehicle_pending():
+                return
         if abs(self.calib.fov_h_deg - self._fov_reference) > 0.05:
             # Set by hand (tuner, keys): carry the camera history over, and
             # during the FOV step take it as the player's answer.
@@ -1023,6 +1066,10 @@ class CalibFlow:
     # ----- persistence -----
 
     def to_dict(self) -> dict:
+        camera = self.camera_diagnostics()
+        # Omit inactive deadlines in new snapshots; older saves use null.
+        if camera["discard_no_progress_s"] is None:
+            del camera["discard_no_progress_s"]
         return {
             "version": CALIB_VERSION,
             "simple_warp_version": self.calib.simple_warp_version,
@@ -1033,7 +1080,7 @@ class CalibFlow:
             "result": self.result,
             "legacy_result": self.legacy_result,
             "redo_note": self.redo_note,
-            "camera": self.camera_diagnostics(),
+            "camera": camera,
             "fov": {"solver": self.fov_solver.to_dict(),
                     "proposal": self.fov_proposal,
                     "source": self.fov_source},
@@ -1053,21 +1100,117 @@ class CalibFlow:
         self._last_save = self._now
         if not self._persist:
             return
-        try:
-            flow_path(self.game, self.device).write_text(
-                json.dumps(self.to_dict(), indent=2), encoding="utf-8")
-        except OSError:
-            pass
+        atomic_save_json(flow_path(self.game, self.device), self.to_dict())
 
     def _load(self) -> bool:
         if not self._persist:
             return False
         p = flow_path(self.game, self.device)
         try:
-            d = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            d = read_json_object(p)
+            return self._restore(d)
+        except FileNotFoundError:
             return False
-        if (d.get("version") not in (2, 3, 4, CALIB_VERSION) or d.get("game") != self.game
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            state_warning(p, "unreadable; using defaults")
+            self._reset_state()
+            return False
+
+    @staticmethod
+    def validate_snapshot(d: dict) -> None:
+        bounded_int(d.get("version"), 2, CALIB_VERSION)
+        for name in ("game", "device", "step"):
+            if not isinstance(d.get(name), str):
+                raise ValueError("invalid calibration metadata")
+        Step(d["step"])
+        bounded_int(d.get("attempts", 0))
+        for name in ("result", "legacy_result", "check_context", "check"):
+            if d.get(name) is not None and not isinstance(d[name], dict):
+                raise ValueError("invalid calibration evidence")
+        context = d.get("check_context") or {}
+        for name in ("controls", "camera"):
+            if name in context and not isinstance(context[name], dict):
+                raise ValueError("invalid calibration context")
+        if "camera" in d:
+            camera = d["camera"]
+            if not isinstance(camera, dict):
+                raise ValueError("invalid camera progress")
+            for name in ("progress_mark", "samples_seen", "reset_seen", "blocks_seen",
+                         "jumps_seen", "discard_jumps"):
+                bounded_int(camera.get(name, 0))
+            if "no_progress_s" in camera:
+                bounded_number(camera["no_progress_s"], 0, 1e12)
+            if camera.get("discard_no_progress_s") is not None:
+                bounded_number(camera["discard_no_progress_s"], 0, 1e12)
+            blocked_counts_from_state(camera.get("no_progress_counts", {}))
+        if "check_requested" in d and type(d["check_requested"]) is not bool:
+            raise ValueError("invalid Check request")
+        for name in ("fov", "steering"):
+            if name in d and not isinstance(d[name], dict):
+                raise ValueError("invalid calibration progress")
+        fov = d.get("fov", {})
+        if fov.get("proposal") is not None:
+            bounded_number(fov["proposal"], FOV_MIN_DEG, FOV_MAX_DEG)
+        if not isinstance(fov.get("source", ""), str):
+            raise ValueError("invalid FOV source")
+        solver = fov.get("solver", {})
+        if not isinstance(solver, dict):
+            raise ValueError("invalid FOV evidence")
+        # Untimed evidence is discarded by load_dict. Current evidence also
+        # passes these bounds during legacy import, before it can be copied.
+        if solver.get("time_base_version") == 1:
+            bounded_int(solver["time_base_version"], 1, 1)
+            if solver.get("stage", "estimate") not in ("estimate", "bracket"):
+                raise ValueError("invalid FOV stage")
+            bounded_int(solver.get("tick", 0))
+            bounded_int(solver.get("shifts", 0), 0, MAX_SHIFTS)
+            for name in ("applied_fov", "estimate", "result"):
+                if solver.get(name) is not None:
+                    angle = bounded_number(solver[name], 0, 180)
+                    if not 0 < angle < 180:
+                        raise ValueError("invalid saved FOV")
+            candidates, ratios = solver.get("candidates", []), solver.get("ratios", [])
+            candidate_ratios = solver.get("cand_ratios", [])
+            if (not all(isinstance(v, list) for v in (candidates, ratios, candidate_ratios))
+                    or len(candidates) not in (0, len(CANDIDATE_OFFSETS))
+                    or len(candidate_ratios) != len(candidates)
+                    or (solver.get("stage") == "bracket" and not candidates)):
+                raise ValueError("invalid FOV evidence shape")
+            for candidate in candidates:
+                bounded_number(candidate, FOV_MIN_DEG, FOV_MAX_DEG)
+            for samples in (ratios, *candidate_ratios):
+                if not isinstance(samples, list):
+                    raise ValueError("invalid FOV ratios")
+                bounded_int(len(samples))
+                for ratio in samples:
+                    bounded_number(ratio, 0, 1e12)
+            geometry = solver.get("geometry")
+            if geometry is not None:
+                if (not isinstance(geometry, (list, tuple)) or len(geometry) != 9
+                        or not isinstance(geometry[0], (list, tuple)) or len(geometry[0]) != 2):
+                    raise ValueError("invalid FOV geometry")
+                for size in geometry[0]:
+                    bounded_int(size, 1, 32768)
+                names = ("image_w", "image_h", "fov_h_deg", "cx_frac", "cy_frac",
+                         "crop_top_pct", "crop_bottom_pct", "simple_warp")
+                values = dataclass_values(Calibration, dict(zip(names, geometry[1:])))
+                Calibration(**values).validate()
+        for name in ("prompt", "lane_changes"):
+            bounded_int(d.get("steering", {}).get(name, 0))
+        for name in ("prompt_s", "regime_s"):
+            bounded_number(d.get("steering", {}).get(name, 0), 0, 1e12)
+        if not isinstance(d.get("redo_note", ""), str):
+            raise ValueError("invalid calibration message")
+        if d.get("check_model") is not None:
+            model = d["check_model"]
+            if not isinstance(model, list) or len(model) != 3:
+                raise ValueError("invalid frozen fit")
+            for coefficient in model:
+                bounded_number(coefficient, -1e12, 1e12)
+
+    def _restore(self, d: dict) -> bool:
+        self.validate_snapshot(d)
+        if (d.get("version") not in (2, 3, 4, 5, CALIB_VERSION) or d.get("game") != self.game
                 or d.get("device") != self.device):
             return False
         try:
@@ -1082,12 +1225,6 @@ class CalibFlow:
             discard_s = camera.get("discard_no_progress_s")
             if discard_s is not None:
                 discard_s = float(discard_s)
-                if not math.isfinite(discard_s) or discard_s < 0:
-                    return False
-            if not math.isfinite(elapsed) or elapsed < 0 or mark < 0 or any(v < 0 for v in counts.values()):
-                return False
-            if any(v < 0 for v in seen):
-                return False
             self._camera_no_progress_s = elapsed
             self._camera_progress_mark = mark
             self._camera_blocked_counts = counts
@@ -1114,8 +1251,10 @@ class CalibFlow:
             self._check_context = d.get("check_context")
             self._check_model = d.get("check_model")
             self._check_requested = bool(d.get("check_requested", True))
+            if self.result is not None and not isinstance(self.result, dict):
+                raise ValueError("invalid Check result")
         except (KeyError, ValueError, TypeError, OverflowError, AttributeError):
-            return False
+            raise ValueError("invalid calibration progress") from None
         if (self.calib.simple_warp
                 and (self.calib.simple_warp_version != SIMPLE_WARP_VERSION
                      or d.get("simple_warp_version", 1) != SIMPLE_WARP_VERSION)):
@@ -1124,7 +1263,8 @@ class CalibFlow:
         if self.step is Step.FOV and self.fov_proposal is None:
             self._config_pending = self._fov_config is not None
         if self.step in (Step.CHECK, Step.DONE):
-            if (d.get("version") != CALIB_VERSION or not contexts_match(self._check_context, self._context())
+            if (d.get("version") != CALIB_VERSION
+                    or not self._context_matches_pending()
                     or self._check_model is None
                     or (self.step is Step.DONE
                         and not certified_result(self.result, self._check_context))):

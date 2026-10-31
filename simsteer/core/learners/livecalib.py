@@ -59,7 +59,6 @@ Algorithm and Camera certification:
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import time
@@ -73,6 +72,10 @@ import numpy as np
 from simsteer.core.finite import NonFiniteError, require_finite
 
 from simsteer.paths import state_path
+from simsteer.state import (
+    atomic_save_json, bounded_int, bounded_number, delete_state,
+    read_json_object, snapshot_exists, state_warning,
+)
 from simsteer.core.warp import euler_from_rot, rot_from_euler
 
 if TYPE_CHECKING:
@@ -203,6 +206,13 @@ _REJECTION_COUNTERS = {
     CameraBlockedReason.YAW_BOUNDS: "rej_yaw",
     CameraBlockedReason.BLOCK_JUMP: "rej_block_jump",
 }
+
+
+def blocked_counts_from_state(value) -> Counter[CameraBlockedReason]:
+    if not isinstance(value, dict):
+        raise ValueError("invalid camera rejection counts")
+    return Counter({CameraBlockedReason(key): bounded_int(count)
+                    for key, count in value.items()})
 
 
 def _wrap_rotation_composition(current_rpy_rad: tuple[float, float, float],
@@ -706,8 +716,7 @@ class LiveCalib:
         if self._game is not None:
             try:
                 p = state_path("livecalib_state", self._game)
-                if p.exists():
-                    p.unlink()
+                delete_state(p)
             except OSError:
                 pass
 
@@ -788,59 +797,100 @@ class LiveCalib:
                        bootstrap_height=self._bootstrap_height_sum, bootstrap_n=self._bootstrap_height_n,
                        reset_generation=self.reset_generation)
 
+    def state_dict(self) -> dict:
+        self.validate_state()
+        return {
+            "certainty_state_version": CERTAINTY_STATE_VERSION,
+            "bootstrap_samples": self.bootstrap_samples,
+            "bootstrap_rpy_sum": self._bootstrap_rpy_sum.tolist(),
+            "bootstrap_height_sum": self._bootstrap_height_sum,
+            "bootstrap_height_n": self._bootstrap_height_n,
+            "reset_generation": self.reset_generation,
+            "rpys": [[float(x) for x in r] for r in self._rpys],
+            "heights": [float(h) for h in self._heights],
+            "wide_sum": [float(x) for x in self._wide_sum],
+            "wide_n": int(self._wide_n),
+            "wide_from_device_estimate": (
+                [float(x) for x in self.wide_from_device_estimate]
+                if self.wide_from_device_estimate is not None else None),
+            "block_rpy_sum": [float(x) for x in self._block_rpy_sum],
+            "block_height_sum": float(self._block_height_sum),
+            "block_n": int(self._block_n),
+            "samples": int(self.samples),
+            "rejected": int(self.rejected),
+            "blocked_counts": dict(self.blocked_counts),
+            "last_rejection_reason": self.last_rejection_reason,
+            "cal_status": int(self.cal_status),
+        }
+
     def save_state(self, game: str) -> None:
-        """Serialize the committed block history (and the in-flight block
-        accumulator) so a Quit/relaunch resumes calibration where it left
-        off. Called on every block commit; failures are swallowed."""
         try:
-            self.validate_state()
-            payload = {
-                "certainty_state_version": CERTAINTY_STATE_VERSION,
-                "bootstrap_samples": self.bootstrap_samples,
-                "bootstrap_rpy_sum": self._bootstrap_rpy_sum.tolist(),
-                "bootstrap_height_sum": self._bootstrap_height_sum,
-                "bootstrap_height_n": self._bootstrap_height_n,
-                "reset_generation": self.reset_generation,
-                "rpys": [[float(x) for x in r] for r in self._rpys],
-                "heights": [float(h) for h in self._heights],
-                "wide_sum": [float(x) for x in self._wide_sum],
-                "wide_n": int(self._wide_n),
-                "wide_from_device_estimate": (
-                    [float(x) for x in self.wide_from_device_estimate]
-                    if self.wide_from_device_estimate is not None else None),
-                "block_rpy_sum": [float(x) for x in self._block_rpy_sum],
-                "block_height_sum": float(self._block_height_sum),
-                "block_n": int(self._block_n),
-                "samples": int(self.samples),
-                "rejected": int(self.rejected),
-                "blocked_counts": dict(self.blocked_counts),
-                "last_rejection_reason": self.last_rejection_reason,
-                "cal_status": int(self.cal_status),
-            }
-            state_path("livecalib_state", game).write_text(
-                json.dumps(payload, indent=2, allow_nan=False))
+            atomic_save_json(state_path("livecalib_state", game), self.state_dict())
             self._last_diagnostic_save = self.clock()
         except NonFiniteError as exc:
             logging.getLogger(__name__).warning("Not saving non-finite state: %s", exc)
         except OSError:
             pass
 
-    def load_state(self, game: str) -> None:
+    def load_state(self, game: str, path=None) -> bool:
         """Restore the block history saved by `save_state`. No-op if no
         state file exists (fresh user / fresh game)."""
-        p = state_path("livecalib_state", game)
-        if not p.exists():
-            return
+        p = path if path is not None else state_path("livecalib_state", game)
+        if not snapshot_exists(p):
+            return False
         try:
-            data = json.loads(p.read_text())
+            # Provenance is checked first: older histories are ignored
+            # silently, including an invalid version number. Current state
+            # must pass both finite and typed checks before adoption.
+            data = read_json_object(p, allow_non_finite=True)
+            if (type(data.get("certainty_state_version")) is not int
+                    or data["certainty_state_version"] != CERTAINTY_STATE_VERSION):
+                return False
             require_finite("livecalib.load", state=data)
-        except (json.JSONDecodeError, OSError, NonFiniteError):
-            return
+            bootstrap_limit = CERTAINTY_BOOTSTRAP_BLOCKS * BLOCK_SIZE
+            for name in ("wide_n", "block_n", "samples", "rejected",
+                         "bootstrap_samples", "bootstrap_height_n", "reset_generation"):
+                if name in data:
+                    maximum = {"block_n": BLOCK_SIZE - 1,
+                               "bootstrap_samples": bootstrap_limit,
+                               "bootstrap_height_n": bootstrap_limit}.get(name, (1 << 31) - 1)
+                    data[name] = bounded_int(data[name], maximum=maximum)
+            if "cal_status" in data:
+                bounded_int(data["cal_status"], maximum=int(CalStatus.INVALID))
+            for name in ("rpys", "heights", "wide_sum", "wide_from_device_estimate",
+                         "block_rpy_sum", "bootstrap_rpy_sum"):
+                value = data.get(name)
+                if value is None and name == "wide_from_device_estimate":
+                    continue
+                if name not in data:
+                    continue
+                if not isinstance(value, list) or len(value) > INPUTS_WANTED:
+                    raise ValueError("invalid camera history")
+                for item in value:
+                    if name == "rpys":
+                        if not isinstance(item, list) or len(item) != 3:
+                            raise ValueError("invalid camera pose")
+                        for angle in item:
+                            bounded_number(angle, -math.pi, math.pi)
+                    else:
+                        if name == "heights":
+                            bounded_number(item, 0.0001, 100)
+                        else:
+                            limit = math.pi * ({"wide_sum": (1 << 31) - 1,
+                                                "block_rpy_sum": BLOCK_SIZE,
+                                                "bootstrap_rpy_sum": bootstrap_limit}.get(name, 1))
+                            bounded_number(item, -limit, limit)
+            if "block_height_sum" in data:
+                bounded_number(data["block_height_sum"], 0, 100 * BLOCK_SIZE)
+            if "bootstrap_height_sum" in data:
+                bounded_number(data["bootstrap_height_sum"], 0, 100 * bootstrap_limit)
+            blocked_counts = blocked_counts_from_state(data.get("blocked_counts", {}))
+            reason = data.get("last_rejection_reason")
+            reason = CameraBlockedReason(reason) if reason is not None else None
+        except (OSError, ValueError, TypeError, OverflowError):
+            state_warning(p, "unreadable; using defaults")
+            return False
         try:
-            # Old histories have no certainty provenance and cannot certify a
-            # pose. The flow's existing Camera invalidation requires a new Check.
-            if data.get("certainty_state_version") != CERTAINTY_STATE_VERSION:
-                return
             rpys = [np.asarray(r, dtype=np.float64) for r in data.get("rpys", [])]
             heights = [float(h) for h in data.get("heights", [])]
             wide = np.asarray(data.get("wide_sum", [0., 0., 0.]), dtype=np.float64)
@@ -861,21 +911,16 @@ class LiveCalib:
             if (not 0 <= bootstrap_samples <= CERTAINTY_BOOTSTRAP_BLOCKS * BLOCK_SIZE
                     or not 0 <= bootstrap_n <= bootstrap_samples or generation < 0
                     or bootstrap_rpy.shape != (3,)):
-                return
-            blocked_counts = Counter({CameraBlockedReason(k): int(v)
-                                      for k, v in data.get("blocked_counts", {}).items()})
-            reason = data.get("last_rejection_reason")
-            reason = CameraBlockedReason(reason) if reason is not None else None
-            if any(v < 0 for v in blocked_counts.values()):
-                return
+                raise ValueError("invalid bootstrap history")
             require_finite("livecalib.load", rpys=rpys, heights=heights, wide=wide,
                            estimate=estimate, block=block, height=height)
             if any(r.shape != (3,) for r in [*rpys, wide, block]):
-                return
+                raise ValueError("invalid camera vectors")
             if estimate is not None and estimate.shape != (3,):
-                return
+                raise ValueError("invalid wide camera vector")
         except (ValueError, TypeError, OverflowError, AttributeError):
-            return
+            state_warning(p, "unreadable; using defaults")
+            return False
         # Validate the whole snapshot before adopting any of it.
         self._rpys = deque(rpys, maxlen=INPUTS_WANTED)
         self._heights = deque(heights, maxlen=INPUTS_WANTED)
@@ -893,3 +938,4 @@ class LiveCalib:
             setattr(self, name, sum(count for gate, count in blocked_counts.items()
                                    if _REJECTION_COUNTERS.get(gate) == name))
         self._refresh_cal_status()
+        return True
