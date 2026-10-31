@@ -21,7 +21,7 @@ from simsteer.core.learners.liveparams import LiveParams, TRUSTED_MIN_SAMPLES
 
 def _flow(lp, **kwargs):
     camera = SimpleNamespace(cal_status=CalStatus.CALIBRATED,
-                             blocks=3, _block_n=0)
+                             blocks=3, _block_n=0, samples=300)
     flow = CalibFlow("ets2", lp.device_kind, live_calib=camera,
                      live_params=lp, calib=Calibration(fov_h_deg=75.0),
                      **kwargs)

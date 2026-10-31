@@ -283,8 +283,11 @@ replacement. Driving sessions send saves to one background writer and
 flush the final snapshots after output stops.
 
 On the first live start, an empty data directory imports user-owned
-settings, calibration and learned state from the old source/app directory.
-Each file passes the normal guarded loader. The import records completion,
+settings, calibration, learned state and first-drive completion flags from
+the old source/app directory. JSON state passes the normal guarded loaders.
+Unusable calibration and learner files stay at the source so startup can
+use the game profile's seeds. Settings retain valid fields when another
+field is invalid. The import records completion,
 keeps the original files and preserves existing per-user state. An
 interrupted import resumes without overwriting completed files.
 

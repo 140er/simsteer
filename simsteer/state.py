@@ -34,18 +34,18 @@ def take_state_warnings(directory: Path) -> str:
         return "; ".join(_notices.pop(p) for p in paths)
 
 
-def _write_snapshot(path: Path, payload: str | None) -> bool:
+def _write_snapshot(path: Path, payload: str | bytes | None) -> bool:
     temporary = None
     try:
         if payload is None:
             path.unlink(missing_ok=True)
             return True
         path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+        with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent,
                                          prefix=f".{path.name}.", suffix=".tmp",
                                          delete=False) as stream:
             temporary = Path(stream.name)
-            stream.write(payload)
+            stream.write(payload.encode("utf-8") if isinstance(payload, str) else payload)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
@@ -64,7 +64,7 @@ def _write_snapshot(path: Path, payload: str | None) -> bool:
 class _SnapshotWriter:
     def __init__(self):
         self.condition = threading.Condition()
-        self.pending: dict[Path, str | None] = {}
+        self.pending: dict[Path, str | bytes | None] = {}
         self.active: Path | None = None
         self.closing = False
         self.thread = threading.Thread(target=self._run, name="state-writer", daemon=True)
@@ -164,6 +164,11 @@ def delete_state(path: Path) -> None:
     _submit_snapshot(path, None)
 
 
+def atomic_save_bytes(path: Path, value: bytes) -> bool:
+    """Commit a flag through the same ordered, atomic writer as JSON state."""
+    return _submit_snapshot(path, value)
+
+
 def flush_state(path: Path | None = None) -> None:
     with _writer_lock:
         writer = _writer
@@ -192,13 +197,16 @@ def _reject_constant(value):
     raise ValueError("non-finite JSON number")
 
 
-def read_json_object(path: Path) -> dict:
+def read_json_object(path: Path, *, allow_non_finite: bool = False) -> dict:
+    """Read state; provenance-aware loaders may defer finite validation."""
     flush_state(path)
     _clean_stale_temps(path)
-    raw = json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_constant)
+    raw = json.loads(path.read_text(encoding="utf-8"),
+                     parse_constant=float if allow_non_finite else _reject_constant)
     if not isinstance(raw, dict):
         raise ValueError("expected a JSON object")
-    _finite_json(raw)
+    if not allow_non_finite:
+        _finite_json(raw)
     return raw
 
 

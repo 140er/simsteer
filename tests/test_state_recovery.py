@@ -165,8 +165,8 @@ def test_import_validates_corrupt_legacy_state(tmp_path, caplog):
     (source / "liveparams_ets2_gamepad.json").write_text('{"a": 1, "samples": 1e20}')
     (source / "calibration_ets2.json").write_text('{"unfinished":')
     assert import_legacy_state(source, target)
-    assert read_json_object(target / "liveparams_ets2_gamepad.json")["samples"] == 0
-    assert read_json_object(target / "calibration_ets2.json")["fov_h_deg"] == 90.0
+    assert not (target / "liveparams_ets2_gamepad.json").exists()
+    assert not (target / "calibration_ets2.json").exists()
     assert "using defaults" in caplog.text.lower()
 
 

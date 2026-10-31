@@ -576,7 +576,7 @@ def test_hud_panel_shows_step_percent_and_eta():
         d.frames(1)
     lc.blocks, lc._block_n = 1, 89
     assert flow.panel(22.0).title.startswith("CALIBRATE 2/4 Camera 63%")
-    assert flow.panel(3.0).hint == "Drive faster than 25 km/h"
+    assert flow.panel(3.0).hint == "Camera SPEED: Drive faster than 25 km/h."
 
     lc.converge()
     d.frames(1)
@@ -618,6 +618,7 @@ def test_livecalib_rescale_matches_the_new_fov():
         lc._heights.append(1.35)
     lc._block_rpy_sum = np.radians([0.0, 2.42, 1.71]) * 10
     lc._block_n = 10
+    lc.bootstrap_samples = INPUTS_NEEDED * BLOCK_SIZE + 10
     lc._refresh_cal_status()
     lc.rescale_for_fov(cal, 90.0, 71.0)
     assert lc.pitch_estimate == pytest.approx(1.73, abs=0.01)

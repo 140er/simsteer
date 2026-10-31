@@ -251,6 +251,9 @@ class Tuner:
             self._set_developer,
             inline=True,
         )
+        self._camera_status = ctk.CTkLabel(
+            root, text="", anchor="w", text_color=INK, font=ctk.CTkFont(size=12)
+        )
         self._refresh()
         root.after(POLL_MS, self._poll)
 
@@ -718,6 +721,17 @@ class Tuner:
             text="Calibrated" if calibrated else panel.step_name if panel else "Not calibrated",
             text_color=GREEN if calibrated else MUTED,
         )
+        camera_status = bool(panel and panel.camera_outcome)
+        if camera_status:
+            text = f"{panel.step_name}: {panel.instruction}  {panel.key_prompt}".strip()
+            self._camera_status.configure(text=text, text_color=RED if panel.tone == "failed" else INK)
+            self._camera_status.pack(side="bottom", fill="x", padx=12, pady=(0, 8))
+        else:
+            self._camera_status.pack_forget()
+        height = WINDOW_H + (28 if camera_status else 0)
+        if self._root.winfo_height() != height:
+            width = self._root.winfo_width()
+            self._root.geometry(f"{width if width > 1 else WINDOW_W}x{height}")
         if self._live is not None:
             fit = ""
             if self.live_params:

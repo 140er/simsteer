@@ -10,21 +10,27 @@ from pathlib import Path
 
 from simsteer.paths import bundle_dir, data_dir, is_frozen
 from simsteer.state import (
-    atomic_save_json, flush_state, read_json_object, snapshot_exists,
+    atomic_save_bytes, atomic_save_json, flush_state, read_json_object, snapshot_exists,
     state_warning, take_state_warnings,
 )
 
 IMPORT_MARKER = "state-import.json"
 _STATE_NAME = re.compile(
-    r"(?:settings|(?:calibration|controller|liveparams|livecalib_state|calibflow)"
-    r"(?:_[a-zA-Z0-9_-]+)?)\.json\Z")
+    r"(?:(?:settings|(?:calibration|controller|liveparams|livecalib_state|calibflow)"
+    r"(?:_[a-zA-Z0-9_-]+)?)\.json|first_drive_done_[a-zA-Z0-9_-]+\.flag)\Z")
 
 
 def _files(directory: Path) -> list[Path]:
-    return sorted(p for p in directory.glob("*.json") if _STATE_NAME.fullmatch(p.name))
+    return sorted(p for p in directory.glob("*") if p.is_file() and _STATE_NAME.fullmatch(p.name))
 
 
-def _normalized(source: Path) -> dict | None:
+def _normalized(source: Path) -> dict | bytes | None:
+    if source.suffix == ".flag":
+        try:
+            return source.read_bytes()
+        except OSError:
+            state_warning(source, "unreadable; keeping original")
+            return None
     # Use the same typed loaders as startup. Never copy an unchecked blob.
     from simsteer.app.settings import Settings
     from simsteer.calib.flow import CalibFlow
@@ -44,7 +50,8 @@ def _normalized(source: Path) -> dict | None:
         return {**asdict(LiveParams._load(path=source)), "coverage_version": TRUST_COVERAGE_VERSION}
     if name.startswith("livecalib_state"):
         learner = LiveCalib()
-        learner.load_state("default", path=source)
+        if not learner.load_state("default", path=source):
+            return None
         return learner.state_dict()
     try:
         value = read_json_object(source)
@@ -55,11 +62,14 @@ def _normalized(source: Path) -> dict | None:
         return None
 
 
-def _commit(path: Path, value: dict) -> bool:
-    if not atomic_save_json(path, value):
+def _commit(path: Path, value: dict | bytes) -> bool:
+    save = atomic_save_bytes if isinstance(value, bytes) else atomic_save_json
+    if not save(path, value):
         return False
     flush_state(path)
     try:
+        if isinstance(value, bytes):
+            return path.read_bytes() == value
         return read_json_object(path) == value
     except (OSError, ValueError):
         return False
@@ -110,6 +120,10 @@ def import_legacy_state(source: Path | None = None, destination: Path | None = N
             value = _normalized(source / name)
             if take_state_warnings(source):
                 state_warning(target, "unreadable; using defaults")
+                if name.startswith(("calibration", "liveparams", "livecalib_state", "calibflow")):
+                    # A missing snapshot lets startup choose the profile and
+                    # device seeds. Persisting universal defaults would hide them.
+                    value = None
             if value is not None and not _commit(target, value):
                 return False
         manifest["files"].append(name)

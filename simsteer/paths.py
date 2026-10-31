@@ -12,8 +12,8 @@ an extraction directory that is wiped on exit. Writes there are lost. So:
 Bundled assets never seed calibration. User-owned legacy state can be
 imported once from the old source/app directory into empty user storage.
 
-This module is package-root infrastructure: it depends on nothing else in
-`simsteer`, so `core`, `runtime`, `games`, and `app` may all import it freely.
+This module and the dependency-free `simsteer.state` helpers provide shared
+filesystem infrastructure for `core`, `runtime`, `games`, and `app`.
 """
 
 from __future__ import annotations
