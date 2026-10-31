@@ -97,6 +97,8 @@ a = Analysis(
     excludes=[
         # Trim the bundle — we don't ship these.
         'matplotlib', 'pytest', 'IPython', 'jupyter', 'pandas',
+        # Test-only wheel simulator; the app never imports it.
+        'simsteer.testing',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

@@ -9,7 +9,7 @@ PINNED_SHA256 = {
     "policy_sha256": "78477124cbf3ffe30fa951ebada8410b43c4242c6054584d656f1d329b067e15",
 }
 # Bump when adapter semantics change, including builds without source files.
-MODEL_ADAPTER_VERSION = 1
+MODEL_ADAPTER_VERSION = 2
 
 
 def _sha256(path: Path) -> str:

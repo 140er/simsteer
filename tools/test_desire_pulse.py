@@ -1,8 +1,6 @@
-"""One-shot smoke test for the desire pulse pipeline.
+"""Legacy pilot smoke test for single-frame and sustained desire inputs.
 
-1. Single-frame pulse (old behavior) — model's argmax response.
-2. Sustained pulse for N frames (new behavior) — verify the response
-   stays high longer.
+Print the legacy model's response during each request and after release.
 """
 from __future__ import annotations
 
