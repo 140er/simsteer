@@ -132,6 +132,9 @@ class PhysicalWheel:
                 if rec["anchor"] is None:
                     rec["anchor"] = steer
                 if not self.saved and abs(steer - rec["anchor"]) * self.rim_range_deg / 2 > INSTANCE_DETECT_DEG:
+                    if self.mapper:
+                        self.mapper.done, self.mapper.result = True, {}
+                        self.mapper.status = "Wheel selected; map pedals again"
                     self.active = rec
                     self.saved = self.instance_proven = rec["dev"].info.instance
                     self.axes = {"steer": slots["steer"]}
@@ -153,7 +156,7 @@ class PhysicalWheel:
         sample = samples.get(id(self.active))
         if sample is None:
             if self.mapper and not self.mapper.done:
-                self.mapper.done, self.mapper.status = True, "Wheel lost; retry"
+                self.mapper.done, self.mapper.result, self.mapper.status = True, {}, "Wheel lost; retry"
             return Physical()
         self.raw_axes, steer = sample
         if self.mapper and not self.mapper.done:

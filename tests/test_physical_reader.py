@@ -93,3 +93,17 @@ def test_pedal_map_publishes_only_after_explicit_flow(monkeypatch):
     assert wheel.mapper.done
     assert set(wheel.axes) == {"steer", "throttle", "brake", "clutch"}
     wheel.close()
+
+
+def test_instance_change_cancels_incomplete_map(monkeypatch):
+    a, b = profile(1), profile(2)
+    wheel, _ = reader(monkeypatch, a, b)
+    wheel.read(0)
+    wheel.map_pedals(0)
+    a.axes[1] = 65535
+    wheel.read(1)
+    b.axes[0] += 1000
+    sample = wheel.read(1.002)
+    assert wheel.mapper.done and wheel.mapper.result == {}
+    assert sample.throttle is sample.brake is sample.clutch is None
+    wheel.close()

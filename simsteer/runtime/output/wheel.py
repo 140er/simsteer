@@ -60,9 +60,9 @@ class Wheel:
             pyvjoy = None
         if feeder is not None or pyvjoy is None:
             from types import SimpleNamespace
-            from simsteer.runtime.output.vjoy_feeder import VJoyFeeder
+            from simsteer.runtime.output.vjoy_feeder import ThreadedFeeder
             try:
-                self._dev = self._feeder = feeder or VJoyFeeder(device_id)
+                self._dev = self._feeder = feeder or ThreadedFeeder(device_id)
             except Exception as e:
                 raise WheelError(str(e)) from e
             self._pyvjoy = SimpleNamespace(HID_USAGE_X=0x30, HID_USAGE_Y=0x31, HID_USAGE_Z=0x32)

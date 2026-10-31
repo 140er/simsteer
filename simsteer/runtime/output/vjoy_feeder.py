@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import ctypes as c
 import threading
+from concurrent.futures import Future
+from queue import Queue
 
 from simsteer.core.override import Output, clamp
 from simsteer.runtime.ffb.vjoy_ffb import load_dll
@@ -78,3 +80,56 @@ class VJoyFeeder:
                 finally:
                     self.dll.RelinquishVJD(self.device_id)
                     self.closed = True
+
+
+class ThreadedFeeder:
+    """Plain-wheel fallback: main loop and Bind share one DLL owner too."""
+    def __init__(self, device_id=1):
+        self.queue, self.ready = Queue(), Future()
+        self.thread = threading.Thread(target=self._run, args=(device_id,), name="vjoy-output", daemon=True)
+        self.thread.start()
+        self.ready.result(timeout=2)
+
+    def _run(self, device_id):
+        feeder = None
+        try:
+            feeder = VJoyFeeder(device_id)
+            self.ready.set_result(True)
+            while True:
+                item = self.queue.get()
+                if item is None:
+                    break
+                method, args, reply = item
+                try:
+                    getattr(feeder, method)(*args)
+                    reply.set_result(None)
+                except Exception as e:
+                    try:
+                        feeder.write(Output())
+                    finally:
+                        reply.set_exception(e)
+        except Exception as e:
+            if not self.ready.done():
+                self.ready.set_exception(e)
+        finally:
+            if feeder:
+                feeder.close()
+
+    def _call(self, method, *args):
+        if not self.thread.is_alive():
+            raise WheelError("vJoy writer is closed")
+        reply = Future()
+        self.queue.put((method, args, reply))
+        reply.result(timeout=.45)
+
+    def set_axis(self, usage, value):
+        self._call("set_axis", usage, value)
+
+    def set_button(self, index, down):
+        self._call("set_button", index, down)
+
+    def close(self):
+        self.queue.put(None)
+        self.thread.join(.45)
+        if self.thread.is_alive():
+            raise WheelError("vJoy writer did not stop")

@@ -40,6 +40,9 @@ class DeviceManager:
 
     def __init__(self, initial_kind: DeviceKind = "gamepad",
                  vjoy_device_id: int = 1, *, passthrough=False, settings=None) -> None:
+        if settings is None and passthrough:
+            from simsteer.app.settings import Settings
+            settings = Settings()
         self._vjoy_id = vjoy_device_id
         self._passthrough, self._settings = passthrough, settings
         self._kind: DeviceKind | None = None
@@ -157,6 +160,7 @@ class DeviceManager:
     def close(self):
         if self._device:
             getattr(self._device, "close", self._device.disengage)()
+            self._device, self._kind = None, None
 
     def toggle(self) -> bool:
         if self._device is None:

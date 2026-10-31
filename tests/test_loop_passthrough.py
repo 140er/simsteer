@@ -107,6 +107,7 @@ def test_player_fit_takeover_edge_controller_reset_and_log(monkeypatch, tmp_path
     assert {name for name, t in resets if t == pytest.approx(edge_t)} == {"lat", "long"}
     assert "disengage" in banners and device.closed
     assert all({"source", "rim_axis", "phys_throttle", "phys_brake", "relay_hz", "relay_gap_max_ms"} <= r.keys() for r in rows)
+    assert all(r["user_steer"] == 0 and r["rim_axis"] == .02 for r in rows)
 
 
 @pytest.mark.parametrize("ok,brake,reason", [(False, 0, "wheel not found"), (True, .1, "release the brake"), (True, .08, "")])
@@ -114,6 +115,24 @@ def test_physical_engagement_gate(ok, brake, reason):
     device = FakeDeviceManager()
     device.physical = replace(device.physical, ok=ok, brake=brake)
     assert wheel_session.engage_block(device) == reason
+
+
+def test_capture_entry_failure_closes_relay(monkeypatch, tmp_path):
+    import simsteer.runtime.loop as loop
+    device = FakeDeviceManager()
+    monkeypatch.setattr(loop, "DeviceManager", lambda **kw: device)
+    class BadSource:
+        def __enter__(self):
+            raise OSError("capture failed")
+        def __exit__(self, *args):
+            pass
+    clock = ReplayClock()
+    clip = _make_clip(tmp_path / "clip", frames=1)
+    with pytest.raises(OSError, match="capture failed"):
+        loop.run(Settings(device="wheel", no_tuner=True), "ets2", source=BadSource(),
+                 make_telemetry=lambda: ReplayTelemetry(clip, clock), clock=clock,
+                 model=FakeModel(), headless=True)
+    assert device.closed
 
 
 def test_passthrough_off_replay_matches_base_bytes(tmp_path, monkeypatch):

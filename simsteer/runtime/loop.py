@@ -297,7 +297,7 @@ def run(settings: Settings, game: GameProfile | str, *,
         flow.restart(reason)
         set_banner("CALIBRATION RESET", (80, 220, 255), 4.0)
 
-    with source as cap:
+    with wheel_session.output_guard(pad), source as cap:
         if keys is None and headless:
             keys = NoKeys()
         elif keys is None:
@@ -513,10 +513,12 @@ def run(settings: Settings, game: GameProfile | str, *,
                 engaged_now = bool(pad is not None and pad.engaged)
                 takeover_reason = (getattr(pad, "last_reason", "")
                                    if was_engaged_last_frame and not engaged_now else "")
-                if was_engaged_last_frame and not engaged_now and (takeover_reason or not banner_text):
-                    lat_ctrl.reset()
-                    long_ctrl.reset()
-                    probe.reset()
+                takeover_alert = takeover_reason in ("steering", "brake", "stale", "lost")
+                if was_engaged_last_frame and not engaged_now and (takeover_alert or not banner_text):
+                    if takeover_reason:
+                        lat_ctrl.reset()
+                        long_ctrl.reset()
+                        probe.reset()
                     audio.play("disengage")
                     set_banner("DISENGAGED" + (f" — {takeover_reason}" if takeover_reason else ""),
                                COL_ACCENT_BLUE, 2.0)
@@ -683,7 +685,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                         "frame_width": calib.image_w,
                         "frame_height": calib.image_h,
                         **flow.log_fields(),
-                        **wheel_session.log_fields(pad, takeover_reason),
+                        **wheel_session.log_fields(pad, takeover_reason, user_steer),
                     }
                     if log_timing:
                         # The FOV step's extra vision runs are model time.

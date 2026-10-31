@@ -129,6 +129,7 @@ def test_restart_visibility_and_complete_workbench_inventory(tuner):
         "throttle",
         "brake",
         "steer",
+        "rim_range_deg",
     }
     assert {g.title for g in tuner._groups} == {
         "Camera",
@@ -139,6 +140,7 @@ def test_restart_visibility_and_complete_workbench_inventory(tuner):
         "Flags",
         "Manual",
         "Status",
+        "Wheel",
         "Speed & ACC",
         "Hotkeys",
     }

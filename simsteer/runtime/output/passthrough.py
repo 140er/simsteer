@@ -102,7 +102,10 @@ class WheelIo(threading.Thread):
                         LOG.warning("Wheel relay %.0f Hz (target %s)", hz, RELAY_HZ)
                     warned_at = now
                 deadline = max(deadline + 1 / RELAY_HZ, now)
-                self.stopping.wait(max(0.0, deadline - time.monotonic()))
+                # Python 3.11's Windows sleep uses a high-resolution timer;
+                # Event.wait uses a different timeout path. Stop is at most
+                # one 2 ms period away here.
+                time.sleep(max(0.0, deadline - time.monotonic()))
         except Exception as e:
             self.error = str(e)
         finally:
@@ -114,7 +117,7 @@ class WheelIo(threading.Thread):
                     if feeder:
                         feeder.close()
                 finally:
-                    self.output, self.physical = Output(reason="closed"), Physical()
+                    self.output, self.physical = Output(reason="lost" if self.error else "closed"), Physical()
                     sys.setswitchinterval(previous_interval)
                     self.ready.set()
 

@@ -66,3 +66,24 @@ def test_feeder_rejects_second_writer_thread():
     thread.join()
     assert isinstance(errors[0], RuntimeError)
     feeder.close()
+
+
+def test_plain_wheel_fallback_and_bind_use_one_owner(monkeypatch):
+    import sys
+    from simsteer.runtime.output import vjoy_feeder as vf
+    dll = FakeVJoyDll()
+    monkeypatch.setitem(sys.modules, "pyvjoy", None)
+    original = vf.VJoyFeeder
+    monkeypatch.setattr(vf, "VJoyFeeder", lambda device_id: original(device_id, dll=dll))
+    wheel = Wheel()
+    try:
+        wheel.engage()
+        wheel.set_steering(.2)
+        wheel.disengage()
+        worker = threading.Thread(target=wheel.wiggle, args=("throttle", .01))
+        worker.start()
+        worker.join()
+    finally:
+        wheel.close()
+    assert len({c[3] for c in dll.calls}) == 1
+    assert dll.calls[-1][0] == "RelinquishVJD"

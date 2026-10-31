@@ -895,6 +895,8 @@ class Tuner:
             args += ["-m", "simsteer"]
         args += [*sys.argv[1:], "--game", self._selected_game]
         try:
+            if self.device and getattr(self.device, "passthrough", False):
+                self.device.close()
             subprocess.Popen(args)
             os._exit(0)
         except OSError:
