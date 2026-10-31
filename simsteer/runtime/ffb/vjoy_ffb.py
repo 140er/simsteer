@@ -234,7 +234,21 @@ class VJoyError(RuntimeError):
     pass
 
 
+_backend = None
+
+
+def install_backend(dll) -> None:
+    """Hand out `dll` instead of loading vJoyInterface.dll (None: back to
+    the real one). Used by `simsteer.testing.fanatec`; the app never does."""
+    global _backend
+    if dll is not None and _backend is not None:
+        raise RuntimeError("a vJoy backend is already installed")
+    _backend = dll
+
+
 def load_dll(path: str | None = None):
+    if _backend is not None:
+        return _backend
     path = path or os.environ.get("SIMSTEER_VJOY_DLL") or DEFAULT_DLL
     try:
         dll = ctypes.CDLL(path)

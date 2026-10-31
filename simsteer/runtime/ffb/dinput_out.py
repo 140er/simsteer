@@ -26,6 +26,11 @@ and dry runs swap in `LogSink`.
 
 Plain ctypes integer types keep every struct the size it has on 64-bit
 Windows, so the Linux tests check the layouts.
+
+`install_backend` swaps dinput8.dll for a stand-in that answers the same
+COM calls (`simsteer.testing.fanatec`, a simulated Fanatec base), so the
+code here runs unchanged without a wheel or Windows. Nothing in the app
+installs one.
 """
 
 from __future__ import annotations
@@ -154,6 +159,10 @@ VTABLES: dict[str, tuple[str, ...]] = {
         "Download", "Unload", "Escape",
     ),
 }
+
+
+# Enumeration callbacks are __stdcall; WINFUNCTYPE exists only on Windows.
+_FUNCTYPE = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
 
 
 def vtable_slot(interface: str, method: str) -> int:
@@ -401,7 +410,26 @@ class GainRefused(DIError):
         super().__init__("SetProperty(FFGAIN)", hr)
 
 
+_backend = None
+
+
+def install_backend(backend) -> None:
+    """Route every DirectInput call to `backend` (None: back to dinput8.dll).
+    The backend has a `DirectInput` class and `com_call`, the signature of
+    `_com_call`."""
+    global _backend
+    if backend is not None and _backend is not None:
+        raise RuntimeError("a DirectInput backend is already installed")
+    _backend = backend
+
+
+def available() -> bool:
+    return _backend is not None or sys.platform == "win32"
+
+
 def _com_call(ptr: int, interface: str, method: str, argtypes: Sequence, *args, restype=ctypes.c_long) -> int:
+    if _backend is not None:
+        return _backend.com_call(ptr, interface, method, argtypes, *args, restype=restype)
     vtbl = ctypes.cast(ctypes.c_void_p(ptr), ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
     proto = ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)
     result = proto(vtbl[vtable_slot(interface, method)])(ptr, *args)
@@ -465,7 +493,7 @@ class DirectInput:
 
     def ff_devices(self) -> list[DIDEVICEINSTANCEW]:
         found: list[DIDEVICEINSTANCEW] = []
-        callback_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.POINTER(DIDEVICEINSTANCEW), ctypes.c_void_p)
+        callback_type = _FUNCTYPE(ctypes.c_int, ctypes.POINTER(DIDEVICEINSTANCEW), ctypes.c_void_p)
 
         def on_device(inst, _ref):
             copy = DIDEVICEINSTANCEW()
@@ -498,6 +526,10 @@ class DirectInput:
             self.hwnd = None
 
 
+def open_directinput() -> DirectInput:
+    return _backend.DirectInput() if _backend is not None else DirectInput()
+
+
 def info_of(inst: DIDEVICEINSTANCEW) -> DeviceInfo:
     vid, pid = vid_pid(inst.guidProduct.Data1)
     return DeviceInfo(wide(inst.tszProductName), vid, pid, str(inst.guidInstance))
@@ -509,7 +541,7 @@ def _dev(ptr: int, method: str, argtypes: Sequence, *args, restype=ctypes.c_long
 
 def _objects(ptr: int) -> list[DIDEVICEOBJECTINSTANCEW]:
     found: list[DIDEVICEOBJECTINSTANCEW] = []
-    callback_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.POINTER(DIDEVICEOBJECTINSTANCEW), ctypes.c_void_p)
+    callback_type = _FUNCTYPE(ctypes.c_int, ctypes.POINTER(DIDEVICEOBJECTINSTANCEW), ctypes.c_void_p)
 
     def on_object(obj, _ref):
         copy = DIDEVICEOBJECTINSTANCEW()
@@ -524,7 +556,7 @@ def _objects(ptr: int) -> list[DIDEVICEOBJECTINSTANCEW]:
 
 def _effects(ptr: int) -> list[str]:
     found: list[str] = []
-    callback_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.POINTER(DIEFFECTINFOW), ctypes.c_void_p)
+    callback_type = _FUNCTYPE(ctypes.c_int, ctypes.POINTER(DIEFFECTINFOW), ctypes.c_void_p)
 
     def on_effect(info, _ref):
         found.append(wide(info.contents.tszName))
@@ -542,9 +574,9 @@ def _actuators(ptr: int) -> list[DIDEVICEOBJECTINSTANCEW]:
 def attached_ff_devices() -> list[DeviceInfo]:
     """Names and IDs of attached force feedback controllers. Enumeration
     only; no device object is created."""
-    if sys.platform != "win32":
+    if not available():
         return []
-    di = DirectInput()
+    di = open_directinput()
     try:
         return [info_of(i) for i in di.ff_devices()]
     finally:
@@ -555,9 +587,9 @@ def list_ff_devices() -> list[dict]:
     """Every attached force feedback controller and what it can do. Read
     only: no cooperative level, no Acquire, no effect, so nothing is sent
     to the device's motor."""
-    if sys.platform != "win32":
+    if not available():
         return []
-    di = DirectInput()
+    di = open_directinput()
     out = []
     try:
         for inst in di.ff_devices():
@@ -609,11 +641,12 @@ class DirectInputSink:
     def open(self, gain: int) -> bool:
         self.close()
         try:
-            self._di = DirectInput()
+            self._di = open_directinput()
             inst = next((i for i in self._di.ff_devices()
                          if self._wanted(info_of(i))), None)
             if inst is None:
                 self.last_error = "no matching force feedback device"
+                self.close()
                 return False
             self._ptr = ptr = self._di.create_device(inst)
             self._format = joystick_data_format()
