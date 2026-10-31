@@ -478,6 +478,61 @@ def test_current_steam_stream_still_refuses(tmp_path):
         require_free(observed)
 
 
+def steam_stats_padding():
+    line = "[2026-10-31 13:35:00][6784.0] Audio source [Speakers (Steam Streaming Speakers)]: init=171946967, adjustment=0, through=6828478, last_start=6827998\n"
+    return line * (1024 * 1024 // len(line) + 1)
+
+
+@pytest.mark.parametrize("born", [None, steam_birth()])
+def test_long_current_steam_stream_refuses_without_a_tail_window(tmp_path, born):
+    history = STEAM_STREAM_HISTORY + CURRENT_STEAM_STREAM + steam_stats_padding()
+    assert len(history.encode()) > 1024 * 1024
+    assert "Streaming started" not in history[-256 * 1024:]
+    with pytest.raises(RigError, match="Steam Remote Play"):
+        require_free(steam_guard(tmp_path, history, born=born))
+
+
+def test_steam_start_is_retained_even_when_later_lines_are_not_stats(tmp_path):
+    padding = "[2026-10-31 13:35:00] Network diagnostics\n" * 30000
+    with pytest.raises(RigError, match="Steam Remote Play"):
+        require_free(steam_guard(tmp_path, STEAM_STREAM_HISTORY + CURRENT_STEAM_STREAM + padding, born=steam_birth()))
+
+
+def test_long_ended_steam_stream_stays_clear_with_trailing_audio(tmp_path):
+    ended = STEAM_STREAM_HISTORY + CURRENT_STEAM_STREAM + "[2026-10-31 13:34:56] Session ended\n"
+    history = ended + steam_stats_padding()
+    assert "Session ended" not in history[-256 * 1024:]
+    require_free(steam_guard(tmp_path, history, born=steam_birth()))
+
+
+@pytest.mark.parametrize("stats", [
+    "Audio source [Speakers (Steam Streaming Speakers)]: init=0, through=0, last_start=0",
+    "Video stats: captured=120, encoded=120, sent=120",
+])
+def test_current_steam_stats_refuse_without_a_current_start(tmp_path, stats):
+    history = STEAM_STREAM_HISTORY + f"[2026-10-31 13:35:00] {stats}\n"
+    with pytest.raises(RigError, match="Steam Remote Play"):
+        require_free(steam_guard(tmp_path, history, born=steam_birth()))
+
+
+def test_long_steam_stats_from_before_process_birth_stay_clear(tmp_path):
+    stale = steam_stats_padding().replace("2026-10-31", "2026-10-28")
+    require_free(steam_guard(tmp_path, STEAM_STREAM_HISTORY + stale, born=steam_birth()))
+
+
+@pytest.mark.parametrize("start", ["Started streaming", "Streaming session started", "Remote Play session started"])
+def test_additional_current_steam_start_phrases_refuse(tmp_path, start):
+    history = STEAM_STREAM_HISTORY + f"[2026-10-31 13:35:00] {start}\n"
+    with pytest.raises(RigError, match="Steam Remote Play"):
+        require_free(steam_guard(tmp_path, history, born=steam_birth()))
+
+
+def test_steam_parser_accepts_a_single_pass_line_iterator():
+    assert steam_stream_active(iter((STEAM_STREAM_HISTORY + CURRENT_STEAM_STREAM).splitlines()), steam_birth())
+    restarted = iter([CURRENT_STEAM_STREAM, "[2026-10-31 13:40:00] Client version: 102\n"])
+    assert not steam_stream_active(restarted, steam_birth())
+
+
 @pytest.mark.parametrize("end", ["Session ended", "Streaming stopped", "Stopped streaming", "Streaming session ended", "Ending streaming session"])
 def test_current_steam_session_end_is_clear_and_audio_cannot_restart_it(tmp_path, end):
     log = STEAM_STREAM_HISTORY + CURRENT_STEAM_STREAM + f"[2026-10-31 13:34:56][6780.0] {end}\n"

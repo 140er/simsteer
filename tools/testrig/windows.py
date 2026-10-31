@@ -11,7 +11,7 @@ import time
 import uuid
 
 from . import RigError
-from .capture import capture_activity, output_log_active, steam_stream_active
+from .capture import capture_activity, output_log_active, steam_log_active
 
 
 def require_windows():
@@ -266,7 +266,7 @@ class Windows:
                 for root in self.steam_paths():
                     log = root / "logs/streaming_log.txt"
                     if log.exists():
-                        records.append({"pid": pid, "active": steam_stream_active(tail(log), process.get("born"),
+                        records.append({"pid": pid, "active": steam_log_active(log, process.get("born"),
                                         corroborated=indicators or helpers), "kind": "Steam Remote Play streaming"})
                 if indicators:
                     records.append({"pid": pid, "active": True, "kind": "Steam Remote Play streaming controls"})

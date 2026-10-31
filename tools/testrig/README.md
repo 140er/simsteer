@@ -65,11 +65,14 @@ where available. Idle OBS is allowed.
 
 Steam Remote Play log events must belong to the running Steam process. Older
 events are ignored; the latest `Client version` marker provides the boundary if
-process birth is unavailable. Explicit stream starts activate the log signal;
-a later session end/stop clears it. Audio diagnostics and disabled game-recording
-messages do not start a stream. Unparseable timestamps need a current streaming
-process or visible output control to corroborate them. Streaming helpers and other
-positive capture signals still refuse independently.
+process birth is unavailable. The log is read line by line without a tail window,
+so a long stream does not lose its start or end marker. Explicit stream starts
+activate the log signal; a later session end/stop clears it. Current-session
+audio/video stats also indicate activity when no end has been observed. Trailing
+stats after an end do not reopen a stream without a new start. Disabled
+game-recording messages do not start a stream. Unparseable timestamps need a
+current streaming process or visible output control to corroborate them.
+Streaming helpers and other positive capture signals still refuse independently.
 
 Capture coverage is:
 

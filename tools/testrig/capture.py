@@ -4,6 +4,7 @@ import configparser
 import json
 from itertools import islice
 from datetime import datetime
+from io import StringIO
 import math
 import os
 from pathlib import Path
@@ -30,43 +31,62 @@ def output_log_active(text, kind):
     return active
 
 
-def steam_stream_active(text, born=None, *, corroborated=False):
+def steam_stream_active(lines, born=None, *, corroborated=False):
     """Attribute Remote Play events to this Steam client, not the log's mtime."""
-    rows = []
-    boundary = -1
-    for line in text.splitlines():
+    process_cutoff = None
+    if isinstance(born, (int, float)) and not isinstance(born, bool) and math.isfinite(born) and born > 0:
+        process_cutoff = math.floor(born)  # the log timestamps have second precision
+    cutoff = process_cutoff
+    boundary = False
+    active = None
+    if isinstance(lines, str):
+        lines = StringIO(lines)
+    for line in lines:
         stamp = None
         match = re.match(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)\]", line)
         if match:
             try:
                 # Steam writes local wall time; CIM process birth is epoch time.
+                # The repeated DST fall-back hour is ambiguous (fold=0), so a
+                # second-pass timestamp can appear older than process birth.
                 stamp = datetime.fromisoformat(match[1]).timestamp()
             except (ValueError, OSError, OverflowError):
                 pass
         message = re.sub(r"^(?:\[[^\]]*\]\s*)*", "", line).strip().lower()
         if message.startswith("client version:"):
-            boundary = len(rows)
-        rows.append((stamp, message))
-    cutoffs = []
-    if isinstance(born, (int, float)) and not isinstance(born, bool) and math.isfinite(born) and born > 0:
-        cutoffs.append(math.floor(born))  # the log timestamps have second precision
-    if boundary >= 0 and rows[boundary][0] is not None:
-        cutoffs.append(rows[boundary][0])
-    cutoff = max(cutoffs) if cutoffs else None
-    active = False
-    for stamp, message in rows[boundary + 1:]:
+            # Reset as we pass each client start; only the last session survives.
+            boundary, active = True, None
+            cutoff = process_cutoff
+            if stamp is not None:
+                cutoff = stamp if cutoff is None else max(cutoff, stamp)
+            continue
         if stamp is None:
             if not corroborated:
                 continue
-        elif (cutoff is None and boundary < 0 and not corroborated) or (cutoff is not None and stamp < cutoff):
+        elif (cutoff is None and not boundary and not corroborated) or (cutoff is not None and stamp < cutoff):
             continue
         if re.match(r"^(?:stream(?:ing)?(?: session)? (?:stopped|ended|closed|finished)|"
                     r"(?:stopping|ending|stopped|ended) (?:the )?stream(?:ing)?(?: session)?|"
                     r"(?:session|remote play session) (?:ended|stopped|closed|finished))\b", message):
             active = False
-        elif re.match(r"^(?:streaming started\b|starting streaming(?: session)?\b)", message):
+        elif re.match(r"^(?:(?:stream(?:ing)?|remote play)(?: session)? started|"
+                      r"(?:starting|started) (?:the )?stream(?:ing)?(?: session)?)\b", message):
             active = True
-    return active
+        elif active is None and re.match(r"^(?:audio source \[.*\]:.*\b(?:init|through|last_start)=\d|"
+                                         r"(?:audio|video|stream(?:ing)?) (?:stats|statistics)\b)", message):
+            # Activity proves an otherwise unknown stream. Trailing diagnostics
+            # after a confirmed end do not reopen it without a new start marker.
+            active = True
+    return active is True
+
+
+def steam_log_active(path, born=None, *, corroborated=False):
+    """Read all session events line by line, retaining no log-sized buffer."""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as lines:
+            return steam_stream_active(lines, born, corroborated=corroborated)
+    except OSError:
+        return False
 
 
 def config_roots(process):
