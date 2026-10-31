@@ -5,45 +5,20 @@ CLI flags still win for the current run (so a dev can `--device wheel`
 to override their saved setting), but anything the user picks in the
 tuner's Setup tab lands here and applies on the next launch.
 
-Lives at `%LOCALAPPDATA%\\SimSteer\\settings.json` when bundled, or at
-the repo root in dev mode (via `simsteer.paths.data_dir()`).
+Lives in the per-user data directory (via `simsteer.paths.data_dir()`).
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass, fields
-from types import UnionType
-from typing import Union, get_args, get_origin, get_type_hints
+from pathlib import Path
+from typing import get_type_hints
 
 from simsteer.paths import data_dir
+from simsteer.state import snapshot_exists, atomic_save_json, loaded_value as _loaded_value, read_json_object, state_warning
 
 
 _SETTINGS_FILE = "settings.json"
-
-
-def _loaded_value(value, expected):
-    """Validate JSON types without parsing strings or truncating fractions."""
-    if type(value) is expected:
-        return value
-    origin = get_origin(expected)
-    args = get_args(expected)
-    if origin in (Union, UnionType):
-        for member in args:
-            try:
-                return _loaded_value(value, member)
-            except (TypeError, ValueError, OverflowError):
-                continue
-    elif expected is float and type(value) is int:
-        return float(value)
-    elif expected is int and type(value) is float and value.is_integer():
-        return int(value)
-    elif origin is list and isinstance(value, list):
-        return [_loaded_value(item, args[0]) for item in value]
-    elif origin is dict and isinstance(value, dict):
-        return {_loaded_value(k, args[0]): _loaded_value(v, args[1])
-                for k, v in value.items()}
-    raise ValueError("incompatible setting type")
 
 
 @dataclass
@@ -106,19 +81,18 @@ class Settings:
             setattr(self, name, value)
 
     @classmethod
-    def load(cls) -> "Settings":
+    def load(cls, path: Path | None = None) -> "Settings":
         """Read settings from disk. Missing file -> defaults, no
         warning. Unknown fields ignored (forward compat). Bad fields
         fall back to defaults (don't crash launch on a corrupted file).
         """
-        p = data_dir() / _SETTINGS_FILE
-        if not p.exists():
+        p = path if path is not None else data_dir() / _SETTINGS_FILE
+        if not snapshot_exists(p):
             return cls()
         try:
-            raw = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return cls()
-        if not isinstance(raw, dict):
+            raw = read_json_object(p)
+        except (OSError, ValueError):
+            state_warning(p, "unreadable; using defaults")
             return cls()
         if "passive_fit_ets2" in raw:
             raw.setdefault("passive_fit", raw.pop("passive_fit_ets2"))
@@ -130,22 +104,22 @@ class Settings:
             if k not in valid:
                 continue
             try:
-                kwargs[k] = _loaded_value(v, hints[k])
+                value = _loaded_value(v, hints[k])
+                limits = {"vjoy_device": (1, 16), "forza_port": (1, 65535),
+                          "max_width": (160, 32768)}
+                if k in limits and not limits[k][0] <= value <= limits[k][1]:
+                    raise ValueError("setting out of range")
+                kwargs[k] = value
             except (TypeError, ValueError, OverflowError):
                 print(f"warning: invalid setting {k!r}; using default")
+                state_warning(p, "has invalid values; using defaults")
         return cls(**kwargs)
 
     def save(self) -> None:
-        """Write to disk. Failures are swallowed — settings are
-        nice-to-have, not critical to the loop."""
-        try:
-            p = data_dir() / _SETTINGS_FILE
-            saved = asdict(self)
-            saved.update(self._runtime_overrides)
-            p.write_text(json.dumps(saved, indent=2),
-                         encoding="utf-8")
-        except OSError:
-            pass
+        """Save a complete snapshot, preserving the last one on failure."""
+        saved = asdict(self)
+        saved.update(self._runtime_overrides)
+        atomic_save_json(data_dir() / _SETTINGS_FILE, saved)
 
     def path(self) -> str:
         """Filesystem path for display in the UI."""

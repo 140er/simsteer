@@ -1,0 +1,13 @@
+{
+  "a": 10.0,
+  "b": 0.0,
+  "c": 0.0,
+  "samples": 0,
+  "axis_sign": null,
+  "coverage": {},
+  "coverage_speed_ranges": {},
+  "coverage_version": 1,
+  "coverage_speed_min": null,
+  "coverage_speed_max": null,
+  "legacy_fit": false
+}

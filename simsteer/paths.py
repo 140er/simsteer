@@ -6,14 +6,14 @@ an extraction directory that is wiped on exit. Writes there are lost. So:
   - Read-only assets (model .onnx files, bundled DLLs, docs) live in
     `bundle_dir()`. PyInstaller's `datas=[...]` ships things here.
   - Writable state (per-game calibration, liveparams, livecalib_state, profile
-    flags) lives in `data_dir()`, which is `%LOCALAPPDATA%\\SimSteer\\` when
-    frozen and the repo root when not.
+    flags) lives in `data_dir()`: `%LOCALAPPDATA%\\SimSteer\\` on Windows,
+    `$XDG_DATA_HOME/SimSteer` (or `~/.local/share/SimSteer`) elsewhere.
 
-Per project policy: NO seeding from bundle into data_dir on first launch.
-Each user calibrates fresh, every game.
+Bundled assets never seed calibration. User-owned legacy state can be
+imported once from the old source/app directory into empty user storage.
 
-This module is package-root infrastructure: it depends on nothing else in
-`simsteer`, so `core`, `runtime`, `games`, and `app` may all import it freely.
+This module and the dependency-free `simsteer.state` helpers provide shared
+filesystem infrastructure for `core`, `runtime`, `games`, and `app`.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+
+from simsteer.state import snapshot_exists
 
 
 _APP_NAME = "SimSteer"
@@ -45,23 +47,24 @@ def bundle_dir() -> Path:
 def data_dir() -> Path:
     """Writable state. Created on first call.
 
-    Frozen: `%LOCALAPPDATA%\\SimSteer\\`.
-    Dev:    the repo root (so existing JSONs at the project root still load).
-    `SIMSTEER_DATA_DIR`, when set, overrides both.
+    Source and bundled runs use the same per-user location. The startup
+    importer handles user-owned legacy files. `SIMSTEER_DATA_DIR` overrides
+    the location for isolated replays and explicit portable setups.
     """
     override = os.environ.get("SIMSTEER_DATA_DIR")
     if override:
         d = Path(override)
         d.mkdir(parents=True, exist_ok=True)
         return d
-    if is_frozen():
+    if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA")
         if not base:
             base = str(Path.home() / "AppData" / "Local")
-        d = Path(base) / _APP_NAME
-        d.mkdir(parents=True, exist_ok=True)
-        return d
-    return Path(__file__).resolve().parent.parent
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    d = Path(base) / _APP_NAME
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def state_path(base_name: str, game: str | None = None) -> Path:
@@ -82,10 +85,10 @@ def load_with_fallback(base_name: str, game: str | None) -> Path | None:
     """Resolve the path to load FROM: per-game first, then legacy.
     Returns None if neither file exists (caller uses defaults)."""
     game_path = state_path(base_name, game)
-    if game_path.exists():
+    if snapshot_exists(game_path):
         return game_path
     legacy = state_path(base_name, None)
-    if legacy.exists():
+    if snapshot_exists(legacy):
         return legacy
     return None
 

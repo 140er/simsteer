@@ -9,7 +9,7 @@ from simsteer.core.calibration import Calibration
 from simsteer.core.constants import SRC_H, SRC_W
 from simsteer.core.preprocess import crop_for_model
 
-CAPTURES = [(3440, 1440), (2560, 1440), (3840, 2160), (2560, 1080),
+CAPTURES = [(3840, 1600), (2560, 1600), (3840, 2160), (2560, 1080),
             (1920, 1080), (1920, 1200), (1366, 768)]
 
 # A 1 px column aliases away in the ~4x downscale of a 4K wide view, so
