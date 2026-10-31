@@ -35,7 +35,7 @@ Pending device or driving checks remain required even when code is merged.
 | Source launch and signing | [#9](https://github.com/140er/simsteer/pull/9) is merged into V0.12. |
 | AC and Forza telemetry | [#10](https://github.com/140er/simsteer/pull/10) is open. Windows timing passes; real drives and Forza menu validation where the game is available, otherwise recorded as unavailable, independent review and final-head checks remain required. |
 | Guided calibration | [#11](https://github.com/140er/simsteer/pull/11) is merged into V0.12: calibration detects and corrects inverted steering and saves the correction per game and device. Real-game calibration drives remain pending, and the Check stage needs the certification work in [hardening](#v012-hardening) item FE-08. |
-| Status bar, live-run fixes, settings | [#13](https://github.com/140er/simsteer/pull/13), [#15](https://github.com/140er/simsteer/pull/15), [#16](https://github.com/140er/simsteer/pull/16) and [#17](https://github.com/140er/simsteer/pull/17) are merged into V0.12. |
+| Status bar, camera mod, live-run fixes, settings, model contract | [#13](https://github.com/140er/simsteer/pull/13), [#14](https://github.com/140er/simsteer/pull/14), [#15](https://github.com/140er/simsteer/pull/15), [#16](https://github.com/140er/simsteer/pull/16), [#17](https://github.com/140er/simsteer/pull/17) and [#19](https://github.com/140er/simsteer/pull/19) are merged into V0.12. |
 | Hardening | Two independent reviews of V0.12 (31 Oct) found output-safety, model-contract and certification gaps. [V0.12 hardening](#v012-hardening) lists every item; no engaged session runs before its P0 items merge. |
 
 ## Phases and dependencies
@@ -92,14 +92,13 @@ Rules:
 
 Order:
 
-1. Now: 0A output safety and 0C simple warp are in progress; 0B
-   ([#19](https://github.com/140er/simsteer/pull/19)) and 0F
-   ([#20](https://github.com/140er/simsteer/pull/20)) are in review;
-   [#18](https://github.com/140er/simsteer/pull/18) is in its first fix
-   round. #18 and 0A share the loop and output layer, so whichever merges
+1. Now: 0B ([#19](https://github.com/140er/simsteer/pull/19)) has merged;
+   0A output safety and 0C simple warp are in progress; 0F
+   ([#20](https://github.com/140er/simsteer/pull/20)) is in review;
+   [#18](https://github.com/140er/simsteer/pull/18) is in a fix round. #18 and 0A share the loop and output layer, so whichever merges
    second takes V0.12 in and keeps both test sets passing.
 2. After #18 and 0A: 0J (single output owner), then 0I (session ownership).
-3. After 0B: 0D (time base), then 0E (Camera, which also needs 0C). 0G
+3. After 0B and 0C: 0D (time base), then 0E (Camera). 0G
    (setup contract) and 0H (state) are independent.
 4. 0K bench lanes grow with each output item. 0L, the maintainer's
    disengaged clip corpus, can happen any time. 0M, the supervised engaged
@@ -111,8 +110,8 @@ Order:
 |---|---|---|---|---|---|---|
 | FE-01 | Finite guards from decode to device | P0 | both reviews | 0A | none | in progress |
 | FE-02 | Stop path that needs no successful frame, neutral on exit, no `os._exit` | P0 | both | 0A | none | in progress |
-| FE-03 | `T` test key off in player mode; bind wiggle through the output owner | P0 | both | 0A | none | in progress |
-| FE-04 | Model contract at the pinned release | P0 | both | 0B, [#19](https://github.com/140er/simsteer/pull/19) | none | in review |
+| FE-03 | `T` test key off in player mode; bind wiggle through the loop's output path | P0 | both | 0A | none | in progress |
+| FE-04 | Model contract at the pinned release | P0 | both | 0B, [#19](https://github.com/140er/simsteer/pull/19) | none | merged; recorded-frames report waits on FE-14 |
 | FE-05 | Simple-warp pitch geometry | P0 | one | 0C | none | in progress |
 | FE-06 | 20 Hz assumption and the FOV solver | P1 | both | 0D | FE-04, FE-05 | not started |
 | FE-07 | Camera bootstrap, blocked reason, no-progress outcome | P1 | both | 0E | FE-04, FE-05, FE-06 | not started |
@@ -121,7 +120,7 @@ Order:
 | FE-10 | State: context binding, atomic saves, per-user data, untracked calibration files | P1 | both | 0H | FE-01 | not started |
 | FE-11 | Session ownership and device-swap transaction | P1 | both | 0I | #18, FE-12 | not started |
 | FE-12 | Single output owner with command expiry for every device | P1 | both | 0J | #18, FE-01–03 | not started |
-| FE-13 | Device-output bench lanes | process | one | 0K, [#21](https://github.com/140er/simsteer/pull/21) | #21 | in review |
+| FE-13 | Device-output bench lanes | process | one | 0K | [#21](https://github.com/140er/simsteer/pull/21) (simulated base), tests from FE-01–03, FE-11, FE-12 | not started; #21 in review |
 | FE-14 | Disengaged clip corpus recorded by the maintainer | process | both | 0L, maintainer-scheduled | a merged recording build | waiting on the maintainer |
 | FE-15 | One supervised engaged session with a checklist | process | one | 0M, maintainer-scheduled | FE-01–05, FE-08, FE-13, FE-14 | waiting on dependencies |
 | FE-16 | Unattended GUI automation is not engaged evidence | process | one | rule; scopes [#22](https://github.com/140er/simsteer/pull/22) | none | in effect |
@@ -163,16 +162,21 @@ Order:
   remains in `simsteer/`.
 - A hard kill runs no handler, so vJoy keeps its last value. This stays a
   recorded risk, checked at standstill in FE-15, and it blocks a release.
+  It clears only with a mitigation proven by a measured kill test on real
+  hardware, or with an explicit maintainer decision to ship it as a known
+  limit.
 
 **FE-03. Test-fire key (0A).**
 
 - With developer mode off, `T` writes nothing to any device.
 - With developer mode on, it acts only while disengaged and stopped, never
-  blocks the loop, and writes through the output owner.
-- Bind-wiggle helpers write through the output owner, stop when engagement
-  starts, and periodic centring no longer cuts them off.
+  blocks the loop, and writes through the loop's existing output writer,
+  never from the UI thread.
+- Bind-wiggle helpers write through that same writer, stop when engagement
+  starts, and periodic centring no longer cuts them off. The single output
+  owner arrives in 0J (FE-12), which checks these paths again.
 
-**FE-04. Model contract (0B, [#19](https://github.com/140er/simsteer/pull/19)).**
+**FE-04. Model contract (0B, [#19](https://github.com/140er/simsteer/pull/19), merged).**
 
 - Traffic convention one-hot at `int(is_rhd)`, with the default meaning
   right-hand traffic.
@@ -183,7 +187,9 @@ Order:
 - Golden tests decode a fixture with distinct values in every tensor region
   and compare against a reference parser transcribed from upstream at the
   pinned revision, with the source cited.
-- An offline real-model before/after report on recorded frames.
+- An offline real-model before/after report on recorded frames. Still
+  open: #19's report used a synthetic replay, so this waits on FE-14's
+  clips.
 
 **FE-05. Simple-warp geometry (0C).**
 
@@ -244,8 +250,9 @@ Order:
 - The checks pass from `python -m simsteer --check` and from the
   packaged executable.
 - The driver installer pins versions and hashes, installs only the selected
-  backend, uses the maintained vJoy fork that works on current Windows 11,
-  and fails loudly. README and SETUP point to the same build.
+  backend, and fails loudly. It pins one vJoy build by version and hash,
+  and that build passes the vJoy force-feedback lanes on current Windows 11.
+  README and SETUP point to the same build.
 
 **FE-10. State (0H).**
 
@@ -280,7 +287,9 @@ Order:
 
 ### Process
 
-- **FE-13. Bench lanes (0K).** One test marker inside the repository check
+- **FE-13. Bench lanes (0K).** A separate open step: #21 provides the
+  simulated Fanatec base, and the lanes come with the tests of FE-01–03,
+  FE-11 and FE-12. One test marker inside the repository check
   runs the device-output scenarios on the fake gamepad and the simulated
   Fanatec base: NaN per stage, capture stall, stale frames, stale or paused
   telemetry, the engage key without frames, exit events, the test key,
@@ -345,7 +354,7 @@ Order:
 | PR | Items | Before merge into V0.12 |
 |---|---|---|
 | [#18](https://github.com/140er/simsteer/pull/18) | then FE-12, FE-11 | Its review's two high findings, the drift-absorption finding and the reset-to-midpoint finding fixed; passing review and checks at the head; FE-19 checklist. Hardware lanes stay supervised. |
-| [#19](https://github.com/140er/simsteer/pull/19) | FE-04 | FE-04 acceptance; passing review and checks. |
+| [#19](https://github.com/140er/simsteer/pull/19) | FE-04 | Merged into V0.12. The recorded-frames report stays open under FE-04 until FE-14. |
 | [#20](https://github.com/140er/simsteer/pull/20) | FE-08 | FE-08 acceptance, with the frozen fit or a named follow-up; maintainer confirms the FAILED policy; passing review and checks. |
 | [#21](https://github.com/140er/simsteer/pull/21) | FE-13 | Passing review and checks. |
 | [#22](https://github.com/140er/simsteer/pull/22) | FE-16 | Passing review and checks, plus one live Windows run of start, backup, restore and virtual display. No engaged-evidence claims. |
@@ -368,7 +377,6 @@ Order:
 - Release only when the packaged application passes the real-game and
   hardware checks, documentation links work, and each game is accurately
   marked tested or untested. Unit tests alone do not establish readiness.
-
 - Hardening work targets V0.12; nothing merges into `main` before the
   release. Each hardening PR needs an independent review that passes on its
   current head and passing repository checks at that head.
