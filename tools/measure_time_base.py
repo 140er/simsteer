@@ -50,10 +50,21 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def generate(clip: Path, seconds: float) -> None:
+def fov_target_met(measurements: list[dict], true_fov: float, tolerance: float = 1.5) -> bool:
+    """Only full real-model solves count toward the FOV accuracy target."""
+    if (len(measurements) != len(RATES)
+            or {row.get("hz") for row in measurements} != set(RATES)):
+        return False
+    return all(isinstance(row.get("real_model_fov_deg"), (int, float))
+               and math.isfinite(row["real_model_fov_deg"])
+               and abs(row["real_model_fov_deg"] - true_fov) <= tolerance
+               for row in measurements)
+
+
+def generate(clip: Path, seconds: float, fov: float = TRUE_FOV) -> None:
     if clip.exists():
         raise FileExistsError(f"refusing to overwrite {clip}")
-    camera = CameraModel(TRUE_FOV, PITCH_DEG, 0.0, CAM_HEIGHT_M)
+    camera = CameraModel(fov, PITCH_DEG, 0.0, CAM_HEIGHT_M)
     writer = ClipWriter(clip, game="ets2")
     for i in range(round(seconds * SOURCE_HZ)):
         t = i / SOURCE_HZ
@@ -63,12 +74,12 @@ def generate(clip: Path, seconds: float) -> None:
                                   "wheel_angle_rad": 0.0,
                                   "game_steer": 0.0, "user_steer": 0.0})
     meta = writer.close("synthetic-time-base")
-    meta["truth"] = {"fov_h_deg": TRUE_FOV, "pitch_deg": PITCH_DEG,
+    meta["truth"] = {"fov_h_deg": fov, "pitch_deg": PITCH_DEG,
                      "height_m": CAM_HEIGHT_M, "speed_mps": SPEED_MPS}
     (clip / "clip.json").write_text(json.dumps(meta, indent=2) + "\n")
 
 
-def synthetic_fov(rate: int) -> float | None:
+def synthetic_fov(rate: int, true_fov: float = TRUE_FOV) -> float | None:
     """Exact optical flow isolates the review's time-span FOV regression.
 
     Keep this distinct from the real-model solve: a network can have a
@@ -83,12 +94,12 @@ def synthetic_fov(rate: int) -> float | None:
     def vision(img, big):
         span = float(img[0, 6, 0, 1] - img[0, 0, 0, 1])
         fov = float(img[0, 6, 0, 0])
-        ratio = math.tan(math.radians(TRUE_FOV / 2)) / math.tan(math.radians(fov / 2))
+        ratio = math.tan(math.radians(true_fov / 2)) / math.tan(math.radians(fov / 2))
         return SPEED_MPS * ratio * span / 0.2, 0.1
 
     stamped = "timestamp" in inspect.signature(FovSolver.update).parameters
     solver = FovSolver(vision, views)
-    calib = Calibration(fov_h_deg=TRUE_FOV)
+    calib = Calibration(fov_h_deg=true_fov)
     for i in range(1000):
         t = i / rate
         solver.update(np.array([t]), calib, SPEED_MPS * 20 / rate, SPEED_MPS, 0.0,
@@ -118,6 +129,7 @@ def measure(clip: Path, out: Path) -> dict:
     times = [json.loads(line)["t"] for line in
              (clip / "frames.jsonl").read_text().splitlines()]
     meta = json.loads((clip / "clip.json").read_text())
+    true_fov = float(meta["truth"]["fov_h_deg"])
     if abs(float(meta["fps"]) - SOURCE_HZ) > 1e-3:
         raise ValueError(f"clip must be {SOURCE_HZ} Hz")
     out.mkdir(parents=True, exist_ok=False)
@@ -126,8 +138,9 @@ def measure(clip: Path, out: Path) -> dict:
         model = DrivingModel(providers=["CPUExecutionProvider"])
         queue = FrameQueue()
         solver = FovSolver(model_vision(model), model_views)
-        calib = Calibration(image_w=960, image_h=540, fov_h_deg=TRUE_FOV,
-                            pitch_deg=PITCH_DEG, height_m=CAM_HEIGHT_M)
+        calib = Calibration(image_w=meta["width"], image_h=meta["height"], fov_h_deg=true_fov,
+                            pitch_deg=meta["truth"]["pitch_deg"],
+                            height_m=meta["truth"]["height_m"])
         ratios = []
         with (out / f"{rate}hz.jsonl").open("w") as log:
             for n, i in enumerate(range(0, len(files), SOURCE_HZ // rate)):
@@ -160,7 +173,7 @@ def measure(clip: Path, out: Path) -> dict:
         row = {"hz": rate, "samples": len(ratios),
                "median_vx_ratio": median(ratios),
                "real_model_fov_deg": solver.result,
-               "synthetic_fov_deg": synthetic_fov(rate), "solver": solver.to_dict()}
+               "synthetic_fov_deg": synthetic_fov(rate, true_fov), "solver": solver.to_dict()}
         measurements.append(row)
         print(json.dumps({k: v for k, v in row.items() if k != "solver"}), flush=True)
     reference = measurements[-1]["median_vx_ratio"]
@@ -178,6 +191,8 @@ def measure(clip: Path, out: Path) -> dict:
         "frame_bytes_sha256": hashlib.sha256(b"".join(
             bytes.fromhex(sha256(p)) for p in files)).hexdigest(),
         "measurements": measurements,
+        "real_model_fov_target_met": fov_target_met(measurements, true_fov),
+        "real_model_fov_tolerance_deg": 1.5,
     }
     (out / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
@@ -189,9 +204,11 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--generate", action="store_true")
     parser.add_argument("--seconds", type=float, default=24.0)
+    parser.add_argument("--fov", type=float, default=TRUE_FOV,
+                        help="Known horizontal FOV when generating a clip")
     args = parser.parse_args()
     if args.generate:
-        generate(args.clip, args.seconds)
+        generate(args.clip, args.seconds, args.fov)
     measure(args.clip, args.out)
 
 

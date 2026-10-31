@@ -37,8 +37,73 @@ saved beside it as `<name>.metrics.json`. The period includes processing,
 HUD rendering, display and capture wait between delivered frames. It is
 informational; existing Windows replay p95 budgets are unchanged.
 
-`tools/measure_time_base.py` creates one dense synthetic 90-degree clip and
+`tools/measure_time_base.py` creates a dense synthetic clip (90° by default,
+or another known horizontal FOV with `--fov`) and
 resamples its saved frames at 10, 15, 18 and 20 Hz. It records real ONNX
 speed and FOV results, plus a separate exact-flow FOV probe that isolates
 time-span math. Exact-flow accuracy does not certify a network's absolute
 FOV accuracy: scene-dependent speed bias can remain at the trained rate.
+
+## Absolute FOV accuracy
+
+The full-model solver has an unresolved scale bias on the synthetic
+calibration scenes. At the true FOV, its learned speed can be lower than
+telemetry speed. Inverting that ratio then yields a narrower FOV. This
+occurs on both 75° and 90° clips, including with the exact perspective
+warp, lossless native-resolution images and independently verified source
+intrinsics. Changing only camera height or speed changes the ratio;
+a fixed correction factor is not supported by these measurements.
+
+Candidate responses can also be non-monotonic. The solver rejects an
+inconsistent crossing and falls back to its initial estimate; that
+estimate inherits the same speed bias. A finer grid alone does not fix it.
+The exact [upstream wide-camera principal point](https://github.com/commaai/openpilot/blob/0f17a9879364c6f410df7ddf990380ad623a4c92/common/transformations/model.py#L26-L34)
+is 151.8; correcting the previous 152.0 approximation does not remove the
+observed bias. Earlier-adapter Check results are invalidated for this
+input change.
+
+Sampling and raster controls also remain outside the accuracy target.
+Warping YUV planes with the pinned upstream nearest-neighbour/clipped-border
+convention yields 87.06° on the 90° clip and 72.30° on the 75° clip at 20 Hz.
+The renderer's original dashed paint snaps to its depth grid. Giving those
+boundaries exact world coordinates still yields 87.68° and 72.28° on
+lossless diagnostic renders. The original saved comparison clips are
+unchanged. These controls do not establish a sampling or rendering fix for
+the model's absolute speed scale.
+
+`tools/diagnose_fov.py` measures candidate responses on identical frame
+pairs and compares warp/pitch/principal-point variants.
+`tools/diagnose_fov_render.py` independently checks the renderer projection
+and probes compression, resolution, speed, height and pair span. Its
+`--dash-audit` mode compares the original and world-anchored paint. The
+measurement summary's `real_model_fov_target_met` uses every full-model
+result; an exact-flow probe cannot make it pass.
+
+### Verification with recorded game frames
+
+Synthetic results do not establish whether real game footage avoids this
+bias. Verify that separately before claiming ±1.5° absolute accuracy:
+
+1. Record manual drives in ETS2 and AC with native capture dimensions,
+   frame timestamps and synchronized speed/yaw telemetry. Record the
+   actual game FOV setting and whether it is horizontal or vertical;
+   convert vertical FOV using the captured aspect ratio. Include two known
+   FOVs, two speed ranges, and low/high camera positions. Keep camera
+   settings fixed within each clip and record pauses or geometry changes.
+2. Establish and freeze camera pitch using a separate segment at the
+   known FOV. Keep that segment separate from the evaluation frames. Do
+   not treat the model's estimated FOV as ground truth or adjust pitch to
+   improve the FOV score.
+3. Resample evaluation frames to 10/15/18/20 Hz by selecting the nearest
+   original timestamp, retaining actual timestamps and telemetry. Do not
+   invent intermediate images or timing. Compare candidates on identical
+   frame pairs and run the full solver from the true FOV and seeds 10°
+   above/below it. Use straight, moving segments accepted by the existing
+   speed/yaw gates; preserve rejected samples and missing results.
+4. Report each clip, camera, speed range and frame rate separately. Every
+   full solve must be within ±1.5° of the independently known FOV; missing
+   results fail. Keep held-out clips from both games. Report the speed
+   ratio at the true FOV alongside the solve to distinguish model scale
+   error from selection error. If that bias persists, use independently
+   known/configured FOV or reconsider the estimator; do not fit a scalar
+   to the evaluation clips.

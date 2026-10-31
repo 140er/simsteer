@@ -20,7 +20,7 @@ frame by construction.
 Two virtual cameras (constants from openpilot's
 `common/transformations/model.py`):
     medmodel  (narrow input "img"):     fl=910, cx=256, cy=47.6  in 512x256
-    sbigmodel (wide   input "big_img"): fl=455, cx=256, cy=152   in 512x256
+    sbigmodel (wide   input "big_img"): fl=455, cx=256, cy=151.8 in 512x256
 
 Frame conventions (openpilot's `common/transformations/camera.py`):
     device frame = FRD (Forward, Right, Down)  — vehicle-mounted basis
@@ -52,7 +52,9 @@ MEDMODEL_CY = 47.6                  # horizon at top 18.6% of the frame
 SBIGMODEL_INPUT_SIZE = (512, 256)
 SBIGMODEL_FL = 455.0
 SBIGMODEL_CX = SBIGMODEL_INPUT_SIZE[0] / 2
-SBIGMODEL_CY = 152.0                # horizon at top 59% — more sky than medmodel
+# Exact pinned upstream value: 0.5 * (256 + MEDMODEL_CY).
+# common/transformations/model.py at 0f17a9879364c6f410df7ddf990380ad623a4c92.
+SBIGMODEL_CY = (256 + MEDMODEL_CY) / 2
 
 MEDMODEL_INTRINSICS = np.array([
     [MEDMODEL_FL, 0.0, MEDMODEL_CX],
@@ -164,7 +166,7 @@ def _crop_and_resize(bgr: np.ndarray,
     version of this function. Centered cropping put the source's
     horizon at the output's vertical midline, but medmodel was
     trained with horizon at row 47.6 (18.6% from top) and sbigmodel
-    at row 152 (59.4%). With horizon mis-aligned, the model
+    at row 151.8 (59.3%). With horizon mis-aligned, the model
     interpreted road pixels as sky and emitted garbage pose, which
     LiveCalib then rejected wholesale.
 

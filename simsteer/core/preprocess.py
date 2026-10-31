@@ -77,7 +77,7 @@ def crop_for_model(bgr: np.ndarray,
     Each output is reprojected onto a fixed virtual camera using
     `pilot.warp.warp_to_model`:
       - narrow: medmodel  (fl=910, cy=47.6) -> tight forward view (~31° HFOV)
-      - wide:   sbigmodel (fl=455, cy=152)  -> wider context view (~59° HFOV)
+      - wide:   sbigmodel (fl=455, cy=151.8) -> wider context view (~59° HFOV)
 
     Both outputs are (256, 512, 3) BGR — the model's canonical input
     size. The mount pitch / yaw stored on `calib` is folded into the
