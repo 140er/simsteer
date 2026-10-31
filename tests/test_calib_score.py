@@ -21,7 +21,8 @@ def _drive(*, weave_m: float = 0.08, ratio: float = 1.01, axis_peak: float = 0.1
         axis = axis_peak * math.sin(2 * math.pi * t / 15.0)
         s.add_axis(axis)
         if i % 4 == 0:
-            s.add_fit(axis * fit_error * rng.choice([-1, 1]), axis)
+            # Independent check observations, not training innovations.
+            s.add_fit(axis * fit_error * rng.choice([-1, 1]), axis, held_out=True)
     return s
 
 
@@ -32,7 +33,7 @@ def test_good_drive_passes():
     assert v.score > 0.8
     assert {m.name for m in v.measurements} == {
         "lane_offset_spread", "speed_ratio_error", "steering_saturation",
-        "steering_fit_error"}
+        "steering_fit_error", "lane_offset_bias", "lane_excursions"}
 
 
 def test_weaving_drive_fails_and_names_steering():
@@ -68,12 +69,15 @@ def test_score_is_the_weakest_measurement():
     assert v.score == weakest
 
 
-def test_measurement_without_enough_samples_is_left_out():
+def test_measurement_without_enough_samples_is_insufficient():
     s = _drive()
     s.ratio_n, s.ratio_log_sum = 20, 20 * math.log(0.5)
     v = evaluate(s)
-    assert v.passed
-    assert "speed_ratio_error" not in {m.name for m in v.measurements}
+    # Omission used to certify a drive without measuring the required speed.
+    assert not v.passed
+    assert v.status == "INSUFFICIENT_EVIDENCE"
+    assert "speed_ratio_error" in v.missing
+    assert next(m for m in v.measurements if m.name == "speed_ratio_error").samples == 20
 
 
 def test_nothing_measured_does_not_pass():
@@ -82,13 +86,15 @@ def test_nothing_measured_does_not_pass():
     assert v.redo == "check"
 
 
-def test_lane_change_offsets_and_turns_are_ignored():
+def test_large_lane_offsets_count_and_turns_do_not_measure_speed_ratio():
     s = CheckStats()
     s.add_offset(2.5)
     s.add_offset(None)
     s.add_speed(10.0, 22.0, 0.2)
     s.add_speed(10.0, 5.0, 0.0)
-    assert s.off_n == 0 and s.ratio_n == 0
+    # Lane changes are filtered by the flow; large lane-keeping errors must
+    # remain in the excursion denominator rather than disappear.
+    assert s.off_n == 1 and s.off_excursions == 1 and s.ratio_n == 0
 
 
 def test_stats_roundtrip():

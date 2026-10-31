@@ -116,6 +116,14 @@ def drive(monkeypatch, *, fault=None, frames=4, key=None, no_frames=False,
             self.steering_fit = False
             self.step = loop.Step.DONE
             self.lc.cal_status = loop.CalStatus.CALIBRATED
+            # These tests inject faults after a certified, engaged checkpoint.
+            # Bare DONE is deliberately insufficient to grant output authority.
+            from simsteer.calib.score import evaluate
+            from test_calib_score import _drive
+            self.calib.update_for_frame((8, 8, 3))
+            self._check_context = self._context()
+            self.result = {**evaluate(_drive(), self.check_policy).to_dict(),
+                           "context": self._check_context}
             st.flow = self
 
     monkeypatch.setattr(loop, "CalibFlow", Flow)

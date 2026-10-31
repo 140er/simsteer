@@ -45,7 +45,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -245,12 +245,18 @@ def _seed_for(seeds: Seeds, device_kind: str | None) -> tuple[float, float, floa
     return seeds.get(device_kind, DEFAULT_SEED) if device_kind else DEFAULT_SEED
 
 
-# Trust gates — either the lifetime persisted samples or the fresh
-# session samples crossing the threshold is sufficient. Halved from
-# 200 because LiveCalib's gates were rejecting heavily and the user
-# was waiting 15+ min to engage; 100 samples is enough for a useable
-# fit on highway driving with the active probe injecting variance.
+# At a single speed, wheel and wheel*v² are collinear: arbitrarily many
+# samples cannot identify a and b separately. Require both turns and a
+# measured speed span, using only accepted, excited training samples.
 TRUSTED_MIN_SAMPLES = 100
+TRUSTED_MIN_EACH_TURN = 10
+# The highway calibration replay peaks below 0.005 rad. At 0.003 rad it
+# supplies both turns with variation in speed without requiring tight bends.
+TRUSTED_MIN_WHEEL = 0.003
+TRUSTED_SPEED_BIN_MPS = 3.0
+TRUSTED_MIN_SPEED_SPAN_MPS = 3.0
+TRUSTED_MIN_SPEED_BIN_SAMPLES = 10
+TRUST_COVERAGE_VERSION = 1
 
 # Auto-freeze: once we've accumulated this many samples the fit is
 # mature enough that further RLS updates are more likely to fit
@@ -265,6 +271,11 @@ class _Persisted:
     c: float = C_INIT
     samples: int = 0
     axis_sign: int | None = None
+    coverage: dict[str, list[int]] = field(default_factory=dict)
+    coverage_speed_ranges: dict[str, list[float]] = field(default_factory=dict)
+    coverage_speed_min: float | None = None
+    coverage_speed_max: float | None = None
+    legacy_fit: bool = False
 
 
 class LiveParams:
@@ -307,6 +318,12 @@ class LiveParams:
         # State vector x = [a, b, c]: axis = a·wheel + b·wheel·v² + c.
         self.x = np.array([loaded.a, loaded.b, loaded.c], dtype=np.float64)
         self.axis_sign = loaded.axis_sign
+        self.coverage = loaded.coverage
+        self.coverage_speed_ranges = loaded.coverage_speed_ranges
+        self.coverage_speed_min = loaded.coverage_speed_min
+        self.coverage_speed_max = loaded.coverage_speed_max
+        self.legacy_fit = loaded.legacy_fit
+        self.validation_model: tuple[float, float, float] | None = None
         # Initial state-covariance diagonal (P0). Per-game — Forza/AC
         # use bigger values to converge from defaults faster, ETS2
         # uses the tighter values that worked there. The b prior is
@@ -499,7 +516,7 @@ class LiveParams:
         # there corrupts the original fit instead of refining it —
         # observed runaway from a≈4 to a≈19 after one off-highway
         # detour. Trusted fits stick to FORGET (slowest).
-        if self.trusted():
+        if self._adaptation_warm():
             return FORGET
         ratio = min(self.innov_ratio, 1.0)
         return max(FORGET_FLOOR, FORGET - FORGET_RESPONSIVENESS * ratio)
@@ -514,7 +531,67 @@ class LiveParams:
         return False
 
     def trusted(self) -> bool:
+        return self.trust_progress >= 1.0
+
+    @property
+    def coverage_turns(self) -> tuple[int, int]:
+        return tuple(sum(counts[i] for counts in self.coverage.values()) for i in (0, 1))
+
+    @property
+    def coverage_speed_span(self) -> float:
+        lows, highs = [], []
+        for key, counts in self.coverage.items():
+            if sum(counts) < TRUSTED_MIN_SPEED_BIN_SAMPLES:
+                continue
+            # Old bins have no per-bin extrema. Their inner edges give a
+            # conservative bound; a single old global outlier proves nothing.
+            low, high = self.coverage_speed_ranges.get(
+                key, [(int(key) + 1) * TRUSTED_SPEED_BIN_MPS,
+                      int(key) * TRUSTED_SPEED_BIN_MPS])
+            lows.append(low)
+            highs.append(high)
+        return max(0.0, max(highs) - min(lows)) if lows else 0.0
+
+    @property
+    def trust_progress(self) -> float:
+        left, right = self.coverage_turns
+        return min(1.0, max(self.samples, self.session_samples) / TRUSTED_MIN_SAMPLES,
+                   left / TRUSTED_MIN_EACH_TURN, right / TRUSTED_MIN_EACH_TURN,
+                   self.coverage_speed_span / TRUSTED_MIN_SPEED_SPAN_MPS)
+
+    @property
+    def trust_need(self) -> str:
+        left, right = self.coverage_turns
+        if max(left, right) < TRUSTED_MIN_EACH_TURN:
+            return "Need left and right curves"
+        if left < TRUSTED_MIN_EACH_TURN:
+            return "Need left curves"
+        if right < TRUSTED_MIN_EACH_TURN:
+            return "Need right curves"
+        if self.coverage_speed_span < TRUSTED_MIN_SPEED_SPAN_MPS:
+            return "Need varied speed"
+        return "Need more steering samples"
+
+    def _adaptation_warm(self) -> bool:
+        # Preserve the existing filter's gain/outlier/watchdog schedule.
+        # Statistical identifiability gates certification, not filter tuning.
         return max(self.samples, self.session_samples) >= TRUSTED_MIN_SAMPLES
+
+    @property
+    def validating(self) -> bool:
+        return self.validation_model is not None
+
+    def begin_validation(self, coefficients=None) -> None:
+        """Freeze a model before admitting any held-out check observations."""
+        self.validation_model = tuple(float(v) for v in
+                                      (self.x if coefficients is None else coefficients))
+        # A lag window spanning training and validation is not held out.
+        self._axis_buf.clear()
+        self._commanded_buf.clear()
+        self._v_buf.clear()
+
+    def end_validation(self) -> None:
+        self.validation_model = None
 
     def axis_for_wheel_angle(self, target_wheel_rad: float,
                              v_ego: float = 0.0) -> float:
@@ -674,7 +751,7 @@ class LiveParams:
                 # Honor the user's lock — intervention still counts as
                 # "modifying the fit," so a locked LiveParams stays put
                 # even if the user nudges the wheel mid-drive.
-                if not self.locked:
+                if not self.locked and not self.validating:
                     self._intervention_learn(axis_lagged, wheel, v2)
                 self.rej_assist += 1   # counts as "intervention" for HUD
                 return
@@ -683,11 +760,18 @@ class LiveParams:
         # (`wheel` and `v2` were already computed above for the
         # intervention check.)
         H = np.array([wheel, wheel * v2, 1.0], dtype=np.float64)
-        predicted = float(H @ self.x)
+        predicted = float(H @ (self.validation_model if self.validating else self.x))
         actual = axis_lagged
         innovation = actual - predicted
         self.predictions += 1
-        innov_gate = (MAX_INNOVATION_WARM if self.trusted()
+        if self.validating:
+            # These frames are scored, including large errors, but never fit
+            # or used by intervention adaptation or the covariance watchdog.
+            self.last_innovation = innovation
+            self.last_predicted = predicted
+            self.last_actual = actual
+            return
+        innov_gate = (MAX_INNOVATION_WARM if self._adaptation_warm()
                       else gates["max_innovation_cold"])
         if abs(innovation) > innov_gate:
             self.rej_innovation += 1
@@ -733,6 +817,16 @@ class LiveParams:
 
         self.samples += 1
         self.session_samples += 1
+        if abs(wheel) >= TRUSTED_MIN_WHEEL:
+            key = str(int(v_lagged // TRUSTED_SPEED_BIN_MPS))
+            counts = self.coverage.setdefault(key, [0, 0])
+            counts[int(wheel > 0)] += 1
+            bounds = self.coverage_speed_ranges.setdefault(key, [v_lagged, v_lagged])
+            bounds[0], bounds[1] = min(bounds[0], v_lagged), max(bounds[1], v_lagged)
+            self.coverage_speed_min = (v_lagged if self.coverage_speed_min is None
+                                       else min(self.coverage_speed_min, v_lagged))
+            self.coverage_speed_max = (v_lagged if self.coverage_speed_max is None
+                                       else max(self.coverage_speed_max, v_lagged))
         self.last_innovation = innovation
         self.last_predicted = predicted
         self.last_actual = actual
@@ -757,7 +851,7 @@ class LiveParams:
             # (closed-loop reinforcement). Trusted fits just keep
             # their slow RLS adaptation; off-regime errors accumulate
             # softly and wash out when the regime returns.
-            if (not self.trusted()
+            if (not self._adaptation_warm()
                     and self._consecutive_bad_fit >= BAD_FIT_PATIENCE):
                 self.P = np.diag(gates["P_init"])
                 self.watchdog_resets += 1
@@ -795,6 +889,11 @@ class LiveParams:
         self.P = np.diag(self._gates["P_init"])
         self.samples = 0
         self.session_samples = 0
+        self.coverage = {}
+        self.coverage_speed_ranges = {}
+        self.coverage_speed_min = self.coverage_speed_max = None
+        self.legacy_fit = False
+        self.end_validation()
         self._axis_buf.clear()
         self._commanded_buf.clear()
         self._v_buf.clear()
@@ -947,7 +1046,29 @@ class LiveParams:
         axis_sign = data.get("axis_sign")
         if axis_sign not in (-1, 1):
             axis_sign = None
-        return _Persisted(a=a, b=b, c=c, samples=samples, axis_sign=axis_sign)
+        coverage = data.get("coverage", {})
+        if not (isinstance(coverage, dict) and all(
+                k.isdigit() and isinstance(v, list) and len(v) == 2
+                and all(type(n) is int and n >= 0 for n in v)
+                for k, v in coverage.items())):
+            coverage = {}
+        speed_min, speed_max = data.get("coverage_speed_min"), data.get("coverage_speed_max")
+        if not all(type(v) in (int, float) and np.isfinite(v) for v in (speed_min, speed_max)):
+            speed_min = speed_max = None
+        ranges = data.get("coverage_speed_ranges", {})
+        if not isinstance(ranges, dict):
+            ranges = {}
+        ranges = {k: v for k, v in ranges.items()
+                  if k in coverage and isinstance(v, list) and len(v) == 2
+                  and all(type(n) in (int, float) and np.isfinite(n) for n in v)
+                  and int(k) * TRUSTED_SPEED_BIN_MPS <= v[0] <= v[1]
+                  < (int(k) + 1) * TRUSTED_SPEED_BIN_MPS}
+        legacy_fit = data.get("legacy_fit", data.get("coverage_version") is None
+                              and samples >= TRUSTED_MIN_SAMPLES and not coverage) is True
+        return _Persisted(a=a, b=b, c=c, samples=samples, axis_sign=axis_sign,
+                          coverage=coverage, coverage_speed_ranges=ranges,
+                          coverage_speed_min=speed_min,
+                          coverage_speed_max=speed_max, legacy_fit=legacy_fit)
 
     def validate_state(self) -> None:
         require_finite("liveparams.state", coefficients=self.x, covariance=self.P,
@@ -970,6 +1091,12 @@ class LiveParams:
                 "c": self.c_bias,
                 "samples": self.samples,
                 "axis_sign": self.axis_sign,
+                "coverage": self.coverage,
+                "coverage_speed_ranges": self.coverage_speed_ranges,
+                "coverage_version": TRUST_COVERAGE_VERSION,
+                "coverage_speed_min": self.coverage_speed_min,
+                "coverage_speed_max": self.coverage_speed_max,
+                "legacy_fit": self.legacy_fit,
             }, indent=2, allow_nan=False))
         except NonFiniteError as exc:
             logging.getLogger(__name__).warning("Not saving non-finite state: %s", exc)
@@ -1005,6 +1132,12 @@ class LiveParams:
                   f"a={loaded.a:.3f} b={loaded.b:.4f} c={loaded.c:+.4f}")
         self.x = np.array([loaded.a, loaded.b, loaded.c], dtype=np.float64)
         self.axis_sign = loaded.axis_sign
+        self.coverage = loaded.coverage
+        self.coverage_speed_ranges = loaded.coverage_speed_ranges
+        self.coverage_speed_min = loaded.coverage_speed_min
+        self.coverage_speed_max = loaded.coverage_speed_max
+        self.legacy_fit = loaded.legacy_fit
+        self.end_validation()
         self.P = np.diag(self._gates["P_init"])
         self.samples = loaded.samples
         self.session_samples = 0
