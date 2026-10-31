@@ -44,7 +44,7 @@ import json
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -242,12 +242,13 @@ def _seed_for(seeds: Seeds, device_kind: str | None) -> tuple[float, float, floa
     return seeds.get(device_kind, DEFAULT_SEED) if device_kind else DEFAULT_SEED
 
 
-# Trust gates — either the lifetime persisted samples or the fresh
-# session samples crossing the threshold is sufficient. Halved from
-# 200 because LiveCalib's gates were rejecting heavily and the user
-# was waiting 15+ min to engage; 100 samples is enough for a useable
-# fit on highway driving with the active probe injecting variance.
+# At a single speed, wheel and wheel*v² are collinear: arbitrarily many
+# samples cannot identify a and b separately. Require both turns at two
+# separated speed ranges, using only accepted, excited training samples.
 TRUSTED_MIN_SAMPLES = 100
+TRUSTED_MIN_EACH_TURN = 10
+TRUSTED_MIN_WHEEL = 0.005
+TRUSTED_SPEED_BIN_MPS = 3.0
 
 # Auto-freeze: once we've accumulated this many samples the fit is
 # mature enough that further RLS updates are more likely to fit
@@ -262,6 +263,7 @@ class _Persisted:
     c: float = C_INIT
     samples: int = 0
     axis_sign: int | None = None
+    coverage: dict[str, list[int]] = field(default_factory=dict)
 
 
 class LiveParams:
@@ -304,6 +306,8 @@ class LiveParams:
         # State vector x = [a, b, c]: axis = a·wheel + b·wheel·v² + c.
         self.x = np.array([loaded.a, loaded.b, loaded.c], dtype=np.float64)
         self.axis_sign = loaded.axis_sign
+        self.coverage = loaded.coverage
+        self.validation_model: tuple[float, float, float] | None = None
         # Initial state-covariance diagonal (P0). Per-game — Forza/AC
         # use bigger values to converge from defaults faster, ETS2
         # uses the tighter values that worked there. The b prior is
@@ -496,7 +500,7 @@ class LiveParams:
         # there corrupts the original fit instead of refining it —
         # observed runaway from a≈4 to a≈19 after one off-highway
         # detour. Trusted fits stick to FORGET (slowest).
-        if self.trusted():
+        if self._adaptation_warm():
             return FORGET
         ratio = min(self.innov_ratio, 1.0)
         return max(FORGET_FLOOR, FORGET - FORGET_RESPONSIVENESS * ratio)
@@ -511,7 +515,31 @@ class LiveParams:
         return False
 
     def trusted(self) -> bool:
+        bins = [int(k) for k, counts in self.coverage.items()
+                if min(counts) >= TRUSTED_MIN_EACH_TURN]
+        return (max(self.samples, self.session_samples) >= TRUSTED_MIN_SAMPLES
+                and bool(bins) and max(bins) - min(bins) >= 2)
+
+    def _adaptation_warm(self) -> bool:
+        # Preserve the existing filter's gain/outlier/watchdog schedule.
+        # Statistical identifiability gates certification, not filter tuning.
         return max(self.samples, self.session_samples) >= TRUSTED_MIN_SAMPLES
+
+    @property
+    def validating(self) -> bool:
+        return self.validation_model is not None
+
+    def begin_validation(self, coefficients=None) -> None:
+        """Freeze a model before admitting any held-out check observations."""
+        self.validation_model = tuple(float(v) for v in
+                                      (self.x if coefficients is None else coefficients))
+        # A lag window spanning training and validation is not held out.
+        self._axis_buf.clear()
+        self._commanded_buf.clear()
+        self._v_buf.clear()
+
+    def end_validation(self) -> None:
+        self.validation_model = None
 
     def axis_for_wheel_angle(self, target_wheel_rad: float,
                              v_ego: float = 0.0) -> float:
@@ -664,7 +692,7 @@ class LiveParams:
                 # Honor the user's lock — intervention still counts as
                 # "modifying the fit," so a locked LiveParams stays put
                 # even if the user nudges the wheel mid-drive.
-                if not self.locked:
+                if not self.locked and not self.validating:
                     self._intervention_learn(axis_lagged, wheel, v2)
                 self.rej_assist += 1   # counts as "intervention" for HUD
                 return
@@ -673,11 +701,18 @@ class LiveParams:
         # (`wheel` and `v2` were already computed above for the
         # intervention check.)
         H = np.array([wheel, wheel * v2, 1.0], dtype=np.float64)
-        predicted = float(H @ self.x)
+        predicted = float(H @ (self.validation_model if self.validating else self.x))
         actual = axis_lagged
         innovation = actual - predicted
         self.predictions += 1
-        innov_gate = (MAX_INNOVATION_WARM if self.trusted()
+        if self.validating:
+            # These frames are scored, including large errors, but never fit
+            # or used by intervention adaptation or the covariance watchdog.
+            self.last_innovation = innovation
+            self.last_predicted = predicted
+            self.last_actual = actual
+            return
+        innov_gate = (MAX_INNOVATION_WARM if self._adaptation_warm()
                       else gates["max_innovation_cold"])
         if abs(innovation) > innov_gate:
             self.rej_innovation += 1
@@ -721,6 +756,9 @@ class LiveParams:
 
         self.samples += 1
         self.session_samples += 1
+        if abs(wheel) >= TRUSTED_MIN_WHEEL:
+            counts = self.coverage.setdefault(str(int(v_lagged // TRUSTED_SPEED_BIN_MPS)), [0, 0])
+            counts[int(wheel > 0)] += 1
         self.last_innovation = innovation
         self.last_predicted = predicted
         self.last_actual = actual
@@ -745,7 +783,7 @@ class LiveParams:
             # (closed-loop reinforcement). Trusted fits just keep
             # their slow RLS adaptation; off-regime errors accumulate
             # softly and wash out when the regime returns.
-            if (not self.trusted()
+            if (not self._adaptation_warm()
                     and self._consecutive_bad_fit >= BAD_FIT_PATIENCE):
                 self.P = np.diag(gates["P_init"])
                 self.watchdog_resets += 1
@@ -783,6 +821,8 @@ class LiveParams:
         self.P = np.diag(self._gates["P_init"])
         self.samples = 0
         self.session_samples = 0
+        self.coverage = {}
+        self.end_validation()
         self._axis_buf.clear()
         self._commanded_buf.clear()
         self._v_buf.clear()
@@ -933,7 +973,14 @@ class LiveParams:
         axis_sign = data.get("axis_sign")
         if axis_sign not in (-1, 1):
             axis_sign = None
-        return _Persisted(a=a, b=b, c=c, samples=samples, axis_sign=axis_sign)
+        coverage = data.get("coverage", {})
+        if not (isinstance(coverage, dict) and all(
+                k.isdigit() and isinstance(v, list) and len(v) == 2
+                and all(type(n) is int and n >= 0 for n in v)
+                for k, v in coverage.items())):
+            coverage = {}
+        return _Persisted(a=a, b=b, c=c, samples=samples, axis_sign=axis_sign,
+                          coverage=coverage)
 
     def save(self, path: Path | None = None) -> None:
         if path is None:
@@ -950,6 +997,7 @@ class LiveParams:
                 "c": self.c_bias,
                 "samples": self.samples,
                 "axis_sign": self.axis_sign,
+                "coverage": self.coverage,
             }, indent=2))
         except OSError:
             pass
@@ -983,6 +1031,8 @@ class LiveParams:
                   f"a={loaded.a:.3f} b={loaded.b:.4f} c={loaded.c:+.4f}")
         self.x = np.array([loaded.a, loaded.b, loaded.c], dtype=np.float64)
         self.axis_sign = loaded.axis_sign
+        self.coverage = loaded.coverage
+        self.end_validation()
         self.P = np.diag(self._gates["P_init"])
         self.samples = loaded.samples
         self.session_samples = 0

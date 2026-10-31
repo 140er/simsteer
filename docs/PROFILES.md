@@ -135,7 +135,7 @@ built-in default.
 | `passive_fit_safe` | bool | `false` | LiveParams may learn while disengaged. Otherwise only with `--passive-fit`. |
 | `longitudinal` | bool | `true` | SimSteer drives throttle and brake. Not read yet. |
 | `speed_source` | string | `telemetry` | `telemetry` or `model`. Not read yet. |
-| `synth_wheel_angle` | bool | `false` | The adapter derives the wheel angle from yaw rate. Not read yet. |
+| `synth_wheel_angle` | bool | `false` | The adapter derives wheel angle from yaw rate. Check labels this dependent evidence and cannot certify an independent steering fit from it. |
 
 ### `[liveparams]`
 
@@ -143,6 +143,39 @@ built-in default.
 |---|---|
 | `[liveparams.gates] profile` | `strict` (games that report the wheel angle) or `loose` (games where it is derived from yaw rate). |
 | `[liveparams.gamepad] seed`, `[liveparams.wheel] seed` | `[a, b, c]` in `axis = a*wheel + b*wheel*v^2 + c`, the starting steering fit for that device until `liveparams_<id>_<device>.json` exists. Without one, `[10, 0, 0]`. |
+
+A trusted fit needs at least 100 accepted samples, with wheel magnitude at
+least 0.005 rad and both turns represented at two separated speed ranges.
+Each range needs 10 samples per turn; ranges use 3 m/s bins separated by
+at least two bins. At one speed, `wheel` and `wheel*v^2` are collinear, so
+sample count cannot identify the two steering coefficients independently.
+Old fits retain their coefficients but must collect coverage before trust.
+
+### Check evidence
+
+Telemetry profiles require lane spread, absolute lane bias, lane excursions,
+speed ratio, steering saturation and an independent held-out steering fit.
+Profiles with `telemetry.kind = "none"` declare only the lane measurements
+and saturation; this smaller contract cannot certify speed or steering fit.
+The runtime still needs engaged driving with valid speed observations. Model
+speed alone cannot establish that independent motion evidence.
+
+Check freezes the fit before collecting validation observations and resumes
+that snapshot after a restart. Training innovations do not count. Lane
+changes are excluded; offsets beyond 1.8 m count as excursions. Required
+measurements need their minimum sample count and at least 80% of their
+offered observations. Check also needs 120 engaged seconds and at least
+20 steering samples in each direction. Results are `PASS`, `FAIL`, or
+`INSUFFICIENT_EVIDENCE`, with counts and denominators in the log.
+
+Saved certification is bound to the camera geometry, output device and id,
+controller settings, profile capabilities and certification schema. A
+detected output binding reversal revokes direction verification. Changed
+context requires an explicit Check again; missing evidence does not spend
+a failed-fit attempt. Earlier saved passes become `INSUFFICIENT_EVIDENCE`.
+Camera and direction progress remain available; steering coverage or output
+verification must be completed when absent. `FAILED` blocks engagement and
+neutralizes AI output until calibration restarts.
 
 ### `[[setup]]`
 

@@ -27,7 +27,7 @@ import json
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import cv2
 import numpy as np
@@ -44,6 +44,7 @@ from simsteer.app.probe import SteeringProbe
 from simsteer.app.settings import Settings
 from simsteer.calib.flow import CalibFlow, Obs, Step, steering_fit_for
 from simsteer.calib.fov_source import profile_reader
+from simsteer.calib.score import CheckPolicy
 from simsteer.core.calibration import Calibration, model_view_calib
 from simsteer.core.constants import DESIRE_LEN, T_IDXS
 from simsteer.core.control import (
@@ -199,6 +200,12 @@ def run(settings: Settings, game: GameProfile | str, *,
         live_params=live_params, calib=calib,
         steering_fit=steering_fit_for(profile),
         passive_fit=passive_fit_allowed(),
+        check_policy=CheckPolicy.for_capabilities(
+            steering_fit_for(profile), profile.capabilities.synth_wheel_angle),
+        certification_context=lambda: {
+            "controller": asdict(ctrl_cfg), "device": settings.device,
+            "device_id": settings.vjoy_device,
+            "capabilities": asdict(profile.capabilities)},
         make_fov_solver=lambda: FovSolver(vision, model_views),
         fov_config=profile_reader(profile.camera.fov_source))
 
@@ -573,6 +580,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                             set_banner("DISENGAGED", COL_ACCENT_BLUE, 1.5)
                             print("-> DISENGAGED")
                         else:
+                            flow.confirm_check()
                             ok, why = engage_check()
                             if not ok:
                                 audio.play("denied")
