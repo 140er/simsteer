@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from simsteer.core.learners.livecalib import CameraBlockedReason
 
 
 def developer_mode(settings) -> bool:
@@ -60,6 +64,9 @@ class CalibrationView:
     steps: tuple[str, ...] = ("FOV", "Camera", "Steering", "Direction", "Check", "Done")
     step_index: int = 0
     tone: str = "calibrating"
+    blocked_reason: CameraBlockedReason | None = None
+    blocked_counts: tuple[tuple[str, int], ...] = ()
+    camera_outcome: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "progress", max(0.0, min(1.0, self.progress)))
@@ -118,6 +125,17 @@ def calibration_view(
         elif flow.step.value == "failed":
             step, prompt = "Not calibrated", "R  Recalibrate"
             instruction = result.get("reason", instruction).removesuffix(". R restarts")
+        camera = flow.camera_diagnostics()
+        camera_visible = flow.step.value == "camera" or camera["status"] == "NO_PROGRESS"
+        if camera["status"] == "NO_PROGRESS":
+            from simsteer.core.learners.livecalib import CAMERA_GUIDANCE, CameraBlockedReason
+
+            step, index = "Camera NO_PROGRESS", steps.index("Camera")
+            top = sorted(camera["no_progress_counts"].items(), key=lambda item: -item[1])[:3]
+            instruction = "NO_PROGRESS: " + ", ".join(
+                f"{CameraBlockedReason(reason).name} {count}" for reason, count in top)
+            reason = CameraBlockedReason(top[0][0]) if top else CameraBlockedReason.MISSING_POSE
+            prompt = f"{CAMERA_GUIDANCE[reason]}  R  Recalibrate"
         return CalibrationView(
             step,
             instruction,
@@ -128,6 +146,9 @@ def calibration_view(
             tuple(steps),
             index,
             tone,
+            blocked_reason=camera["blocked_reason"] if camera_visible else None,
+            blocked_counts=tuple(camera["blocked_counts"].items()) if camera_visible else (),
+            camera_outcome=camera["status"] if camera_visible else None,
         )
 
     if routine is not None and routine.active:

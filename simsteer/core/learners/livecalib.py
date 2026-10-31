@@ -14,7 +14,8 @@ Algorithm matches openpilot:
        |yaw_rate|   < MAX_YAW_RATE_FILTER (2 deg/s)
        model vx     > MIN_SPEED_FILTER (catches stationary model output
                                         that disagrees with telemetry)
-       lat-vel-std  / vx < MAX_VEL_ANGLE_STD (0.25 deg) — model is
+       After five completed blocks, also require:
+       lat-vel-std  / vx < MAX_VEL_ANGLE_STD (0.5 deg) — model is
                                               uncertain about lateral
                                               motion → reject
        height-std   < MAX_HEIGHT_STD (30 mm)
@@ -37,7 +38,7 @@ Algorithm matches openpilot:
      the rpy/height history (ringbuffer of INPUTS_WANTED = 50).
 
   5. The smoothed estimate exposed to callers is the mean over the
-     committed history. With INPUTS_NEEDED (5) blocks landed we report
+     committed history. With INPUTS_NEEDED (3) blocks landed we report
      calStatus = CALIBRATED; below that, UNCALIBRATED with progress.
      If the smoothed rpy or height drifts outside the validation
      bounds, calStatus = INVALID.
@@ -60,9 +61,9 @@ import json
 import logging
 import math
 import time
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable
-from enum import IntEnum
+from enum import Enum, IntEnum
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -89,6 +90,12 @@ WRITE_CALIBRATION = True
 INPUTS_NEEDED = 3     # min blocks for CALIBRATED status (was 5)
 INPUTS_WANTED = 50    # ringbuffer size — extras improve stability
 BLOCK_SIZE = 100      # samples per block average
+
+# Keep the upstream bootstrap independent of our three-block write threshold.
+# Pinned with the driving models in tools/fetch_model.py. calibrationd.py
+# lines 28 and 170-179 skip BOTH certainty gates while valid_blocks < 5:
+# https://github.com/commaai/openpilot/blob/0f17a9879364c6f410df7ddf990380ad623a4c92/selfdrive/locationd/calibrationd.py#L170-L179
+CERTAINTY_BOOTSTRAP_BLOCKS = 5
 
 MIN_SPEED_FILTER_MPS = 15 * 0.44704              # 15 mph → 6.7 m/s
 MAX_YAW_RATE_FILTER = math.radians(2.0)          # 2 deg/s
@@ -145,6 +152,54 @@ class CalStatus(IntEnum):
     INVALID = 2
 
 
+class CameraBlockedReason(str, Enum):
+    MISSING_POSE = "missing_pose"
+    MISSING_SPEED = "missing_speed"
+    SPEED = "speed"
+    TURNING = "turning"
+    LATERAL_ACCELERATION = "lateral_acceleration"
+    HUMAN_STEERING = "human_steering"
+    MODEL_SPEED = "model_speed"
+    LATERAL_UNCERTAINTY = "lateral_uncertainty"
+    HEIGHT_UNCERTAINTY = "height_uncertainty"
+    PITCH_BOUNDS = "pitch_bounds"
+    YAW_BOUNDS = "yaw_bounds"
+    HEIGHT_BOUNDS = "height_bounds"
+    BLOCK_JUMP = "block_jump"
+    NON_FINITE = "non_finite"
+
+
+CAMERA_GUIDANCE = {
+    CameraBlockedReason.MISSING_POSE: "Check the captured road view and model.",
+    CameraBlockedReason.MISSING_SPEED: "Restore speed telemetry.",
+    CameraBlockedReason.SPEED: "Drive faster than 25 km/h.",
+    CameraBlockedReason.TURNING: "Find a straighter stretch of road.",
+    CameraBlockedReason.LATERAL_ACCELERATION: "Slow down or take a gentler curve.",
+    CameraBlockedReason.HUMAN_STEERING: "Use smaller, smoother steering inputs.",
+    CameraBlockedReason.MODEL_SPEED: "Check the road view and camera FOV.",
+    CameraBlockedReason.LATERAL_UNCERTAINTY: "Use a clear road view with visible lane lines.",
+    CameraBlockedReason.HEIGHT_UNCERTAINTY: "Check the camera FOV and road view.",
+    CameraBlockedReason.PITCH_BOUNDS: "Level the camera and check its FOV.",
+    CameraBlockedReason.YAW_BOUNDS: "Face the camera straight ahead.",
+    CameraBlockedReason.HEIGHT_BOUNDS: "Check the camera height and FOV.",
+    CameraBlockedReason.BLOCK_JUMP: "Keep the camera fixed and drive smoothly.",
+    CameraBlockedReason.NON_FINITE: "Restore valid model and telemetry data.",
+}
+
+_REJECTION_COUNTERS = {
+    CameraBlockedReason.SPEED: "rej_speed",
+    CameraBlockedReason.MODEL_SPEED: "rej_speed",
+    CameraBlockedReason.TURNING: "rej_turning",
+    CameraBlockedReason.LATERAL_ACCELERATION: "rej_lat_acc",
+    CameraBlockedReason.HUMAN_STEERING: "rej_human",
+    CameraBlockedReason.LATERAL_UNCERTAINTY: "rej_vel_std",
+    CameraBlockedReason.HEIGHT_UNCERTAINTY: "rej_height_std",
+    CameraBlockedReason.PITCH_BOUNDS: "rej_pitch",
+    CameraBlockedReason.YAW_BOUNDS: "rej_yaw",
+    CameraBlockedReason.BLOCK_JUMP: "rej_block_jump",
+}
+
+
 def _wrap_rotation_composition(current_rpy_rad: tuple[float, float, float],
                                observed_rpy_rad: tuple[float, float, float]
                                ) -> tuple[float, float, float]:
@@ -189,7 +244,10 @@ class LiveCalib:
         self.rej_lat_acc = 0
         self.rej_human = 0
         self.rej_block_jump = 0       # block-level (not sample-level)
-        self.last_rejection_reason: str | None = None
+        self.last_rejection_reason: CameraBlockedReason | None = None
+        # First failing gate per update; BLOCK_JUMP counts discarded blocks.
+        self.blocked_counts: Counter[CameraBlockedReason] = Counter()
+        self._last_diagnostic_save = self.clock()
 
         # Human-input gate state. Frame countdown so the suppress
         # actually elapses (a sample-count target wouldn't, since
@@ -267,6 +325,18 @@ class LiveCalib:
 
     # ----- ingest -----
 
+    def record_blocked(self, reason: CameraBlockedReason) -> None:
+        self.last_rejection_reason = reason
+        self.blocked_counts[reason] += 1
+        if reason is not CameraBlockedReason.BLOCK_JUMP:
+            self.rejected += 1
+        if counter := _REJECTION_COUNTERS.get(reason):
+            setattr(self, counter, getattr(self, counter) + 1)
+        # Rejected-only drives also leave diagnostics on disk.
+        if (reason is not CameraBlockedReason.BLOCK_JUMP and self._game is not None
+                and self.clock() - self._last_diagnostic_save >= 5.0):
+            self.save_state(self._game)
+
     def update(self, calib: "Calibration",
                pose: np.ndarray | None,
                road_transform: np.ndarray | None,
@@ -295,53 +365,42 @@ class LiveCalib:
 
         # --- gate set 1: telemetry ---
         if pose is None:
-            self.last_rejection_reason = "missing_pose"
+            self.record_blocked(CameraBlockedReason.MISSING_POSE)
             return
         if v_ego is None:
-            self.last_rejection_reason = "missing_speed"
+            self.record_blocked(CameraBlockedReason.MISSING_SPEED)
             return
         if v_ego < MIN_SPEED_FILTER_MPS:
-            self.last_rejection_reason = "speed"
-            self.rej_speed += 1
-            self.rejected += 1
+            self.record_blocked(CameraBlockedReason.SPEED)
             return
         if (actual_yaw_rate is not None
                 and abs(actual_yaw_rate) > MAX_YAW_RATE_FILTER):
-            self.last_rejection_reason = "turning"
-            self.rej_turning += 1
-            self.rejected += 1
+            self.record_blocked(CameraBlockedReason.TURNING)
             return
         if (actual_yaw_rate is not None
                 and abs(actual_yaw_rate) * v_ego > MAX_LAT_ACC_MPS2):
-            self.last_rejection_reason = "lateral_acceleration"
-            self.rej_lat_acc += 1
-            self.rejected += 1
+            self.record_blocked(CameraBlockedReason.LATERAL_ACCELERATION)
             return
         if self._suppress_frames_remaining > 0:
-            self.last_rejection_reason = "human_steering"
-            self.rej_human += 1
-            self.rejected += 1
+            self.record_blocked(CameraBlockedReason.HUMAN_STEERING)
             return
 
         vx, vy, vz = float(pose[0]), float(pose[1]), float(pose[2])
 
         # --- gate set 2: model self-consistency ---
         if vx < MIN_SPEED_FILTER_MPS:
-            self.last_rejection_reason = "model_speed"
-            self.rej_speed += 1
-            self.rejected += 1
+            self.record_blocked(CameraBlockedReason.MODEL_SPEED)
             return
 
         # Lateral-velocity angle stddev gate — when the model is
         # uncertain about its lateral velocity, the implied yaw is
         # noisy and updates will poison the calibration. openpilot
         # uses `atan2(transStd[1], trans[0]) < MAX_VEL_ANGLE_STD`.
-        if pose_std is not None and len(pose_std) >= 2:
+        if (self.blocks >= CERTAINTY_BOOTSTRAP_BLOCKS
+                and pose_std is not None and len(pose_std) >= 2):
             vel_angle_std = math.atan2(float(pose_std[1]), max(vx, 1e-3))
             if vel_angle_std > MAX_VEL_ANGLE_STD:
-                self.last_rejection_reason = "lateral_uncertainty"
-                self.rej_vel_std += 1
-                self.rejected += 1
+                self.record_blocked(CameraBlockedReason.LATERAL_UNCERTAINTY)
                 return
 
         # Road-height stddev gate — the model's `road_transform_std[2]`
@@ -351,11 +410,10 @@ class LiveCalib:
         if road_transform is not None and len(road_transform) >= 3:
             observed_height = float(road_transform[2])
             self.last_observed_height = observed_height
-            if road_transform_std is not None and len(road_transform_std) >= 3:
+            if (self.blocks >= CERTAINTY_BOOTSTRAP_BLOCKS
+                    and road_transform_std is not None and len(road_transform_std) >= 3):
                 if float(road_transform_std[2]) > MAX_HEIGHT_STD:
-                    self.last_rejection_reason = "height_uncertainty"
-                    self.rej_height_std += 1
-                    self.rejected += 1
+                    self.record_blocked(CameraBlockedReason.HEIGHT_UNCERTAINTY)
                     return
 
         # --- residual rpy from pose (openpilot calibrationd.py:172-175) ---
@@ -375,19 +433,14 @@ class LiveCalib:
         new_pitch_deg = math.degrees(new_rpy[1])
         new_yaw_deg = math.degrees(new_rpy[2])
         if not (PITCH_MIN_DEG <= new_pitch_deg <= PITCH_MAX_DEG):
-            self.last_rejection_reason = "pitch_bounds"
-            self.rej_pitch += 1
-            self.rejected += 1
+            self.record_blocked(CameraBlockedReason.PITCH_BOUNDS)
             return
         if not (YAW_MIN_DEG <= new_yaw_deg <= YAW_MAX_DEG):
-            self.last_rejection_reason = "yaw_bounds"
-            self.rej_yaw += 1
-            self.rejected += 1
+            self.record_blocked(CameraBlockedReason.YAW_BOUNDS)
             return
         if (observed_height is not None
                 and not (HEIGHT_MIN_M <= observed_height <= HEIGHT_MAX_M)):
-            self.last_rejection_reason = "height_bounds"
-            self.rejected += 1
+            self.record_blocked(CameraBlockedReason.HEIGHT_BOUNDS)
             return
 
         # --- accept: feed the in-flight block ---
@@ -442,7 +495,7 @@ class LiveCalib:
             if (d_pitch_deg > BLOCK_JUMP_THRESHOLD_DEG
                     or d_yaw_deg > BLOCK_JUMP_THRESHOLD_DEG):
                 watchdog_rejected = True
-                self.rej_block_jump += 1
+                self.record_blocked(CameraBlockedReason.BLOCK_JUMP)
 
         if not watchdog_rejected:
             self._rpys.append(block_rpy)
@@ -485,10 +538,8 @@ class LiveCalib:
                 calib.yaw_deg = float(yaw)
             # Height directly drives `road_to_image`'s placement of the
             # road plane (z_FRD = +height_m), so a wrong manual value
-            # vertically misaligns the overlay. The per-sample
-            # `MAX_HEIGHT_STD` gate (~30 mm) already drops noisy samples
-            # before they reach the block average, so by the time we
-            # commit here the value has been triple-filtered.
+            # vertically misaligns the overlay. Height bounds remain active
+            # during bootstrap; later updates also pass the certainty gate.
             if height is not None and HEIGHT_MIN_M <= height <= HEIGHT_MAX_M:
                 calib.height_m = float(height)
             self._wrote_to_calib = True
@@ -579,6 +630,10 @@ class LiveCalib:
         self.rej_human = 0
         self.rej_block_jump = 0
         self.last_rejection_reason = None
+        self.blocked_counts.clear()
+        self._last_diagnostic_save = self.clock()
+        self._last_game_steer = None
+        self._suppress_frames_remaining = 0
         self.cal_status = CalStatus.UNCALIBRATED
         self._consecutive_invalid_blocks = 0
         self._wrote_to_calib = False
@@ -662,7 +717,8 @@ class LiveCalib:
                        wide=self._wide_sum, wide_estimate=self.wide_from_device_estimate,
                        block=self._block_rpy_sum, height=self._block_height_sum,
                        previous_axis=self._last_game_steer, samples=self.samples,
-                       wide_n=self._wide_n, block_n=self._block_n, rejected=self.rejected)
+                       wide_n=self._wide_n, block_n=self._block_n, rejected=self.rejected,
+                       blocked_counts=self.blocked_counts)
 
     def save_state(self, game: str) -> None:
         """Serialize the committed block history (and the in-flight block
@@ -683,10 +739,13 @@ class LiveCalib:
                 "block_n": int(self._block_n),
                 "samples": int(self.samples),
                 "rejected": int(self.rejected),
+                "blocked_counts": dict(self.blocked_counts),
+                "last_rejection_reason": self.last_rejection_reason,
                 "cal_status": int(self.cal_status),
             }
             state_path("livecalib_state", game).write_text(
                 json.dumps(payload, indent=2, allow_nan=False))
+            self._last_diagnostic_save = self.clock()
         except NonFiniteError as exc:
             logging.getLogger(__name__).warning("Not saving non-finite state: %s", exc)
         except OSError:
@@ -716,13 +775,19 @@ class LiveCalib:
             block_n = int(data.get("block_n", 0))
             samples = int(data.get("samples", 0))
             rejected = int(data.get("rejected", 0))
+            blocked_counts = Counter({CameraBlockedReason(k): int(v)
+                                      for k, v in data.get("blocked_counts", {}).items()})
+            reason = data.get("last_rejection_reason")
+            reason = CameraBlockedReason(reason) if reason is not None else None
+            if any(v < 0 for v in blocked_counts.values()):
+                return
             require_finite("livecalib.load", rpys=rpys, heights=heights, wide=wide,
                            estimate=estimate, block=block, height=height)
             if any(r.shape != (3,) for r in [*rpys, wide, block]):
                 return
             if estimate is not None and estimate.shape != (3,):
                 return
-        except (ValueError, TypeError, OverflowError):
+        except (ValueError, TypeError, OverflowError, AttributeError):
             return
         # Validate the whole snapshot before adopting any of it.
         self._rpys = deque(rpys, maxlen=INPUTS_WANTED)
@@ -731,4 +796,9 @@ class LiveCalib:
         self.wide_from_device_estimate = estimate
         self._block_rpy_sum, self._block_height_sum = block, height
         self._block_n, self.samples, self.rejected = block_n, samples, rejected
+        self.blocked_counts = blocked_counts
+        self.last_rejection_reason = reason
+        for name in set(_REJECTION_COUNTERS.values()):
+            setattr(self, name, sum(count for gate, count in blocked_counts.items()
+                                   if _REJECTION_COUNTERS.get(gate) == name))
         self._refresh_cal_status()

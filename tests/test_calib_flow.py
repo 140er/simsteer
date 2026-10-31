@@ -576,7 +576,7 @@ def test_hud_panel_shows_step_percent_and_eta():
         d.frames(1)
     lc.blocks, lc._block_n = 1, 89
     assert flow.panel(22.0).title.startswith("CALIBRATE 2/4 Camera 63%")
-    assert flow.panel(3.0).hint == "Drive faster than 25 km/h"
+    assert flow.panel(3.0).hint == "Camera SPEED: Drive faster than 25 km/h."
 
     lc.converge()
     d.frames(1)

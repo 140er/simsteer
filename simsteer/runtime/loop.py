@@ -53,7 +53,7 @@ from simsteer.core.finite import NonFiniteError, require_finite
 from simsteer.core.control import (
     ControllerConfig, LateralController, LongitudinalController,
 )
-from simsteer.core.learners.livecalib import CalStatus, LiveCalib
+from simsteer.core.learners.livecalib import CalStatus, CameraBlockedReason, LiveCalib
 from simsteer.core.learners.liveparams import LiveParams
 from simsteer.core.model import DrivingModel
 from simsteer.core.postprocess import decode
@@ -382,6 +382,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                 else:
                     frame = last_frame
                 frame_fov_h_deg = float(calib.fov_h_deg)
+                frame_camera_pose = {name: getattr(calib, name)
+                                     for name in ("pitch_deg", "yaw_deg", "height_m")}
                 t_warp = t_model = t_ctrl = time.perf_counter()
                 now_perf = clock.now()
                 dt = max(1e-3, now_perf - last)
@@ -569,6 +571,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                         pipeline_healthy = True
                 except NonFiniteError as exc:
                     stop_output(exc)
+                    if flow.camera_learning:
+                        live_calib.record_blocked(CameraBlockedReason.NON_FINITE)
                     current_fault = "Invalid data"
                     decoded = display_decoded
                     v_real = actual_yaw = wheel_angle = game_steer = user_steer = None
@@ -726,6 +730,15 @@ def run(settings: Settings, game: GameProfile | str, *,
                         "output_fault": current_fault or None,
                         "camera_learning": camera_learning,
                         "camera_rejection": camera_rejection,
+                        "camera_sample": ({
+                            **{name: (getattr(decoded, name).tolist()
+                                      if getattr(decoded, name) is not None else None)
+                               for name in ("pose", "road_transform", "pose_std",
+                                            "road_transform_std", "wide_from_device_euler")},
+                            "actual_yaw_rate": actual_yaw, "v_ego": v_real,
+                            "game_steer": game_steer,
+                            "calibration": frame_camera_pose,
+                        } if camera_learning else None),
                         "actual_speed_mps": v_real,
                         "actual_yaw_rad_s": actual_yaw,
                         "pose_vx": vx,
