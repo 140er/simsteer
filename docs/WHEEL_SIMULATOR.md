@@ -19,7 +19,11 @@ Only tests and the command below install it; the app never does.
 - DirectInput rules: data format before Acquire, exclusive access for
   force feedback, one exclusive owner per base, `DIERR_INPUTLOST` once and
   then `DIERR_NOTACQUIRED` after an unplug, new device objects after a
-  replug. DD2 quirks: autocentre only before Acquire, effects must name the
+  replug. `DISFFC_RESET` removes every effect and disables the actuators
+  until `DISFFC_SETACTUATORSON`, as DirectInput documents
+  (`reset_disables_actuators=False` for a device that keeps them on);
+  `CONTINUE` only while paused, and no effect starts or changes while
+  paused. DD2 quirks: autocentre only before Acquire, effects must name the
   axis by object ID.
 - vJoy: the setup check, feeding axes and buttons, and the game's force
   feedback packets delivered to SimSteer's callback.
@@ -75,4 +79,6 @@ happens, so a run that is killed can still be judged by `report`.
 The DD2's slot layout after SimSteer's data format, which instance carries
 live input, the pedals' rest direction and the driver's behaviour when a
 process is killed are taken from one enumeration or assumed worst case;
-check them on a real base when they matter.
+check them on a real base when they matter. After a replug the old device
+objects stay dead, so code that re-acquires an old object after a replug
+(which real DirectInput often allows) is not exercised here.

@@ -368,7 +368,19 @@ class DirectInputBackend:
             if h.acquired:
                 return dv.DIERR_ACQUIRED
             values = (di.LONG * 2).from_address(ctypes.addressof(header) + ctypes.sizeof(di.DIPROPHEADER))
-            h.ranges[header.dwObj] = (values[0], values[1])
+            axes = [r for r in h.rows or () if r.kind == "axis" and r.obj is not None]
+            if header.dwHow == di.DIPH_DEVICE:
+                offsets = [r.offset for r in axes]
+            elif header.dwHow == DIPH_BYOFFSET:
+                offsets = [r.offset for r in axes if r.offset == header.dwObj]
+            elif header.dwHow == DIPH_BYID:
+                offsets = [r.offset for r in axes if r.obj.dw_type & 0x00FFFFFF == header.dwObj & 0x00FFFFFF]
+            else:
+                return di.DIERR_INVALIDPARAM
+            if not offsets:
+                return DIERR_NOTFOUND
+            for offset in offsets:
+                h.ranges[offset] = (values[0], values[1])
             return di.DI_OK
         value = view(data, di.DIPROPDWORD).dwData
         name = {di.DIPROP_FFGAIN: "FFGAIN", di.DIPROP_AUTOCENTER: "AUTOCENTER"}.get(prop, str(prop))
@@ -634,7 +646,7 @@ class DirectInputBackend:
     def _effect_Unload(self, e, t):
         hr = self._effect_gate(e)
         if hr is None:
-            hr = e.effect.unload(t)
+            hr = e.effect.unload(t) if e.owner.exclusive_acquired else di.DIERR_NOTEXCLUSIVEACQUIRED
         return self._ffb(e.owner.dev, t, "Unload", hr, effect=e.handle)
 
     def _effect_GetEffectStatus(self, e, t, out):

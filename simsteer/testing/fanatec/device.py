@@ -25,6 +25,9 @@ DI_NOEFFECT = di.S_FALSE
 DIERR_ACQUIRED = 0x800700AA
 DIERR_UNSUPPORTED = 0x80004001
 DIERR_NOTINITIALIZED = 0x80070015
+# DirectInput leaves starting or changing an effect on a paused device
+# undefined; the simulator refuses it with this code so tests notice.
+DIERR_PAUSED = di.DIERR_INVALIDPARAM
 
 DIGFFS_EMPTY = 0x00000001
 DIGFFS_STOPPED = 0x00000002
@@ -70,6 +73,8 @@ class SimEffect:
         return until is None or t < until
 
     def update(self, t: float, params: fm.DiParams, flags: int) -> int:
+        if self.device.paused and not flags & fm.DIEP_NODOWNLOAD:
+            return DIERR_PAUSED  # a paused device's effects cannot be modified
         self.params = params
         if flags & fm.DIEP_AXES:
             self.has_axes = True
@@ -92,6 +97,8 @@ class SimEffect:
     def start(self, t: float, iterations: int, flags: int) -> int:
         if not self.owner.exclusive_acquired:
             return di.DIERR_NOTEXCLUSIVEACQUIRED
+        if self.device.paused:
+            return DIERR_PAUSED  # no new effects start while paused
         if not self.complete:
             return di.DIERR_INCOMPLETEEFFECT
         if flags & fm.DIES_SOLO:
@@ -122,7 +129,8 @@ class SimDevice:
     """A physical device behind one or more DirectInput instances."""
 
     def __init__(self, sim, instances: tuple[InstanceProfile, ...], *, live_instance=0, rim_range_deg=900.0,
-                 pedals_inverted=False, reset_restores_gain=True, vjoy=False) -> None:
+                 pedals_inverted=False, reset_restores_gain=True, reset_disables_actuators=True,
+                 vjoy=False) -> None:
         self.sim = sim
         self.instances = tuple(instances)
         self.objects = [p.objects() for p in self.instances]
@@ -130,6 +138,7 @@ class SimDevice:
         self.rim_range_deg = float(rim_range_deg)
         self.pedals_inverted = pedals_inverted
         self.reset_restores_gain = reset_restores_gain
+        self.reset_disables_actuators = reset_disables_actuators
         self.is_vjoy = vjoy
         self.ffb = FfbLog(on_event=sim._forward_event)
         self.effects: list[SimEffect] = []
@@ -347,15 +356,18 @@ class SimDevice:
             for e in self.effects:
                 e.stop(t)
         elif flag == fm.DISFFC_RESET:
+            # DirectInput: effects are removed and the actuators disabled.
             for e in self.effects:
                 e.unload(t)
-            self.paused, self.actuators = False, True
+            self.paused, self.actuators = False, not self.reset_disables_actuators
             if self.reset_restores_gain and self.gain != NOMINAL:
                 self.gain = NOMINAL
                 self.ffb.add({"t": t, "ev": "gain", "value": NOMINAL})
         elif flag == fm.DISFFC_PAUSE:
             self.paused = True
         elif flag == fm.DISFFC_CONTINUE:
+            if not self.paused:
+                return di.DIERR_INVALIDPARAM  # CONTINUE is only valid while paused
             self.paused = False
         elif flag == fm.DISFFC_SETACTUATORSOFF:
             self.actuators = False

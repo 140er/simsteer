@@ -29,6 +29,9 @@ class FanatecSim:
     "single" (one instance), "two_bases", "none" (only vJoy).
     live_instance: which DD2 instance carries the input: 0, 1 or "both".
     pedals_inverted: pedals read high at rest and low when pressed.
+    reset_restores_gain / reset_disables_actuators: what DISFFC_RESET does
+    besides removing every effect. DirectInput documents that it disables
+    the actuators; the device gain going back to 100 % is the worst case.
     vjoy: simulate vJoyInterface.dll too (False keeps the installed one).
     vjoy_listed: list the vJoy device in DirectInput, as Windows does.
     clock: seconds, `time.monotonic` by default; everything (tracks,
@@ -37,7 +40,8 @@ class FanatecSim:
     """
 
     def __init__(self, profile: str = "dd2", *, live_instance=0, rim_range_deg: float = 900,
-                 pedals_inverted: bool = False, reset_restores_gain: bool = True, vjoy: bool = True,
+                 pedals_inverted: bool = False, reset_restores_gain: bool = True,
+                 reset_disables_actuators: bool = True, vjoy: bool = True,
                  vjoy_listed: bool = True, vjoy_options: dict | None = None,
                  clock: Callable[[], float] | None = None, events=None) -> None:
         if profile not in PROFILES:
@@ -50,7 +54,8 @@ class FanatecSim:
             events = self._writer
         self._events = events
         self.bases = [SimDevice(self, instances, live_instance=live_instance, rim_range_deg=rim_range_deg,
-                                pedals_inverted=pedals_inverted, reset_restores_gain=reset_restores_gain)
+                                pedals_inverted=pedals_inverted, reset_restores_gain=reset_restores_gain,
+                                reset_disables_actuators=reset_disables_actuators)
                       for instances in PROFILES[profile]]
         self.devices = list(self.bases)
         if vjoy_listed:

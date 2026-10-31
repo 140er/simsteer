@@ -177,6 +177,27 @@ def test_slot_names_follow_the_data_format_per_instance(sim):
     rb.close()
 
 
+def test_axis_range_by_device_offset_and_id(sim):
+    r = Reader(fanatec(sim)[0])
+
+    def set_range(how, obj, lo, hi):
+        prop = (ctypes.c_byte * 24)()
+        header = di.DIPROPHEADER.from_buffer(prop)
+        header.dwSize, header.dwHeaderSize, header.dwObj, header.dwHow = 24, 16, obj, how
+        (di.LONG * 2).from_buffer(prop, 16)[:] = [lo, hi]
+        return r.call("SetProperty", 4, ctypes.byref(prop))
+
+    assert set_range(di.DIPH_DEVICE, 0, -1000, 1000) == di.DI_OK
+    assert set_range(2, 0x00000102, 0, 100) == di.DI_OK  # BYID: the second axis
+    assert set_range(1, 8, 0, 10) == sdi.DIERR_NOTFOUND  # no object mapped at Z
+    assert set_range(7, 0, 0, 10) == di.DIERR_INVALIDPARAM
+    r.call("Acquire")
+    sim.wheel.set(steer_deg=450, throttle=1.0)
+    axes = r.axes()
+    assert (axes[0], axes[1], axes[3]) == (1000, 100, 0)
+    r.close()
+
+
 @pytest.mark.parametrize("inverted", [False, True])
 def test_pedals_and_their_direction(inverted):
     with FanatecSim("single", pedals_inverted=inverted) as sim:

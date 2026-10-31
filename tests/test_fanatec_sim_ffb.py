@@ -144,6 +144,7 @@ def test_effects_obey_directinput_and_dd2_rules():
         assert di._dev(sink._ptr, "Unacquire", []) == di.DI_OK
         assert sim.wheel.force() == 0  # unacquiring stops the device's effects
         assert sink.execute(fm.DiCall("Start", 1)) == di.DIERR_NOTEXCLUSIVEACQUIRED
+        assert di._com_call(ptr, "IDirectInputEffect", "Unload", []) == di.DIERR_NOTEXCLUSIVEACQUIRED
         assert set_params(FULL) == 3  # DI_DOWNLOADSKIPPED
         sink.close()
         sim.assert_no_leaks()
@@ -220,14 +221,77 @@ def test_game_forces_reach_the_base_capped(fixture, cap, speed):
         sim.assert_single_thread()
 
 
-def test_reset_restores_the_wheel_gain_and_the_bridge_caps_it_again():
-    with FanatecSim(reset_restores_gain=True) as sim:
-        game = constant_game() + [(0.2, *fx.control(fm.CTRL_DEVRST))] + [
-            (t + 0.25, cmd, data) for t, cmd, data in constant_game(magnitude=-6000)]
-        run_bridge(sim, game, 5)
+def game_with_reset(enact: bool):
+    """A constant, a PID Device Reset, optionally Enable Actuators, then a new constant."""
+    after = [(0.25, *fx.control(fm.CTRL_ENACT))] if enact else []
+    return (constant_game() + [(0.2, *fx.control(fm.CTRL_DEVRST))] + after
+            + [(t + 0.3, cmd, data) for t, cmd, data in constant_game(magnitude=-6000)])
+
+
+@pytest.mark.parametrize("enact", [True, False], ids=["reset-then-enable", "reset-only"])
+def test_game_reset_disables_the_actuators_until_the_game_enables_them(enact):
+    with FanatecSim() as sim:
+        marks = {}
+
+        def note_second_effect(bridge):
+            wait_for(lambda: any(e["t"] > sim.ffb.plays()[0]["t"] + 0.25 for e in sim.ffb.plays()))
+            marks["second"] = sim.clock()
+
+        run_bridge(sim, game_with_reset(enact), 5, during=note_second_effect)
         gains = [g for _, g in sim.ffb.gain_timeline()]
         assert 10000 in gains and gains[-1] == 500  # reset to the wheel's own gain, then capped again
-        sim.ffb.assert_force_never_above(0.05)  # every effect started under the cap
+        sim.ffb.assert_force_never_above(0.05)
+        assert "RESET" in sim.ffb.commands()
+        # The bridge forwards the game's commands only: after a reset with no
+        # Enable Actuators the second effect plays on a disabled motor.
+        expected = 0.6 * 0.05 if enact else 0.0
+        assert sim.ffb.force_at(marks["second"]) == pytest.approx(expected)
+
+
+def test_reset_disables_the_actuators_until_actuators_on():
+    clock = Clock()
+    with FanatecSim(clock=clock) as sim:
+        sink = di.DirectInputSink()
+        sink.open(10000)
+        sink.execute(fm.DiCall("CreateEffect", 1, "ConstantForce"))
+        assert sink.execute(fm.DiCall("Command", flags=fm.DISFFC_RESET)) == 0
+        assert not sim.wheel.actuators
+        sink.execute(fm.DiCall("CreateEffect", 2, "ConstantForce"))
+        assert sink.execute(fm.DiCall("SetParameters", 2, "ConstantForce", FULL | fm.DIEP_START, constant())) == 0
+        assert sim.wheel.force() == 0  # playing, but the actuators are off
+        clock.t += 0.1
+        sink.execute(fm.DiCall("Command", flags=fm.DISFFC_SETACTUATORSON))
+        assert sim.wheel.force() == 0.5
+        sink.close()
+    with FanatecSim(clock=clock, reset_disables_actuators=False) as sim:
+        sink = di.DirectInputSink()
+        sink.open(10000)
+        sink.execute(fm.DiCall("Command", flags=fm.DISFFC_RESET))
+        sink.execute(fm.DiCall("CreateEffect", 1, "ConstantForce"))
+        sink.execute(fm.DiCall("SetParameters", 1, "ConstantForce", FULL | fm.DIEP_START, constant()))
+        assert sim.wheel.actuators and sim.wheel.force() == 0.5
+        sink.close()
+
+
+def test_pause_rules():
+    with FanatecSim() as sim:
+        sink = di.DirectInputSink()
+        sink.open(10000)
+        assert sink.execute(fm.DiCall("Command", flags=fm.DISFFC_CONTINUE)) == di.DIERR_INVALIDPARAM  # not paused
+        sink.execute(fm.DiCall("CreateEffect", 1, "ConstantForce"))
+        sink.execute(fm.DiCall("SetParameters", 1, "ConstantForce", FULL | fm.DIEP_START, constant(3000)))
+        assert sink.execute(fm.DiCall("Command", flags=fm.DISFFC_PAUSE)) == 0
+        sink.execute(fm.DiCall("CreateEffect", 2, "ConstantForce"))
+        new = fm.DiCall("SetParameters", 2, "ConstantForce", FULL | fm.DIEP_START, constant())
+        assert sink.execute(new) == di.DIERR_INVALIDPARAM  # nothing starts while paused
+        assert sink.execute(fm.DiCall("SetParameters", 1, "ConstantForce", fm.DIEP_TYPESPECIFICPARAMS,
+                                      constant(9000))) == di.DIERR_INVALIDPARAM  # nor changes
+        assert sink.execute(fm.DiCall("SetParameters", 2, "ConstantForce", FULL | fm.DIEP_NODOWNLOAD,
+                                      constant())) == 0  # storing without download is fine
+        assert sim.wheel.force() == 0
+        assert sink.execute(fm.DiCall("Command", flags=fm.DISFFC_CONTINUE)) == 0
+        assert sim.wheel.force() == 0.3 and sink.execute(new) == 0 and sim.wheel.force() == 0.8
+        sink.close()
 
 
 def test_unplugged_wheel_is_reopened_with_the_cap_before_any_force():
