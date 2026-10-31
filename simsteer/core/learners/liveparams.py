@@ -41,6 +41,7 @@ auto-migrated on load.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -48,6 +49,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+
+from simsteer.core.finite import NonFiniteError, require_finite
 
 from simsteer.paths import load_with_fallback, state_path
 
@@ -528,6 +531,8 @@ class LiveParams:
         zero on degenerate data (e.g. lots of straight-line samples
         with no rack excitation). Sign of a is preserved — RLS still
         owns the sign discovery."""
+        self.validate_state()
+        require_finite("liveparams", target=target_wheel_rad, speed=v_ego)
         a, b, c = float(self.x[0]), float(self.x[1]), float(self.x[2])
         if 0.0 <= a < A_ABS_MIN_RUNTIME:
             a = A_ABS_MIN_RUNTIME
@@ -535,6 +540,7 @@ class LiveParams:
             a = -A_ABS_MIN_RUNTIME
         v2 = v_ego * v_ego
         axis = a * target_wheel_rad + b * target_wheel_rad * v2 + c
+        require_finite("liveparams", axis=axis)
         return float(axis)
 
     @property
@@ -571,6 +577,7 @@ class LiveParams:
                      - self.x[1] * wheel * v2) / wheel
         alpha = INTERVENTION_LEARN_RATE
         new_a = (1.0 - alpha) * self.x[0] + alpha * implied_a
+        require_finite("liveparams.intervention", coefficient=new_a)
         # Magnitude clamp (keep sign).
         sign_a = -1.0 if new_a < 0 else 1.0
         self.x[0] = sign_a * min(A_ABS_MAX, abs(new_a))
@@ -587,6 +594,9 @@ class LiveParams:
         gates without mutating the per-game profile. Only the keys
         present override; missing keys fall through to `self._gates`.
         ETS2's strict module-level defaults stay untouched."""
+        require_finite("liveparams.sample", axis=game_steer, speed=v_ego,
+                       wheel=wheel_angle_rad, command=commanded_axis, gates=gate_override)
+        self.validate_state()
         if game_steer is None:
             return
         # Per-call gate dict. Without an override this is just the
@@ -699,7 +709,7 @@ class LiveParams:
         forget = self.adaptive_forget()
         denom = forget + float(H @ self.P @ H)
         K = (self.P @ H) / denom
-        self.x = self.x + K * innovation
+        next_x = self.x + K * innovation
         # Standard RLS covariance update + Kalman process noise.
         # Without the `+ Q` term P shrinks monotonically and the
         # filter eventually stops responding to new information
@@ -707,7 +717,9 @@ class LiveParams:
         # keeps it alive — what openpilot's `paramsd` does via its
         # EKF process-noise matrix. `Q` here is the override-merged
         # version when a gate_override was passed in.
-        self.P = (self.P - np.outer(K, H @ self.P)) / forget + Q
+        next_P = (self.P - np.outer(K, H @ self.P)) / forget + Q
+        require_finite("liveparams.update", coefficients=next_x, covariance=next_P)
+        self.x, self.P = next_x, next_P
 
         # Bounds-clamp each parameter. `a` keeps its sign; `b` is
         # sign-locked to `a` (the stiffness term is always in the same
@@ -879,7 +891,8 @@ class LiveParams:
             return _seeded()
         try:
             data = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
+            require_finite("liveparams.load", state=data)
+        except (json.JSONDecodeError, OSError, NonFiniteError):
             return _seeded()
         # New format: {"a", "b", "c", "samples"}.
         if "a" in data:
@@ -888,7 +901,7 @@ class LiveParams:
                 b = float(data.get("b", B_INIT))
                 c = float(data.get("c", C_INIT))
                 samples = int(data.get("samples", 0))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, OverflowError):
                 return _seeded()
         else:
             # Legacy format: {"scale", "offset", "samples"}. Migrate:
@@ -925,7 +938,8 @@ class LiveParams:
         # Use the LARGER (ETS2) c-bound here as the "obviously garbage"
         # threshold — accept files that came from any profile, runtime
         # gate clamps them tighter on the next RLS step if needed.
-        in_bounds = (abs(a) <= A_ABS_MAX
+        in_bounds = (np.isfinite([a, b, c, samples]).all()
+                     and abs(a) <= A_ABS_MAX
                      and abs(b) <= B_ABS_MAX
                      and abs(c) <= _GATES_DEFAULT["c_abs_max"])
         if not in_bounds:
@@ -934,6 +948,11 @@ class LiveParams:
         if axis_sign not in (-1, 1):
             axis_sign = None
         return _Persisted(a=a, b=b, c=c, samples=samples, axis_sign=axis_sign)
+
+    def validate_state(self) -> None:
+        require_finite("liveparams.state", coefficients=self.x, covariance=self.P,
+                       axis=list(self._axis_buf), speed=list(self._v_buf),
+                       commands=list(self._commanded_buf), samples=self.samples)
 
     def save(self, path: Path | None = None) -> None:
         if path is None:
@@ -944,13 +963,16 @@ class LiveParams:
                 key = f"{self.game}_{self.device_kind}"
             path = state_path("liveparams", key)
         try:
+            self.validate_state()
             path.write_text(json.dumps({
                 "a": self.a_linear,
                 "b": self.b_quad,
                 "c": self.c_bias,
                 "samples": self.samples,
                 "axis_sign": self.axis_sign,
-            }, indent=2))
+            }, indent=2, allow_nan=False))
+        except NonFiniteError as exc:
+            logging.getLogger(__name__).warning("Not saving non-finite state: %s", exc)
         except OSError:
             pass
 

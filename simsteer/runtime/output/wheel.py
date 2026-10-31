@@ -35,6 +35,8 @@ Same interface as `pilot.gamepad.Gamepad` so main.py can swap them.
 """
 from __future__ import annotations
 
+from simsteer.core.finite import NonFiniteError, require_finite
+
 
 # vJoy axis values are 16-bit unsigned. Range 0x0001..0x8000, with
 # 0x4000 as center for a bidirectional axis like steering. Some
@@ -108,6 +110,12 @@ class Wheel:
         No-op when disengaged, unless `force=True` — used by manual
         override so the tuner steer slider drives the wheel even when
         the AI is disengaged."""
+        x = float(x)
+        try:
+            require_finite("wheel", steering=x)
+        except NonFiniteError:
+            self.disengage()
+            raise
         if not self._engaged and not force:
             return
         x = max(-1.0, min(1.0, float(x)))
@@ -123,6 +131,12 @@ class Wheel:
         when disengaged, unless `force=True` — used by manual override
         so the tuner pedal sliders drive the wheel even when the AI is
         disengaged."""
+        throttle, brake = float(throttle), float(brake)
+        try:
+            require_finite("wheel", throttle=throttle, brake=brake)
+        except NonFiniteError:
+            self.disengage()
+            raise
         if not self._engaged and not force:
             return
         throttle = max(0.0, min(1.0, float(throttle)))
