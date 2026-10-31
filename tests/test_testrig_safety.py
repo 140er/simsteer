@@ -1,6 +1,7 @@
 """Safety regressions for interrupted sessions and concurrent owner activity."""
 
 import os
+import json
 from pathlib import Path
 import stat
 
@@ -317,6 +318,146 @@ def test_ccd_source_adapter_and_monitor_requests_use_documented_layouts():
     assert requests == [(1, 84, luid, 7), (4, 276, luid, 0), (2, 420, target_luid, 3)]
     assert source["name"] == "DISPLAY3" and device_instance(source["adapter_path"]) == r"root\display\0000"
     assert source["target_paths"] == ["monitor-interface"]
+
+
+class FakeCCD:
+    def __init__(self):
+        self.inventories = [(1, 2)]
+        self.size_code = 0
+        self.query_codes = iter(())
+        self.sizing_flags, self.queries, self.restored = [], [], []
+
+    def GetDisplayConfigBufferSizes(self, flags, paths, modes):
+        counts = self.inventories[min(len(self.sizing_flags), len(self.inventories) - 1)]
+        self.sizing_flags.append(flags)
+        paths._obj.value, modes._obj.value = counts
+        return self.size_code
+
+    def QueryDisplayConfig(self, flags, paths, path_data, modes, mode_data, topology):
+        self.queries.append((flags, paths._obj.value, modes._obj.value, len(path_data), len(mode_data)))
+        if status := next(self.query_codes, 0):
+            return status
+        for index in range(paths._obj.value):
+            virtual = flags == 1 and index == paths._obj.value - 1
+            path = bytearray(range(72))
+            path[0] = 2 if virtual else 1
+            path[20:28] = path[:8]
+            struct.pack_into("<I", path, 8, 7 if virtual else 0)
+            struct.pack_into("<I", path, 28, 3)
+            path_data[index * 72:(index + 1) * 72] = path
+        mode_data[:] = bytes((index + 1) % 256 for index in range(len(mode_data)))
+        return 0
+
+    def DisplayConfigGetDeviceInfo(self, data):
+        kind = struct.unpack_from("<I", data)[0]
+        virtual = bytes(data)[8] == 2
+        adapter = r"\\?\ROOT#DISPLAY#0000#{00000000-0000-0000-0000-000000000000}" if virtual else "physical-adapter"
+        offset, value = {1: (20, "DISPLAY3" if virtual else "DISPLAY1"),
+                         4: (20, adapter), 2: (164, "monitor-interface")}[kind]
+        content = (value + "\0").encode("utf-16-le")
+        data[offset:offset + len(content)] = content
+        return 0
+
+    def SetDisplayConfig(self, paths, path_data, modes, mode_data, flags):
+        self.restored.append((paths, bytes(path_data), modes, bytes(mode_data), flags))
+        return 0
+
+
+@pytest.fixture
+def ccd():
+    api = NativeDisplay.__new__(NativeDisplay)
+    api.user = FakeCCD()
+    mode = ctypes.create_string_buffer(220)
+    struct.pack_into("<H", mode, 68, 220)
+    struct.pack_into("<III", mode, 168, 32, 1920, 1080)
+    struct.pack_into("<I", mode, 184, 60)
+    api.active = lambda: [{"name": "DISPLAY1", "primary": True, "x": 0, "y": 0,
+                          "width": 1920, "height": 1080, "mode": encoded(mode)}]
+    return api
+
+
+@pytest.mark.parametrize("paths,modes", [(191, 382), (1000, 2000)])
+def test_ccd_large_all_paths_inventory_finds_virtual_source(ccd, paths, modes):
+    ccd.user.inventories = [(paths, modes)]
+    assert ccd.wait_virtual(r"ROOT\DISPLAY\0000", pause=lambda _: pytest.fail("VDD lookup retried")) == "DISPLAY3"
+    assert ccd.user.sizing_flags == [1]
+    assert ccd.user.queries == [(1, paths, modes, paths * 72, modes * 64)]
+
+
+def test_ccd_requeries_sizes_after_insufficient_buffer(ccd):
+    ccd.user.inventories = [(1, 2), (191, 382)]
+    ccd.user.query_codes = iter((122, 0))
+    assert ccd.wait_virtual(r"ROOT\DISPLAY\0000", pause=lambda _: pytest.fail("VDD lookup retried")) == "DISPLAY3"
+    assert ccd.user.sizing_flags == [1, 1]
+    assert ccd.user.queries == [(1, 1, 2, 72, 128), (1, 191, 382, 13752, 24448)]
+
+
+def test_ccd_requery_attempts_remain_bounded(ccd):
+    ccd.user.query_codes = iter((122, 122, 122))
+    with pytest.raises(RigError, match="Display topology kept changing"):
+        ccd.query(1)
+    assert ccd.user.sizing_flags == [1, 1, 1]
+    assert len(ccd.user.queries) == 3
+
+
+def test_ccd_sizing_error_reports_windows_code(ccd):
+    ccd.user.size_code = 5
+    with pytest.raises(RigError, match="Cannot size.*Windows error 5"):
+        ccd.query(1)
+    assert not ccd.user.queries
+
+
+def test_ccd_query_error_reports_windows_code(ccd):
+    ccd.user.query_codes = iter((87,))
+    with pytest.raises(RigError, match="Cannot record.*Windows error 87"):
+        ccd.query(1)
+
+
+@pytest.mark.parametrize("paths,modes", [(10000, 20000), (8, 16376)])
+@pytest.mark.parametrize("flags", [1, 2])
+def test_ccd_over_byte_limit_reports_inventory_counts(ccd, paths, modes, flags):
+    ccd.user.inventories = [(paths, modes)]
+    with pytest.raises(RigError, match=rf"1 MiB.*{paths} paths.*{modes} modes"):
+        ccd.query(flags)
+    assert not ccd.user.queries
+
+
+def test_ccd_exact_one_mib_inventory_is_allowed(ccd):
+    ccd.user.inventories = [(8, 16375)]  # 8 * 72 + 16375 * 64 == 1 MiB
+    result = ccd.query(1)
+    assert result["path_count"] == 8 and result["mode_count"] == 16375
+
+
+@pytest.mark.parametrize("counts", [(0, 0), (0, 2), (1, 0)])
+@pytest.mark.parametrize("flags", [1, 2])
+def test_ccd_empty_inventory_distinguishes_active_topology(ccd, counts, flags):
+    ccd.user.inventories = [counts]
+    message = "Invalid/empty original display topology" if flags == 2 else "Empty display inventory"
+    with pytest.raises(RigError, match=message):
+        ccd.query(flags)
+    assert not ccd.user.queries
+
+
+def test_vdd_timeout_retains_ccd_sizing_error_without_failing_fast(ccd):
+    ccd.user.size_code = 5
+    clock = [0.0]
+    def pause(seconds):
+        clock[0] += seconds
+    with pytest.raises(RigError, match="timed out after 10s; Cannot size.*Windows error 5"):
+        ccd.wait_virtual(r"ROOT\DISPLAY\0000", clock=lambda: clock[0], pause=pause)
+    assert clock[0] == 10 and len(ccd.user.sizing_flags) > 1
+
+
+def test_ccd_active_capture_and_restore_match_golden_bytes(ccd):
+    """Keep the f130ddf6 active-only capture bytes as the restore contract."""
+    expected = json.loads((Path(__file__).parent / "fixtures/testrig-active-display.json").read_text())
+    captured = ccd.capture()
+    assert captured == expected
+    assert ccd.user.sizing_flags == [2, 2]
+    assert all(query[0] == 2 for query in ccd.user.queries)
+    ccd.restore(captured)
+    assert ccd.user.restored == [(1, base64.b64decode(expected["paths"]),
+                                 2, base64.b64decode(expected["modes"]), 0x2a0)]
 
 
 def test_physical_fallback_remaps_names_and_restores_saved_modes():

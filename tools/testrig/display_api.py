@@ -75,11 +75,16 @@ class NativeDisplay:
     def query(self, flags):
         for _ in range(3):  # topology can change between size and query
             paths, modes = W.UINT(), W.UINT()
-            if self.user.GetDisplayConfigBufferSizes(flags, C.byref(paths), C.byref(modes)):
-                raise RigError("Cannot size the original display topology")
-            if not 0 < paths.value <= 64 or not 0 < modes.value <= 256:
-                raise RigError("Invalid/empty original display topology")
+            status = self.user.GetDisplayConfigBufferSizes(flags, C.byref(paths), C.byref(modes))
+            if status:
+                raise RigError(f"Cannot size the original display topology (Windows error {status})")
+            if not paths.value or not modes.value:
+                if flags == 2:
+                    raise RigError("Invalid/empty original display topology")
+                raise RigError(f"Empty display inventory ({paths.value} paths, {modes.value} modes)")
             # DISPLAYCONFIG_PATH_INFO=72, DISPLAYCONFIG_MODE_INFO=64 on Windows.
+            if paths.value * 72 + modes.value * 64 > 1024 * 1024:
+                raise RigError(f"Display inventory exceeds 1 MiB ({paths.value} paths, {modes.value} modes)")
             path_data, mode_data = C.create_string_buffer(paths.value * 72), C.create_string_buffer(modes.value * 64)
             status = self.user.QueryDisplayConfig(flags, C.byref(paths), path_data, C.byref(modes), mode_data, None)
             if status == 122:  # ERROR_INSUFFICIENT_BUFFER
