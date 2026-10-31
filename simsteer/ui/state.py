@@ -20,8 +20,8 @@ def toggle_developer_mode(settings) -> None:
     set_developer_mode(settings, not developer_mode(settings))
 
 
-def restart_required(startup_game: str, settings) -> bool:
-    return settings.game != startup_game
+def restart_required(startup_game: str, selected_game: str) -> bool:
+    return selected_game != startup_game
 
 
 def status_label(state) -> str:

@@ -157,6 +157,11 @@ HOTKEYS: list[Hotkey] = [
 # Map for O(1) lookup by id, built once at import.
 _BY_ID: dict[str, Hotkey] = {h.id: h for h in HOTKEYS}
 
+_DEVELOPER_ONLY = {
+    "mirror_sign", "save_calib", "reset_calib_defaults", "fov_minus", "fov_plus",
+    "pitch_minus", "pitch_plus", "height_minus", "height_plus", "input_inset",
+}
+
 # Map from key-display-name to id for some convenience reverse-lookups.
 KEY_TO_ID: dict[str, str] = {h.key: h.id for h in HOTKEYS}
 
@@ -170,7 +175,7 @@ def hk_enabled(hotkey_id: str, settings: "Settings | None") -> bool:
     None (called before Settings is wired) or the id is unknown."""
     if settings is None:
         return True
-    if hotkey_id == "mirror_sign" and settings.hud_mode != "dev":
+    if hotkey_id in _DEVELOPER_ONLY and settings.hud_mode != "dev":
         return False
     return hotkey_id not in (settings.disabled_hotkeys or [])
 

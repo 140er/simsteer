@@ -61,15 +61,20 @@ class _Number:
     spec: _NumberSpec
     entry: Any
     var: Any
+    synced_text: str
 
     def editing(self):
         return self.entry.focus_get() in (self.entry, self.entry._entry)
 
+    def edited(self):
+        return self.var.get() != self.synced_text
+
     def sync(self, force=False):
-        if force or not self.editing():
+        if force or not self.editing() or not self.edited():
             text = self.spec.fmt.format(getattr(self.spec.obj, self.spec.attr) * self.spec.scale)
             if self.var.get() != text:
                 self.var.set(text)
+            self.synced_text = text
             if self.entry.cget("text_color") != INK:
                 self.entry.configure(text_color=INK)
 
@@ -132,7 +137,8 @@ class Tuner:
         self.settings = settings if settings is not None else Settings()
         self.probe, self.live_calib = probe, live_calib
         self.wizard, self.cal_routine, self.calib_flow = wizard, cal_routine, calib_flow
-        self._startup_game = self.settings.game
+        self._startup_game = game or self.settings.game
+        self._selected_game = self._startup_game
         self._game_choices = {"Auto": "auto"}
         self._game_choices.update({p.display_name: p.id for p in registry().profiles})
         self._hud_state: HudState | None = None
@@ -187,7 +193,7 @@ class Tuner:
             font=ctk.CTkFont(size=11),
         ).pack(side="left", padx=(0, 10))
         current = next(
-            (name for name, id_ in self._game_choices.items() if id_ == self.settings.game), "Auto"
+            (name for name, id_ in self._game_choices.items() if id_ == self._selected_game), "Auto"
         )
         self._game_picker = ctk.CTkOptionMenu(
             bar,
@@ -416,14 +422,14 @@ class Tuner:
             group,
             "Passive fit",
             lambda: self.settings.passive_fit,
-            lambda v: setattr(self.settings, "passive_fit", v),
+            lambda v: self.settings.set_persistent(passive_fit=v),
             obj=self.settings,
         )
         self._add_switch(
             group,
             "Force engage",
             lambda: self.settings.force_engage,
-            lambda v: setattr(self.settings, "force_engage", v),
+            lambda v: self.settings.set_persistent(force_engage=v),
             obj=self.settings,
         )
         label = ctk.CTkLabel(
@@ -539,7 +545,7 @@ class Tuner:
             font=ctk.CTkFont(size=12),
         )
         entry.pack(side="right")
-        field = _Number(spec, entry, var)
+        field = _Number(spec, entry, var, var.get())
         self._numbers.append(field)
         entry.bind("<Return>", lambda _: self._commit_number(field))
         entry.bind("<FocusOut>", lambda _: self._commit_number(field))
@@ -547,14 +553,12 @@ class Tuner:
 
     def _commit_number(self, field):
         try:
-            self._set_number(field.spec, field.var.get())
+            if field.edited():
+                self._set_number(field.spec, field.var.get())
         except (ValueError, OverflowError):
             field.entry.configure(text_color=RED)
             return False
-        field.entry.configure(text_color=INK)
-        field.var.set(
-            field.spec.fmt.format(getattr(field.spec.obj, field.spec.attr) * field.spec.scale)
-        )
+        field.sync(force=True)
         self._sync_controls()
         return True
 
@@ -562,7 +566,7 @@ class Tuner:
         value = float(text) / spec.scale
         if not math.isfinite(value) or not spec.lo <= value <= spec.hi:
             raise ValueError("Out of range")
-        value = max(spec.lo, min(spec.hi, round(value / spec.step) * spec.step))
+        value = round(value / spec.step) * spec.step
         if getattr(spec.obj, spec.attr) != value:
             setattr(spec.obj, spec.attr, value)
             self._persist(spec.obj)
@@ -621,14 +625,15 @@ class Tuner:
             self._sync_controls()
 
     def _on_game_change(self, name):
-        self.settings.game = self._game_choices[name]
+        self._selected_game = self._game_choices[name]
+        self.settings.set_persistent(game=self._selected_game)
         self.settings.save()
         self._refresh_restart()
 
     def _refresh_restart(self):
         if self._root is None:
             return
-        if restart_required(self._startup_game, self.settings):
+        if restart_required(self._startup_game, self._selected_game):
             self._restart_button.pack(side="left", after=self._game_picker, padx=(0, 8))
         else:
             self._restart_button.pack_forget()
@@ -708,7 +713,8 @@ class Tuner:
             )
         )
         self._cal_label.configure(
-            text="Calibrated" if calibrated else panel.step_name if panel else "Not calibrated"
+            text="Calibrated" if calibrated else panel.step_name if panel else "Not calibrated",
+            text_color=GREEN if calibrated else MUTED,
         )
         if self._live is not None:
             fit = ""
@@ -854,7 +860,7 @@ class Tuner:
         self._sync_controls()
 
     def _save_and_restart(self):
-        if not restart_required(self._startup_game, self.settings):
+        if not restart_required(self._startup_game, self._selected_game):
             return
         import os
         import subprocess
@@ -864,7 +870,7 @@ class Tuner:
         args = [sys.executable]
         if not getattr(sys, "frozen", False):
             args += ["-m", "simsteer"]
-        args += [*sys.argv[1:], "--game", self.settings.game]
+        args += [*sys.argv[1:], "--game", self._selected_game]
         try:
             subprocess.Popen(args)
             os._exit(0)
@@ -878,7 +884,7 @@ class Tuner:
         if not self.device.set_kind(requested):
             self._device_picker.set("Wheel" if self.device.is_wheel else "Gamepad")
             return
-        self.settings.device = self.device.kind
+        self.settings.set_persistent(device=self.device.kind)
         self.settings.save()
         if self.live_params:
             self.live_params.switch_device(self.device.kind)

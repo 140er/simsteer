@@ -17,7 +17,6 @@ from simsteer.ui.state import (
     CalibrationView,
     calibration_view,
     developer_mode,
-    restart_required,
     toggle_developer_mode,
 )
 from simsteer.ui.tuner import Tuner, _NumberSpec
@@ -148,15 +147,26 @@ def test_tuner_and_hotkey_share_persisted_mode():
     assert settings.hud_mode == "user"
 
 
-def test_mirror_key_is_developer_only():
+@pytest.mark.parametrize("hotkey", [
+    "mirror_sign", "save_calib", "reset_calib_defaults", "fov_minus", "fov_plus",
+    "pitch_minus", "pitch_plus", "height_minus", "height_plus", "input_inset",
+])
+def test_calibration_override_and_input_keys_are_developer_only(hotkey):
     from simsteer.app.hotkeys import hk_enabled
 
     settings = Settings()
-    assert not hk_enabled("mirror_sign", settings)
+    assert not hk_enabled(hotkey, settings)
     toggle_developer_mode(settings)
-    assert hk_enabled("mirror_sign", settings)
-    settings.disabled_hotkeys.append("mirror_sign")
-    assert not hk_enabled("mirror_sign", settings)
+    assert hk_enabled(hotkey, settings)
+    settings.disabled_hotkeys.append(hotkey)
+    assert not hk_enabled(hotkey, settings)
+
+
+@pytest.mark.parametrize("hotkey", ["engage", "recalibrate", "keep_fov", "hud_mode"])
+def test_normal_mode_keeps_guided_calibration_and_mode_keys(hotkey):
+    from simsteer.app.hotkeys import hk_enabled
+
+    assert hk_enabled(hotkey, Settings())
 
 
 def test_both_speed_units_and_acc_write_existing_controller_state():
@@ -186,7 +196,10 @@ def test_invalid_normal_speed_does_not_change_state(value):
     assert config.max_speed_mps == 25
 
 
-def test_restart_only_for_a_changed_game_and_reverting_hides_it():
+def test_restart_only_for_a_changed_game_and_reverting_hides_it(monkeypatch):
+    import os
+    import subprocess
+
     settings = Settings(game="auto")
     tuner = Tuner(
         Calibration(),
@@ -196,15 +209,25 @@ def test_restart_only_for_a_changed_game_and_reverting_hides_it():
         settings=settings,
         start_thread=False,
     )
-    assert not restart_required(tuner._startup_game, settings)
+    calls = []
+    monkeypatch.setattr(subprocess, "Popen", lambda args: calls.append(args))
+    monkeypatch.setattr(os, "_exit", lambda code: None)
+    tuner._save_and_restart()
+    assert not calls
     tuner._on_game_change(next(k for k, v in tuner._game_choices.items() if v == "ets2"))
-    assert restart_required(tuner._startup_game, settings)
+    tuner._save_and_restart()
+    assert not calls
     assert Settings.load().game == "ets2"
-    tuner._on_game_change("Auto")
-    assert not restart_required(tuner._startup_game, settings)
+    tuner._on_game_change(next(k for k, v in tuner._game_choices.items() if v == "ats"))
+    tuner._save_and_restart()
+    assert len(calls) == 1
+    tuner._on_game_change(next(k for k, v in tuner._game_choices.items() if v == "ets2"))
+    tuner._save_and_restart()
+    assert len(calls) == 1
     # Normal speed and ACC changes never request a restart.
     tuner._set_acc(False)
-    assert not restart_required(tuner._startup_game, settings)
+    tuner._save_and_restart()
+    assert len(calls) == 1
 
 
 def test_hud_bar_grows_for_calibration_and_developer_only():
@@ -250,10 +273,10 @@ def test_restart_relaunches_selected_game_without_losing_module(monkeypatch, fro
     monkeypatch.setattr(sys, "frozen", frozen, raising=False)
     tuner._save_and_restart()
     assert not calls
-    settings.game = "ac"
+    tuner._on_game_change(next(k for k, v in tuner._game_choices.items() if v == "ats"))
     tuner._save_and_restart()
     assert calls[-1] == 0
-    assert calls[0][-2:] == ["--game", "ac"]
+    assert calls[0][-2:] == ["--game", "ats"]
     assert "--no-gamepad" in calls[0]
     if not frozen:
         assert calls[0][1:3] == ["-m", "simsteer"]

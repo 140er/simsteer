@@ -175,19 +175,19 @@ def _main(args: argparse.Namespace, games: Registry, clip: Path | None) -> int:
     # Saved settings are the baseline; CLI flags override for this run.
     settings = Settings.load()
     if args.device is not None:
-        settings.device = args.device
+        settings.override(device=args.device)
     if args.no_gamepad:
-        settings.no_gamepad = True
+        settings.override(no_gamepad=True)
     if args.force_engage:
-        settings.force_engage = True
+        settings.override(force_engage=True)
     if args.passive_fit:
-        settings.passive_fit = True
+        settings.override(passive_fit=True)
     if args.vjoy_device is not None:
-        settings.vjoy_device = args.vjoy_device
+        settings.override(vjoy_device=args.vjoy_device)
     if args.no_tuner:
-        settings.no_tuner = True
+        settings.override(no_tuner=True)
     if args.max_width is not None:
-        settings.max_width = args.max_width
+        settings.override(max_width=args.max_width)
 
     game = _pick_game(games, args.game, settings.game, clip)
     if game is None:
@@ -207,7 +207,7 @@ def _main(args: argparse.Namespace, games: Registry, clip: Path | None) -> int:
 
     from simsteer.runtime.loop import WindowKeys
     from simsteer.runtime.replay import ReplayClock, ReplaySource, ReplayTelemetry
-    settings.no_gamepad = True
+    settings.override(no_gamepad=True)
     clock = ReplayClock()
     tel = ReplayTelemetry(clip if clip.is_dir() else clip.parent, clock)
     print(f"replay: {clip}")
