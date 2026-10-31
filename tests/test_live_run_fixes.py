@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ctypes
 import math
 import struct
 import sys
@@ -64,15 +65,68 @@ class BootTransport:
             raise OSError("report transport failed")
 
 
-def install_transport(monkeypatch, transport):
+def install_transport(monkeypatch, transport, *, ready_after=0):
     monkeypatch.setitem(sys.modules, "vgamepad", SimpleNamespace(VX360Gamepad=lambda: transport))
 
     def remove(bus, device):
         device.attached = False
         device.removed = True
 
+    def user_index(bus, device, index):
+        index._obj.value = 0
+        return 0x20000000
+
+    transport.ready_checks = 0
+
+    def get_state(index, state):
+        transport.ready_checks += 1
+        if transport.ready_checks < ready_after:
+            return 1167
+        transport.ready = True
+        return 0
+
     monkeypatch.setitem(sys.modules, "vgamepad.win", SimpleNamespace(
-        vigem_client=SimpleNamespace(vigem_target_remove=remove)))
+        vigem_client=SimpleNamespace(vigem_target_remove=remove,
+                                     vigem_target_x360_get_user_index=user_index),
+        vigem_commons=SimpleNamespace(VIGEM_ERRORS=SimpleNamespace(
+            VIGEM_ERROR_NONE=0x20000000, VIGEM_ERROR_XUSB_USERINDEX_OUT_OF_RANGE=0xE0000014))))
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name: SimpleNamespace(XInputGetState=get_state), raising=False)
+    now = SimpleNamespace(t=0.)
+
+    def sleep(seconds):
+        now.t += seconds
+
+    import simsteer.runtime.output.gamepad as output
+    monkeypatch.setattr(output, "time", SimpleNamespace(monotonic=lambda: now.t, sleep=sleep), raising=False)
+
+
+class DelayedTransport(BootTransport):
+    ready = False
+
+    def update(self):
+        if not self.ready:
+            self.sent.append(tuple(self.report))
+        else:
+            super().update()
+
+
+def test_item1_waits_for_own_xinput_slot_before_changed_report(monkeypatch):
+    transport = DelayedTransport()
+    install_transport(monkeypatch, transport, ready_after=3)
+    pad = Gamepad()
+    assert not pad.engaged
+    assert transport.ready_checks == 3
+    assert transport.visible == (0,) * 6
+    assert transport.sent == [(0,) * 6, (0, 0, 1, 0, 0, 0), (0,) * 6]
+
+
+def test_item1_readiness_timeout_releases_device_without_pulse(monkeypatch):
+    transport = DelayedTransport()
+    install_transport(monkeypatch, transport, ready_after=10000)
+    with pytest.raises(GamepadError):
+        Gamepad()
+    assert not transport.attached and transport.removed
+    assert all(report == (0,) * 6 for report in transport.sent)
 
 
 def test_item1_repeated_zero_cannot_replace_boot_report():

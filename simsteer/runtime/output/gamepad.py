@@ -14,6 +14,9 @@ constructing the gamepad raises a clear error.
 
 from __future__ import annotations
 
+import ctypes
+import time
+
 
 class GamepadError(RuntimeError):
     pass
@@ -37,6 +40,7 @@ class Gamepad:
 
         try:
             try:
+                self._wait_for_ready()
                 # ViGEm's boot packet differs from its all-zero cache, so
                 # repeated neutral reports can be discarded. Change only
                 # one raw LSB of the unused right stick to force delivery.
@@ -55,6 +59,33 @@ class Gamepad:
             finally:
                 self._pad = None
                 raise GamepadError("could not initialize a neutral virtual gamepad") from e
+
+    def _wait_for_ready(self) -> None:
+        """Wait for this target's XInput slot before submitting reports.
+
+        Reports sent before USB startup finishes can be lost even though
+        the transport accepts them, especially when recreating a pad.
+        """
+        from vgamepad.win import vigem_client, vigem_commons
+
+        errors = vigem_commons.VIGEM_ERRORS
+        index = ctypes.c_ulong()
+        state = ctypes.create_string_buffer(16)  # XINPUT_STATE
+        get_state = ctypes.WinDLL("xinput1_4.dll").XInputGetState
+        get_state.argtypes = (ctypes.c_ulong, ctypes.c_void_p)
+        get_state.restype = ctypes.c_ulong
+        deadline = time.monotonic() + 2.0
+        while True:
+            error = vigem_client.vigem_target_x360_get_user_index(
+                self._pad._busp, self._pad._devicep, ctypes.byref(index))
+            if error == errors.VIGEM_ERROR_NONE:
+                if index.value < 4 and get_state(index.value, state) == 0:
+                    return
+            elif error != errors.VIGEM_ERROR_XUSB_USERINDEX_OUT_OF_RANGE:
+                raise GamepadError(f"could not read virtual gamepad slot: {error:#x}")
+            if time.monotonic() >= deadline:
+                raise GamepadError("virtual gamepad did not become ready")
+            time.sleep(0.01)
 
     @property
     def engaged(self) -> bool:
