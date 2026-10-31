@@ -363,6 +363,9 @@ def record_activity(lifecycle, activity):
         lifecycle.row["owner_input_seen"] = True
         if not lifecycle.row["errors"] or lifecycle.row["errors"][-1] != str(exc):
             lifecycle.row["errors"].append(str(exc))
+    failure = getattr(activity, "failure", None)
+    if failure and failure not in lifecycle.row["warnings"]:
+        lifecycle.row["warnings"].append(failure)
     if hasattr(activity, "diagnostics"):
         lifecycle.row["input_diagnostics"] = activity.diagnostics()
 

@@ -294,15 +294,19 @@ delete its state until topology, VDD disable and file restoration all verify.
 The input receipt's `input_diagnostics` keeps both stop checks, the configured and
 effective `LowLevelHooksTimeout`, running maximum pump gap with clock pairs,
 callback-entry delivery lag, and real/injected keyboard/mouse counts. A failure is
-labelled `hook-pump-stall` when the lifetime maximum gap reaches the configured
-timeout; otherwise it is `unobserved-input-tick`. The one-second unmatched-tick and
+labelled `unknown-timeout` when no usable timeout is known. With a known timeout,
+it is `hook-pump-stall` when the lifetime maximum gap reaches that threshold;
+otherwise it is `unobserved-input-tick`. The one-second unmatched-tick and
 pump-age checks still stop the session. The label does not whitelist input or
 prove its origin. Each unmatched tick retains its first-poll time and whether a
 hook observed it late by the final worker poll. No keys or coordinates are stored.
 
-Windows caps the configured hook timeout at 1000ms on supported versions.
-An unreadable/missing setting is reported as unknown, with that upper bound used
-only for diagnostic classification. See Microsoft's
+Positive configured hook timeouts are capped at 1000ms for diagnostics, matching
+Windows 10 version 1709 and later. An unreadable, missing, invalid or zero setting
+stays unknown, including the count of deliveries reaching that threshold; no
+default is invented for classification. Tick differences use signed 32-bit
+arithmetic, with negative callback-entry skew counted separately from delivery
+lag. See Microsoft's
 [low-level hook documentation](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc).
 Owned actions record wall time beside `GetTickCount`: URI launch and observed
 process creation are in `state.json`'s `owned_actions`; display apply and cover

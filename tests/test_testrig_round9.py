@@ -3,6 +3,7 @@
 from contextlib import nullcontext
 import os
 from pathlib import Path
+import stat
 import threading
 from types import SimpleNamespace
 
@@ -15,11 +16,11 @@ from tools.testrig.activity import InputHeartbeat
 from tools.testrig.state import Journal, atomic_json, fingerprint, read_json
 
 
-def heartbeat():
+def heartbeat(timeout=None):
     clock = [0.0]
     beat = InputHeartbeat(100, clock=lambda: clock[0], wall=lambda: 1000 + clock[0],
                           ticks=lambda: int(clock[0] * 1000),
-                          timeout={"registry_ms": 300, "effective_ms": 300, "classification_ms": 300, "source": "registry"})
+                          timeout=timeout or {"registry_ms": 300, "effective_ms": 300, "classification_ms": 300, "source": "registry"})
     return beat, clock
 
 
@@ -132,7 +133,7 @@ def test_owner_input_stays_triggered_when_the_missing_hook_arrives_late():
     assert monitor.diagnostics()["unmatched_ticks"][0]["status"] == "late"
 
 
-@pytest.mark.parametrize("value,expected", [(300, 300), ("400", 400), (5000, 1000), (0, 0)])
+@pytest.mark.parametrize("value,expected", [(300, 300), ("400", 400), (5000, 1000), (0, None)])
 def test_registry_timeout_is_reported_with_the_windows_cap(value, expected):
     registry = SimpleNamespace(HKEY_CURRENT_USER=1, OpenKey=lambda *a: nullcontext(1),
                                QueryValueEx=lambda *a: (value, 4))
@@ -144,8 +145,77 @@ def test_unreadable_timeout_is_reported_without_inventing_a_value():
     def denied(*args):
         raise PermissionError("denied")
     row = activity.hook_timeout(registry=SimpleNamespace(HKEY_CURRENT_USER=1, OpenKey=denied))
-    assert row["effective_ms"] is None and row["classification_ms"] == 1000
+    assert row["effective_ms"] is None and row["classification_ms"] is None
     assert "denied" in row["error"]
+
+
+@pytest.mark.parametrize("configured", [None, 0])
+@pytest.mark.parametrize("stop", ["unmatched", "pump"])
+def test_unknown_timeout_keeps_stop_checks_without_inventing_a_cause(configured, stop):
+    def key(*args):
+        if configured is None:
+            raise FileNotFoundError("absent")
+        return nullcontext(1)
+    registry = SimpleNamespace(HKEY_CURRENT_USER=1, OpenKey=key,
+                               QueryValueEx=lambda *args: (configured, 4))
+    timeout = activity.hook_timeout(registry=registry)
+    beat, clock = heartbeat(timeout)
+    if stop == "unmatched":
+        clock[0] = .4
+        beat.pump()
+        assert not beat.check(200)
+        for tick in (.6, .8, 1., 1.2, 1.4):
+            clock[0] = tick
+            beat.pump()
+        clock[0] = 1.5
+        assert beat.check(200)
+    else:
+        clock[0] = 1.1
+        assert beat.check(100)
+    row = beat.diagnostics()
+    assert row["effective_timeout_ms"] is None
+    assert row["timeout"]["classification_ms"] is None
+    assert row["failure"]["cause"] == "unknown-timeout"
+    assert row["failure"]["checks"] == {
+        "unobserved_input_tick": stop == "unmatched", "pump_stall": stop == "pump"}
+    assert row["delivery_lag_at_timeout_count"] is None
+
+
+def test_zero_timeout_does_not_label_a_20ms_pump_gap_as_starvation():
+    registry = SimpleNamespace(HKEY_CURRENT_USER=1, OpenKey=lambda *args: nullcontext(1),
+                               QueryValueEx=lambda *args: (0, 4))
+    beat, clock = heartbeat(activity.hook_timeout(registry=registry))
+    assert not beat.check(200)
+    for step in range(1, 61):
+        clock[0] = step * .02
+        beat.pump()
+        stopped = beat.check(200)
+    assert stopped
+    row = beat.diagnostics()
+    assert row["max_pump_gap"]["milliseconds"] == pytest.approx(20)
+    assert row["failure"]["cause"] == "unknown-timeout"
+
+
+def test_unknown_timeout_observation_never_compares_lag_to_none():
+    beat, _ = heartbeat({"registry_ms": None, "effective_ms": None,
+                          "classification_ms": None, "source": "unknown"})
+    beat.observe(200, keyboard=True, flags=0, delivered=201)
+    row = beat.diagnostics()
+    assert row["event_counts"]["keyboard"]["real"] == 1
+    assert row["max_delivery_lag_ms"] == 1
+    assert row["delivery_lag_at_timeout_count"] is None
+    assert activity.InputHeartbeat(100).diagnostics()["timeout"]["classification_ms"] is None
+
+
+def test_future_hook_timestamp_is_negative_skew_instead_of_a_49_day_lag():
+    beat, _ = heartbeat()
+    beat.observe(1001, keyboard=True, flags=0x10, delivered=1000)
+    assert not beat.check(1000)
+    row = beat.diagnostics()
+    assert row["max_delivery_lag_ms"] == 0
+    assert row["delivery_lag_at_timeout_count"] == 0
+    assert row["negative_skew_count"] == 1 and row["min_negative_skew_ms"] == -1
+    assert row["tick_gap_ms"] == -1
 
 
 @pytest.fixture
@@ -189,6 +259,47 @@ def test_new_whole_documents_root_is_archived_verified_and_removed(new_documents
     assert Journal(rig.backend.directory).data["created_roots"][0]["result"] == "removed"
     rig.session.restore()
     assert not rig.root.exists()
+
+
+@pytest.mark.parametrize("refuse_unlink", [False, True])
+def test_created_readonly_file_is_archived_before_writable_cleanup(new_documents, monkeypatch, refuse_unlink):
+    rig = new_documents
+    start_clean(rig)
+    target = rig.root / "cfg/generated.ini"
+    target.chmod(stat.S_IMODE(target.stat().st_mode) & ~stat.S_IWUSR)
+    original = fingerprint(rig.root)
+    chmod, unlink = os.chmod, Path.unlink
+    changes = []
+
+    def make_writable(path, mode, *args, **kwargs):
+        if Path(path) == target:
+            archive = Path(rig.session.data["created_roots"][0]["archive"])
+            assert fingerprint(archive) == original
+            changes.append("verified-before-chmod")
+        return chmod(path, mode, *args, **kwargs)
+
+    def windows_unlink(path, *args, **kwargs):
+        if path == target:
+            if not path.stat().st_mode & stat.S_IWUSR:
+                raise PermissionError("simulated Windows read-only file")
+            assert changes == ["verified-before-chmod"]
+            if refuse_unlink:
+                raise PermissionError("simulated Windows refusal")
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "chmod", make_writable)
+    monkeypatch.setattr(Path, "unlink", windows_unlink)
+    if refuse_unlink:
+        with pytest.raises(RigError, match="conflict"):
+            rig.session.stop()
+        assert target.read_bytes() == b"game generated"
+    else:
+        assert rig.session.stop()["phase"] == "restored"
+        assert not rig.root.exists()
+    row = rig.session.data["created_roots"][0]
+    assert changes == ["verified-before-chmod"]
+    assert row["result"] == ("owner_changed" if refuse_unlink else "removed")
+    assert fingerprint(Path(row["archive"])) == original
 
 
 @pytest.mark.parametrize("attack", ["owner", "heartbeat", "errors", "coverage", "reason", "gap", "old", "late", "failure"])
@@ -369,7 +480,8 @@ def test_owned_actions_have_wall_and_input_clock_in_state_and_display_receipt(ri
     assert all(isinstance(row["wall_time"], float) and isinstance(row["tick"], int) for row in actions)
 
 
-def test_final_worker_poll_persists_late_match_diagnostics(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure_at_final", [False, True])
+def test_final_worker_poll_persists_late_match_diagnostics(tmp_path, monkeypatch, failure_at_final):
     from tools.testrig import display
     beat, clock = heartbeat()
     beat.check(200)
@@ -390,12 +502,15 @@ def test_final_worker_poll_persists_late_match_diagnostics(tmp_path, monkeypatch
         calls += 1
         if calls == 3:  # watch poll, cleanup poll, final poll
             beat.observe(200, keyboard=True, flags=0x10, delivered=1400)
+            monitor.failure = "heartbeat lost"
         beat.check(200)
         return True
-    monitor = SimpleNamespace(active=active, diagnostics=beat.diagnostics, close=lambda: None, failure="heartbeat lost")
+    monitor = SimpleNamespace(active=active, diagnostics=beat.diagnostics, close=lambda: None,
+                              failure=None if failure_at_final else "heartbeat lost")
     monkeypatch.setattr(activity, "OwnerInput", lambda: monitor)
     display.worker(tmp_path)
     row = read_json(tmp_path / "display-state.json")
     assert calls == 3, row
     assert row["input_diagnostics"]["unmatched_ticks"][0]["status"] == "late"
     assert row["input_diagnostics"]["failure"]["checks"]["unobserved_input_tick"] is True
+    assert row["warnings"].count("heartbeat lost") == 1

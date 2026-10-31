@@ -14,6 +14,10 @@ def real_input(flags, *, keyboard):
     return not flags & (0x12 if keyboard else 0x03)
 
 
+def _tick_delta(newer, older):
+    return ((newer - older + 2**31) & 0xffffffff) - 2**31
+
+
 def hook_timeout(*, registry=None):
     """Read, never change, the configured timeout; unknown values stay unknown."""
     try:
@@ -24,20 +28,21 @@ def hook_timeout(*, registry=None):
         value = int(raw)
         if isinstance(raw, bool) or value < 0:
             raise ValueError("invalid LowLevelHooksTimeout")
-        # Supported Windows versions cap this at 1000ms. This only labels
+        # Windows 10 version 1709 and later cap this at 1000ms. This only labels
         # diagnostics; neither of the existing one-second stop checks changes.
-        effective = min(value, 1000)
-        return {"registry_ms": value, "effective_ms": effective, "classification_ms": effective, "source": "registry"}
+        effective = min(value, 1000) if value else None
+        source = "registry" if effective is not None else "unknown; configured zero is not usable"
+        return {"registry_ms": value, "effective_ms": effective, "classification_ms": effective, "source": source}
     except (OSError, ValueError, TypeError) as exc:
-        return {"registry_ms": None, "effective_ms": None, "classification_ms": 1000,
-                "source": "unknown; classification uses Windows upper bound", "error": str(exc)}
+        return {"registry_ms": None, "effective_ms": None, "classification_ms": None,
+                "source": "unknown; timeout unavailable", "error": str(exc)}
 
 
 class InputHeartbeat:
     """Match LastInputInfo ticks to hook events, including injected events."""
     def __init__(self, initial, *, clock=time.monotonic, wall=time.time, ticks=lambda: None, timeout=None):
         self.clock, self.wall, self.ticks = clock, wall, ticks
-        self.timeout = timeout or {"effective_ms": None, "classification_ms": 1000, "source": "unknown"}
+        self.timeout = timeout or {"effective_ms": None, "classification_ms": None, "source": "unknown"}
         self.seen = deque([initial], maxlen=512)
         self.pending = None
         self.since = None
@@ -47,7 +52,9 @@ class InputHeartbeat:
         self.last_pump_stamp = self.stamp()
         self.max_pump_gap = {"milliseconds": 0, "start": self.last_pump_stamp, "end": self.last_pump_stamp}
         self.counts = {kind: {"real": 0, "injected": 0} for kind in ("keyboard", "mouse")}
-        self.max_delivery_lag, self.lag_at_timeout, self.delivery_lag_stamp = 0, 0, None
+        self.max_delivery_lag, self.delivery_lag_stamp = 0, None
+        self.lag_at_timeout = 0 if self.timeout["classification_ms"] is not None else None
+        self.negative_skew_count, self.min_negative_skew_ms = 0, None
         self.checks = {"unobserved_input_tick": False, "pump_stall": False}
         self.failure = None
 
@@ -60,12 +67,17 @@ class InputHeartbeat:
         if keyboard is not None:
             self.counts["keyboard" if keyboard else "mouse"]["real" if real_input(flags, keyboard=keyboard) else "injected"] += 1
         if delivered is not None:
-            lag = (delivered - tick) & 0xffffffff
-            if lag >= self.max_delivery_lag:
-                self.max_delivery_lag = lag
-                self.delivery_lag_stamp = {**self.stamp(), "tick": delivered, "event_tick": tick}
-            if lag >= self.timeout["classification_ms"]:
-                self.lag_at_timeout += 1
+            lag = _tick_delta(delivered, tick)
+            if lag < 0:
+                self.negative_skew_count += 1
+                self.min_negative_skew_ms = lag if self.min_negative_skew_ms is None else min(lag, self.min_negative_skew_ms)
+            else:
+                if lag >= self.max_delivery_lag:
+                    self.max_delivery_lag = lag
+                    self.delivery_lag_stamp = {**self.stamp(), "tick": delivered, "event_tick": tick}
+                threshold = self.timeout["classification_ms"]
+                if threshold is not None and lag >= threshold:
+                    self.lag_at_timeout += 1
         if tick in self.unmatched:
             self.unmatched[tick]["observed_at"] = self.clock()
 
@@ -97,8 +109,13 @@ class InputHeartbeat:
         missed, age = self.missed(tick), self.pump_gap()  # always evaluate both
         self.checks = {"unobserved_input_tick": missed, "pump_stall": age > 1000}
         if (missed or age > 1000) and self.failure is None:
-            cause = ("hook-pump-stall" if self.max_pump_gap["milliseconds"] >= self.timeout["classification_ms"]
-                     else "unobserved-input-tick")
+            threshold = self.timeout["classification_ms"]
+            if threshold is None:
+                cause = "unknown-timeout"
+            elif self.max_pump_gap["milliseconds"] >= threshold:
+                cause = "hook-pump-stall"
+            else:
+                cause = "unobserved-input-tick"
             self.failure = {"cause": cause, "checks": self.checks.copy(), "detected_at": self.stamp(),
                             "last_input_tick": tick, "last_hook_tick": self.last_tick,
                             "pump_age_ms": age}
@@ -109,11 +126,12 @@ class InputHeartbeat:
         return {"timeout": self.timeout, "effective_timeout_ms": self.timeout["effective_ms"],
                 "checks": self.checks.copy(), "failure": self.failure,
                 "last_input_tick": self.input_tick, "last_hook_tick": self.last_tick,
-                "tick_gap_ms": (self.input_tick - self.last_tick) & 0xffffffff,
+                "tick_gap_ms": _tick_delta(self.input_tick, self.last_tick),
                 "last_hook_age_ms": None if self.last_event is None else (self.clock() - self.last_event) * 1000,
                 "pump_age_ms": (self.clock() - self.last_pump) * 1000, "max_pump_gap": self.max_pump_gap,
                 "max_delivery_lag_ms": self.max_delivery_lag, "max_delivery_lag_at": self.delivery_lag_stamp,
                 "delivery_lag_at_timeout_count": self.lag_at_timeout,
+                "negative_skew_count": self.negative_skew_count, "min_negative_skew_ms": self.min_negative_skew_ms,
                 "event_counts": {key: value.copy() for key, value in self.counts.items()},
                 "unmatched_ticks": [{**row, "seen_at_last_poll": tick in seen,
                                      "status": "late" if "observed_at" in row or tick in seen else "never-observed"}

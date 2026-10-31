@@ -382,7 +382,12 @@ class Journal:
             if (fingerprint(root / name) != {"kind": "file", "sha256": sha} or
                     entry_metadata(root / name) != row["post_stop"]["entries"][name]):
                 raise OwnerChanged(f"Documents entry changed before unlink: {name}")
-            remove(root / name)
+            target = root / name
+            reject_links(target)
+            mode = stat.S_IMODE(target.stat().st_mode)
+            if not mode & stat.S_IWUSR:
+                os.chmod(target, mode | stat.S_IWUSR)
+            remove(target)
             del remaining["files"][name]
             row.setdefault("removed_entries", []).append(name)
             self.save()
