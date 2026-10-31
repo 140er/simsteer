@@ -53,21 +53,22 @@ def test_tuner_mirror_respects_engagement(monkeypatch, module, engaged):
     assert calib.lateral_sign == (-1. if engaged else 1.)
 
 
-def test_legacy_mirror_switch_resyncs_rejected_click(monkeypatch):
+@pytest.mark.parametrize("initial_sign", [-1., 1.])
+def test_legacy_mirror_switch_resyncs_rejected_click(monkeypatch, initial_sign):
     from pilot import tuner as tuner_module
 
     monkeypatch.setattr(tuner_module, "threading", SimpleNamespace(
         Thread=lambda **kw: SimpleNamespace(start=lambda: None)))
-    calib = Calibration(lateral_sign=-1.)
+    calib = Calibration(lateral_sign=initial_sign)
     tuner = tuner_module.Tuner(calib, SimpleNamespace(), SimpleNamespace(),
                                device=SimpleNamespace(engaged=True))
-    switch = SimpleNamespace(selected=False)
+    switch = SimpleNamespace(selected=initial_sign > 0)  # the click left the opposite state
     switch.select = lambda: setattr(switch, "selected", True)
     switch.deselect = lambda: setattr(switch, "selected", False)
     tuner._switches["mirror_lateral_sign"] = switch
-    tuner._set_mirror(False)
-    assert switch.selected
-    assert calib.lateral_sign == -1.
+    tuner._set_mirror(initial_sign > 0)
+    assert switch.selected == (initial_sign < 0)
+    assert calib.lateral_sign == initial_sign
 
 
 def test_disabled_mirror_hotkey_is_ignored(monkeypatch):
