@@ -139,9 +139,10 @@ no throttle is sent. Each holds for three seconds, averaging the final second
 to allow input lag and smoothing.
 Movement or player steering aborts the check. No response, unclear evidence
 or a timeout produces a one-line reason; AI remains disengaged. This check
-also works with `--no-probe`. The profile convention (−1 for SCS) is only a
-prior. Press **INSERT** again after verification to drive. Output polarity saves
-per game and device; recalibration and device swaps clear it. A sustained
+also works with **Steering probe** off in the tuner. The profile convention
+(−1 for SCS) is only a prior. Press **INSERT** again after verification to
+drive. Output polarity saves per game and device; recalibration and device
+swaps clear it. A sustained
 contradiction while driving disengages and clears only output verification;
 the rack fit and manual direction remain. Driver corrections are excluded
 from this guard. A replay has no device response

@@ -169,7 +169,7 @@ below 0.5 m/s with four alternating ±0.10 steering holds of three seconds
 each. Only the final second of each hold counts, allowing game input lag
 and smoothing. The check ends within 14
 seconds or shows a one-line reason. It sends steering only, with AI
-disengaged, and remains available with `--no-probe`.
+disengaged, and remains available with **Steering probe** off in the tuner.
 
 After verification, during the calibration's Steering step SimSteer adds
 a small sinusoidal perturbation (±0.03 axis at ≤12 m/s, scaled down at higher
@@ -186,7 +186,8 @@ Safety: the probe is gated on engaged + the Steering step + speed in
 steer. Once `LiveParams.trusted()` flips True, the probe stops on its own.
 
 The HUD's `PROBE` line shows the current probe offset, the gate reason
-when inactive, and total active frames. Disable this rack probe with `--no-probe`.
+when inactive, and total active frames. Disable this rack probe with
+**Flags → Steering probe** in the tuner.
 
 ### Calibration recovery
 
@@ -285,10 +286,10 @@ python tools\fetch_model.py
 Run directly:
 
 ```powershell
-python -m pilot.main
-python -m pilot.main --no-gamepad     # dry run, no virtual pad output
-python -m pilot.main --device wheel   # vJoy wheel instead of ViGEm pad
-python -m pilot.main --force-engage   # bypass calibration gate (DEV ONLY)
+python -m simsteer
+python -m simsteer --no-gamepad     # dry run, no virtual device output
+python -m simsteer --device wheel   # vJoy wheel instead of ViGEm pad
+python -m simsteer --force-engage   # bypass calibration gate (DEV ONLY)
 ```
 
 Build the .exe:

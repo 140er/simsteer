@@ -171,7 +171,7 @@ Only do the game(s) you'll actually drive.
 ### Forza Horizon 5
 - *Settings → HUD and Gameplay → Data Out → **ON***
 - Data Out IP Address: `127.0.0.1`
-- Data Out IP Port: `7777` (must match `--forza-port`)
+- Data Out IP Port: `7777`
 - Data Out Packet Format: **Dash**
 - Camera: bumper or cockpit. Window: windowed/borderless.
 
@@ -212,10 +212,10 @@ after the player accepts or enters it.
 From the activated venv:
 
 ```powershell
-python -m pilot.main                 # default: gamepad, auto-detect game
-python -m pilot.main --device wheel  # vJoy wheel output
-python -m pilot.main --game ets2     # force a specific game
-python -m pilot.main --no-gamepad    # overlay only, no virtual device (dry run)
+python -m simsteer                 # saved settings (default: gamepad, auto-detect)
+python -m simsteer --device wheel  # vJoy wheel output
+python -m simsteer --game ets2     # force a specific game
+python -m simsteer --no-gamepad    # overlay only, no virtual device (dry run)
 ```
 
 See [all CLI flags](#cli-flags) below.
@@ -327,11 +327,9 @@ same as for the exe.
 | `--list-games` | — | Print every game profile (built-in and yours from `%LOCALAPPDATA%\SimSteer\games\`) and exit. Broken profile files are named on stderr. |
 | `--device {gamepad,wheel}` | gamepad | Output device. gamepad = ViGEm Xbox 360; wheel = vJoy. |
 | `--vjoy-device N` | 1 | vJoy device index when `--device wheel`. |
-| `--forza-port N` | 7777 | UDP port Forza Data Out targets. Must match in-game. |
 | `--max-width N` | 1600 | Cap overlay window width (px). |
 | `--no-gamepad` | off | Run overlay + model but open no virtual device. Skips ViGEm/vJoy preflight. Dry-run. |
 | `--no-tuner` | off | Don't open the tuner window. (You lose the Setup tab too.) |
-| `--no-probe` | off | Disable the active-steering probe used during the calibration's Steering step. |
 | `--passive-fit` | off | Allow LiveParams to learn while disengaged in games whose profile does not set `passive_fit_safe`, such as ETS2 (risky — see TUNING.md). `--passive-fit-ets2` still works. |
 | `--force-engage` | off | **Dev only.** Bypass the calibration / FPS / telemetry engage gate. |
 | `--record DIR` | — | Record 960 px JPEG frames and telemetry to `DIR` while you drive. Stops after `--seconds` (default 900) or Ctrl+C. |
