@@ -168,6 +168,8 @@ class Windows:
         if not get_input(C.byref(info)):
             raise RigError("Cannot determine user activity; not starting")
         result = powershell()
+        result["boot_uptime"] = tick() / 1000
+        result["boot_observed_at"] = time.time()
         for process in result["processes"]:
             if process["created"]:
                 process["created"] = str(int(process["created"]) // 10)

@@ -141,6 +141,7 @@ class FakeWindows:
         self.busy, self.extra_restart, self.bad_home = None, {}, False
         self.display = FakeDisplay()
         self.display_lifecycle = None
+        self.monitor_alive = True
         self.directory = root / "state/ac/run"
 
     def steam_paths(self):
@@ -156,12 +157,12 @@ class FakeWindows:
         rows = deepcopy(self.rows)
         if self.busy:
             rows.append(self.busy)
-        return snapshot(rows, restart=restart(**self.extra_restart))
+        return snapshot(rows, restart=restart(**self.extra_restart), boot_id="counter:10")
 
     def add_game(self, name, pid, parent):
         path = self.gamepath / ("bin/win_x64/eurotrucks2.exe" if self.game == "ets2" else name)
         self.rows.append({"pid": pid, "parent": parent, "name": name, "path": str(path),
-                          "created": f"identity-{pid}", "born": self.base + self.t + 0.1})
+                          "created": f"identity-{pid}", "born": self.wall_time()})
 
     def launch_uri(self, uri):
         self.uris.append(uri)
@@ -201,10 +202,16 @@ class FakeWindows:
         path = journal.directory / "display-state.json"
         self.display_lifecycle = DisplayLifecycle(self.display, self.display, lambda row: atomic_json(path, row),
                                                  options, journal.data["id"])
+        self.display_lifecycle.row["monitor_started_at"] = self.wall_time()
         self.display_lifecycle.start()
 
     def stop_display(self, journal):
         if self.display_lifecycle:
+            path = journal.directory / "display-state.json"
+            self.display_lifecycle.row.update(read_json(path))
+            if self.monitor_alive:
+                self.display_lifecycle.row.update(stop_reason="explicit-stop", monitor_covered_until=self.wall_time(),
+                                                  monitor_stopped_at=self.wall_time())
             self.display_lifecycle.close()
 
     def sleep(self, seconds):
@@ -214,7 +221,8 @@ class FakeWindows:
         return self.t
 
     def wall_time(self):
-        return self.base + self.t
+        # Game files use the filesystem's real clock, not virtual polling time.
+        return time.time()
 
 
 @pytest.fixture

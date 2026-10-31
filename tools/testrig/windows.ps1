@@ -84,15 +84,20 @@ if ($captureIds.Count) {
             $cpu[[int]$_.IDProcess] = [double]$_.PercentProcessorTime
         }
     } catch { $warnings.Add('Capture CPU counters are not observable') }
-    try {
-        Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine | Where-Object {
-            $_.Name -match 'pid_(\d+)_.*engtype_VideoEncode' -and [double]$_.UtilizationPercentage -gt 0
-        } | ForEach-Object {
-            if ($_.Name -match 'pid_(\d+)_') { $encoder[[int]$Matches[1]] = $true }
-        }
-    } catch { $warnings.Add('Capture encoder counters are not observable') }
 }
-$bootId = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToFileTimeUtc().ToString()
+try {
+    Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine | Where-Object {
+        $_.Name -match 'pid_(\d+)_.*engtype_VideoEncode' -and [double]$_.UtilizationPercentage -gt 0
+    } | ForEach-Object {
+        if ($_.Name -match 'pid_(\d+)_') { $encoder[[int]$Matches[1]] = $true }
+    }
+} catch { $warnings.Add('Capture encoder counters are not observable') }
+$bootTime = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToFileTimeUtc().ToString()
+$bootId = 'time:' + $bootTime
+try {
+    $counter = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters' -Name BootId).BootId
+    if ($null -ne $counter) { $bootId = 'counter:' + [Convert]::ToUInt64($counter).ToString() }
+} catch { $warnings.Add('Boot counter unavailable; previous-boot recovery needs boot-time and uptime evidence') }
 $processes = @($allProcesses | ForEach-Object {
     [pscustomobject]@{
         pid = [int]$_.ProcessId; parent = [int]$_.ParentProcessId; name = $_.Name
@@ -105,6 +110,7 @@ $processes = @($allProcesses | ForEach-Object {
 @{
     processes = $processes
     boot_id = $bootId
+    boot_time = $bootTime
     warnings = @($warnings)
     restart = @{
         checked_at = [DateTime]::UtcNow.ToString('o')

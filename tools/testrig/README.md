@@ -70,12 +70,17 @@ where available. Idle OBS is allowed. Capture coverage is:
 | NVIDIA Share/Overlay and capture helper | Visible recording/streaming indicators; process encoder and CPU counters |
 | Game Bar and `bcastdvr` | Visible recording indicators; explicit record command flags; process encoder and CPU counters, including the running capture service's PID (service presence alone is allowed) |
 | Discord/Teams | Visible Go Live/sharing/stop-sharing controls; process encoder and CPU counters |
+| Any other process using a hardware encoder | VideoEncode GPU activity, including encoder work attributed to a container/helper process |
 
 For those capture processes, positive output controls/log events, growing media
 files or VideoEncode GPU activity refuse startup. When output state is unreadable,
 explicit recording command flags or CPU usage of at least 25% of one core also
 refuse. Unreadable output state without active signs produces a warning, continues,
-and records the warning in session status. An open app alone never proves capture.
+and records the warning in session status. Hardware-encoder activity is collected
+for all processes, including unknown recorder names. Unowned encoder activity with
+unreadable output state refuses with the process name, including background replay
+capture. Verified session-owned processes are exempt. An open app alone never
+proves capture.
 CPU/GPU counters, custom paths, localized or custom-rendered controls, and hidden
 sharing UI may be unavailable. These are supported signals, not a guarantee that
 every recording mode is observable; verify them before live use.
@@ -97,6 +102,9 @@ An unowned game process blocks restoration.
 Standard named sign-in, ownership, EULA, firewall and Steam launch-confirmation dialogs produce distinct
 errors. Custom-rendered or localized game dialogs may instead produce the bounded
 readiness timeout; the tool does not guess at buttons or enter credentials.
+Steam launch confirmation requires explicit confirmation text or a known dialog
+class/title combination. Normal owned `Launching...`, `Preparing to launch` and
+Steam notification windows are allowed; an owner HWND alone is not a prompt.
 
 If a crash leaves Steam launch intent but no process whose ownership can be
 established, restoration refuses. Cancel that pending launch in Steam, confirm
@@ -232,7 +240,12 @@ delete its state until topology, VDD disable and file restoration all verify.
 Before `status`, `guard`, `prepare` or `start`, the CLI scans the selected state
 root for incomplete VDD receipts from an earlier Windows boot. It restores those
 display layouts first, disables the recorded VDD, and reports the recovery. A
-failure refuses the command. Current-boot active sessions are left alone. There
+failure refuses the command. A session with a live recorded worker or owned process
+is always left alone, comparing PID, creation time and path, including a second
+check under the command lock before recovery. Boot identity uses the boot counter
+when available. The fallback requires a boot-time change exceeding five minutes
+and an uptime discontinuity; clock drift alone is insufficient. Without enough
+evidence, use explicit `restore` for an orphaned session. There
 is no automatic startup task: after an unexpected reboot, run one of these
 commands with the original state root before using the rig. This recovery restores
 displays only; use the session's `restore` command for game settings.
@@ -250,8 +263,15 @@ and restoration. Symlinks, junctions and other reparse points are refused.
 
 Restoration operates on individual files and never deletes a game/owner folder.
 After the owned writers exit, the journal seals each edited file's last session
-hash. Game rewrites between the tool's write and the known session end belong to
-the session unless owner input was seen. They are restored to the original bytes.
+hash. Game rewrites belong to the session only when the receipt proves monitor
+coverage through writer shutdown: a recorded monitor start, clean stop reason,
+coverage timestamp and no monitor errors. A live monitor can prove coverage during
+autonomous shutdown. Only writes after both the tool's write and monitor start
+qualify. The tool also checks every edited file when monitoring begins; an edit
+between separate `prepare` and `start` commands remains a conflict even if the
+game later re-saves it. Proven game writes restore to the original bytes unless
+owner input was seen. A killed, missing or unproven monitor counts as owner presence;
+it cannot authorize rollback of an unknown rewrite.
 Crash recovery uses the recorded writer lifetime rather than extending it to the
 recovery command. An uncertain failed shutdown disables rewrite attribution;
 exact-hash recovery continues and other rewrites become conflicts. Once sealed,
@@ -270,8 +290,13 @@ Changed generated files inside the disposable ETS2 home are retained with result
 `left_session_file`, without an owner-conflict warning. Untracked game outputs,
 saves and empty directories are retained. Temporary replacements have exact
 session/row names recorded before creation. Recovery removes only those manifest
-entries whose content matches their recorded hashes; a changed temporary is
-preserved and reported for inspection.
+entries whose content matches their recorded hashes or the saved write intent.
+A shorter prefix or bounded zero-filled torn write is cleaned automatically after
+a power cut. Other changed temporaries are preserved and reported for inspection;
+untracked names are never removed. The temporary payload is dropped after recovery
+finishes, leaving its hashes in the journal. Older journals without a payload need
+manual inspection of a torn temporary: preserve it outside the target directory,
+then retry restore. Never delete by filename pattern alone.
 
 Restored bytes are verified twice. Read-only files are handled individually and
 their original mode is restored; sharing failures retry briefly, report the exact

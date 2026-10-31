@@ -114,7 +114,8 @@ class Session:
         self.journal.data = {"version": Journal.VERSION, "id": uuid.uuid4().hex, "game": self.game,
                              "phase": "backing-up", "created_at": utc_now(), "options": options,
                              "installation": installed.as_dict(), "owned": [], "backups": [],
-                             "boot_id": snapshot.get("boot_id")}
+                             "boot_id": snapshot.get("boot_id"), "boot_time": snapshot.get("boot_time"),
+                             "boot_uptime": snapshot.get("boot_uptime"), "boot_observed_at": snapshot.get("boot_observed_at")}
         self.ensure_steam(snapshot)
         self.save()
         self.journal.backup(self.adapter.targets(installed, options))
@@ -181,6 +182,7 @@ class Session:
         self.data["worker_requested"] = True
         self.save()
         self.backend.start_display(self.journal, options)
+        self.journal.begin_monitor(self.owner_receipt().get("monitor_started_at"))
         # The topology/overlay operation may have taken seconds. Check directly
         # before asking Steam to launch, with no delayed task or automatic retry.
         snapshot = self.backend.snapshot()
@@ -313,7 +315,7 @@ class Session:
             # recovery command: later owner edits must remain conflicts.
             bound = ended_at or receipt.get("game_exited_at") or self.data.get("last_owned_at")
             if bound and not errors:
-                self.journal.record_session_end(bound, owner_input_seen=self.data["owner_input_seen"])
+                self.journal.record_session_end(bound, owner_input_seen=self.data["owner_input_seen"], monitor=receipt)
         if errors:
             # A failed shutdown cannot authorize attributing later edits on a
             # retry. Keep exact-hash recovery, and report rewrites as conflicts.
@@ -335,6 +337,8 @@ class Session:
         if monitor:
             try:
                 receipt["owner_input_seen"] = bool(receipt.get("owner_input_seen") or monitor.active())
+                receipt["monitor_live"] = True
+                receipt["monitor_covered_until"] = self.backend.wall_time()
             except RigError:
                 receipt["owner_input_seen"] = True
         return receipt

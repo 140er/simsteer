@@ -1,8 +1,10 @@
 """Write-ahead backups and crash-recoverable, hash-verified restoration."""
 
 from contextlib import contextmanager
+import base64
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -139,6 +141,21 @@ class RestoreConflicts(RigError):
     """Recovery completed, but owner changes need an explicit review."""
 
 
+def valid_time(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def monitor_covers(receipt, ended_at):
+    """A recovered display receipt alone is not proof of owner monitoring."""
+    started, covered = receipt.get("monitor_started_at"), receipt.get("monitor_covered_until")
+    stopped = receipt.get("monitor_stopped_at")
+    return (valid_time(started) and valid_time(covered) and valid_time(ended_at) and
+            started <= ended_at <= covered and receipt.get("errors") == [] and
+            receipt.get("stop_reason") in ("explicit-stop", "game-exited", "deadline", "owner-input",
+                                           "startup-caller-exited", "cleanup") and
+            (receipt.get("monitor_live") is True or (valid_time(stopped) and ended_at <= stopped)))
+
+
 class Journal:
     VERSION = 2
 
@@ -272,27 +289,50 @@ class Journal:
         allowed = row.get("temporary_hashes", [])
         def unlink():
             if file_fingerprint(path) not in allowed:
-                raise RigError(f"Journaled temporary file changed; preserved for inspection: {path}")
+                try:
+                    content = base64.b64decode(row.get("temporary_content", ""), validate=True)
+                except (ValueError, TypeError) as exc:
+                    raise RigError("Temporary-file intent is invalid; preserve it for recovery") from exc
+                expected = {"kind": "file", "sha256": hashlib.sha256(content).hexdigest()}
+                with path.open("rb") as stream:
+                    partial = stream.read(len(content) + 1)
+                if (expected not in allowed or len(partial) > len(content) or
+                        not (content.startswith(partial) or not any(partial))):
+                    raise RigError(f"Journaled temporary file changed; preserved for inspection: {path}")
             os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
             path.unlink()
         retry_sharing(unlink)
 
-    def record_session_end(self, ended_at, *, owner_input_seen=False):
+    def begin_monitor(self, started_at):
+        """Validate the unmonitored prepare/start interval before game launch."""
+        if not valid_time(started_at):
+            self.data["owner_input_seen"] = True
+        else:
+            self.data["monitor_started_at"] = started_at
+            for row in self.data["backups"]:
+                if row.get("written") and self.directory not in Path(row["path"]).parents:
+                    row["monitor_verified"] = file_fingerprint(Path(row["path"])) == row["written"]
+        self.save()
+
+    def record_session_end(self, ended_at, *, owner_input_seen=False, monitor=None):
         """Seal hashes once, while the owned writers' lifetime is still known."""
-        self.data["owner_input_seen"] = bool(self.data.get("owner_input_seen") or owner_input_seen)
+        monitor = monitor or {}
+        proven = monitor_covers(monitor, ended_at) and self.data.get("monitor_started_at") == monitor.get("monitor_started_at")
+        self.data["owner_input_seen"] = bool(self.data.get("owner_input_seen") or owner_input_seen or not proven)
         if self.data.get("session_end"):
             self.save()
             return
         self.data["session_end"] = ended_at
         for row in self.data["backups"]:
             if (self.data["owner_input_seen"] or self.data.get("attribution_disabled") or
-                    row.get("result") or self.directory in Path(row["path"]).parents):
+                    not row.get("monitor_verified") or row.get("result") or self.directory in Path(row["path"]).parents):
                 continue
             path = Path(row["path"])
             try:
                 live = file_fingerprint(path)
                 if (row.get("written_at_ns") and live["kind"] == "file" and
-                        row["written_at_ns"] <= path.stat().st_mtime_ns <= int(ended_at * 1_000_000_000)):
+                        max(row["written_at_ns"], int(monitor["monitor_started_at"] * 1_000_000_000)) <=
+                        path.stat().st_mtime_ns <= int(ended_at * 1_000_000_000)):
                     row["left_by_session"] = live
             except (OSError, RigError) as exc:
                 self.data.setdefault("warnings", []).append(f"Cannot attribute session write for {path}: {exc}")
@@ -309,7 +349,7 @@ class Journal:
         self.cleanup_temporary(row)
         self.data.setdefault("id", uuid.uuid4().hex)
         temporary = self.temporary_path(row)
-        row.update(temporary=str(temporary), temporary_hashes=[
+        row.update(temporary=str(temporary), temporary_content=base64.b64encode(content).decode("ascii"), temporary_hashes=[
             {"kind": "file", "sha256": hashlib.sha256(value).hexdigest()} for value in (b"", content)])
         self.save()  # deterministic name and expected content BEFORE creation
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -434,6 +474,8 @@ class Journal:
         """Only known backup files are removed, after verified restoration."""
         self.validate_paths()
         for row in self.data["backups"]:
+            if row.get("result") in ("restored", "owner_changed", "left_session_file"):
+                row.pop("temporary_content", None)
             if row.get("result") != "restored":
                 continue
             if row.get("stored"):

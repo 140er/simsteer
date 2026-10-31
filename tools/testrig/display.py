@@ -12,7 +12,7 @@ from . import RigError
 from .display_api import BlackOverlay, NativeDisplay
 from .guard import same_process
 from .state import atomic_json, read_json
-from .state import Journal, lock, reject_links
+from .state import Journal, lock, reject_links, monitor_covers, valid_time
 from .discovery import GAMES
 from .windows import ProcessHandle, Windows
 
@@ -167,6 +167,11 @@ def stop_worker(journal, backend):
     receipt = read_json(path)
     if receipt.get("session") != data["id"]:
         raise RigError("Display receipt belongs to another session; cleanup refused")
+    if not (worker and worker["pid"] == os.getpid() and getattr(backend, "owner_monitor", None)):
+        if not monitor_covers(receipt, receipt.get("monitor_covered_until")):
+            receipt["owner_input_seen"] = True
+            receipt.setdefault("warnings", []).append("Owner monitor ended without proven coverage; game rewrites require conflict review")
+            atomic_json(path, receipt)
     if not all(receipt.get(key) for key in ("topology_restored", "vdd_disabled", "overlay_closed")):
         # A killed worker loses its windows automatically. Recover the topology
         # and only the explicitly selected virtual device from the saved intent.
@@ -241,9 +246,13 @@ def worker(directory):
             time.sleep(0.1)
         activity = OwnerInput()
         backend.owner_monitor = activity
+        lifecycle.row["monitor_started_at"] = backend.wall_time()
+        lifecycle.save(lifecycle.row)
         lifecycle.start()
         reason, recover = watch_session(directory, state, parent, lifecycle, activity)
         lifecycle.row["stop_reason"] = reason
+        lifecycle.row["monitor_covered_until"] = backend.wall_time()
+        lifecycle.save(lifecycle.row)
         if reason == "deadline":
             lifecycle.row["warnings"].append("Session deadline expired")
     except BaseException as exc:
@@ -264,12 +273,19 @@ def worker(directory):
                 lifecycle.row["owner_input_seen"] = bool(lifecycle.row.get("owner_input_seen") or activity.active())
             except RigError:
                 lifecycle.row["owner_input_seen"] = True
+            lifecycle.row["monitor_covered_until"] = backend.wall_time()
             lifecycle.save(lifecycle.row)
         if recover and not supervisor_alive:
             recover_session(directory, backend, lifecycle)
     finally:
         if activity:
-            activity.close()
+            try:
+                lifecycle.row["owner_input_seen"] = bool(lifecycle.row.get("owner_input_seen") or activity.active())
+                lifecycle.row["monitor_covered_until"] = backend.wall_time()
+                lifecycle.row["monitor_stopped_at"] = backend.wall_time()
+                lifecycle.save(lifecycle.row)
+            finally:
+                activity.close()
     return int(bool(lifecycle.row["errors"]))
 
 
@@ -294,6 +310,32 @@ def recover_session(directory, backend, lifecycle):
         lifecycle.save(lifecycle.row)
 
 
+def session_alive(data, snapshot):
+    recorded = data.get("owned", []) + ([data["display_worker"]] if data.get("display_worker") else [])
+    return any(same_process(owned, row) for owned in recorded for row in snapshot["processes"])
+
+
+def previous_boot(data, snapshot):
+    """Prefer the boot counter; time-based fallback requires uptime discontinuity."""
+    saved, current = data.get("boot_id"), snapshot.get("boot_id")
+    if not saved or not current or saved == current:
+        return False
+    if all(isinstance(value, str) and value.startswith("counter:") and value[8:].isdigit() for value in (saved, current)):
+        return int(saved[8:]) != int(current[8:])
+    try:
+        before = int(data.get("boot_time") or str(saved).removeprefix("time:"))
+        after = int(snapshot.get("boot_time") or str(current).removeprefix("time:"))
+    except (TypeError, ValueError):
+        return False
+    if abs(after - before) <= 300 * 10_000_000:
+        return False  # LastBootUpTime can shift after time synchronization
+    old_up, new_up = data.get("boot_uptime"), snapshot.get("boot_uptime")
+    old_at, new_at = data.get("boot_observed_at"), snapshot.get("boot_observed_at")
+    if not all(valid_time(value) for value in (old_up, new_up, old_at, new_at)):
+        return False  # insufficient evidence: leave the display for explicit restore
+    return new_up < old_up - 1 or abs((new_at - old_at) - (new_up - old_up)) > 300
+
+
 def recover_leftover_displays(root, backend, snapshot):
     """Before a new command, recover incomplete display intents from older boots."""
     if not root or not root.exists() or not snapshot.get("boot_id"):
@@ -309,7 +351,7 @@ def recover_leftover_displays(root, backend, snapshot):
             if not directory.is_dir() or not (directory / "display-state.json").exists():
                 continue
             journal = Journal(directory)
-            if not journal.data or journal.data.get("boot_id") in (None, snapshot["boot_id"]):
+            if not journal.data or session_alive(journal.data, snapshot) or not previous_boot(journal.data, snapshot):
                 continue
             receipt = read_json(directory / "display-state.json")
             if receipt.get("session") != journal.data["id"]:
@@ -322,6 +364,9 @@ def recover_leftover_displays(root, backend, snapshot):
         with lock(root):
             for directory in pending:
                 journal = Journal(directory)
+                current = backend.snapshot()
+                if session_alive(journal.data, current) or not previous_boot(journal.data, current):
+                    continue  # recheck identities under the command lock, before any mutation
                 backend.stop_display(journal)
                 journal.data.setdefault("warnings", []).append("Recovered an incomplete display layout from a previous boot")
                 journal.save()

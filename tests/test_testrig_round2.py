@@ -1,6 +1,7 @@
 """Regressions for game writes, interrupted recovery and capture signals."""
 
 import os
+import base64
 from pathlib import Path
 
 import pytest
@@ -9,9 +10,10 @@ from test_testrig import FakeWindows, snapshot, seed_profile
 from tools.testrig import RigError
 from tools.testrig.cli import main
 from tools.testrig.display_api import NativeDisplay
+from tools.testrig.display import previous_boot, recover_leftover_displays, stop_worker
 from tools.testrig.guard import blocking_prompt, require_free
 from tools.testrig.session import Session
-from tools.testrig.state import Journal, atomic_json, read_json
+from tools.testrig.state import Journal, atomic_json, read_json, monitor_covers
 from tools.testrig.windows import Windows, output_log_active
 from tools.testrig.capture import growing_output, configured_outputs
 
@@ -206,11 +208,11 @@ def test_dropped_hook_heartbeat_aborts_but_injected_input_does_not():
 def test_previous_boot_display_recovers_before_command(rig, action):
     session, backend = rig
     session.start({"display": "vdd", "vdd_device": "virtual"}, 30)
-    session.data["boot_id"] = "previous-boot"
+    session.data["boot_id"] = "counter:10"
     session.save()
     backend.rows = backend.rows[:1]
     original = backend.snapshot
-    backend.snapshot = lambda: {**original(), "boot_id": "current-boot"}
+    backend.snapshot = lambda: {**original(), "boot_id": "counter:11"}
     command = ["guard"] if action == "guard" else ["ac", action, "--session", backend.directory.name]
     main(command + ["--state-dir", str(backend.directory.parents[1])], backend=backend)
     assert not backend.display.enabled
@@ -360,10 +362,10 @@ def test_unobservable_capture_warnings_are_saved_in_the_session(rig):
 def test_current_boot_does_not_recover_an_active_display(rig):
     session, backend = rig
     session.start({"display": "vdd", "vdd_device": "virtual"}, 30)
-    session.data["boot_id"] = "current-boot"
+    session.data["boot_id"] = "counter:10"
     session.save()
     snap = backend.snapshot
-    backend.snapshot = lambda: {**snap(), "boot_id": "current-boot"}
+    backend.snapshot = lambda: {**snap(), "boot_id": "counter:10"}
     assert main(["ac", "status", "--session", backend.directory.name,
                  "--state-dir", str(backend.directory.parents[1])], backend=backend) == 0
     assert backend.display.enabled
@@ -398,10 +400,11 @@ def test_generic_streamlabs_log_does_not_hide_active_cpu(tmp_path, monkeypatch):
 def test_previous_boot_recovery_failure_refuses_start(rig):
     session, backend = rig
     session.start({"display": "vdd", "vdd_device": "virtual"}, 30)
-    session.data["boot_id"] = "previous-boot"
+    session.data["boot_id"] = "counter:10"
     session.save()
+    backend.rows = backend.rows[:1]
     snap = backend.snapshot
-    backend.snapshot = lambda: {**snap(), "boot_id": "current-boot"}
+    backend.snapshot = lambda: {**snap(), "boot_id": "counter:11"}
     def failed(journal):
         raise RigError("Physical topology recovery failed")
     backend.stop_display = failed
@@ -457,3 +460,184 @@ def test_game_bar_service_residency_and_active_counters():
     records, warnings = backend.activity([process], [])
     with pytest.raises(RigError, match="Game Bar capture service"):
         require_free(snapshot([process], activity=records, warnings=warnings))
+
+
+def test_dead_native_worker_never_authorizes_an_owner_rewrite(rig, monkeypatch):
+    session, backend = rig
+    session.start({}, 30)
+    target = backend.gamepath / "cfg/controls.ini"
+    baseline = Path(next(row["stored"] for row in session.data["backups"] if row["path"] == str(target))).read_bytes()
+    session.data["display_worker"] = {"pid": 999, "created": "dead", "path": "worker.exe"}
+    session.save()
+    target.write_bytes(b"owner changed after worker death")
+    backend.stop_display = lambda journal: stop_worker(journal, backend)
+    monkeypatch.setattr("tools.testrig.display.NativeDisplay", lambda: backend.display)
+    monkeypatch.setattr("tools.testrig.display.BlackOverlay", lambda: backend.display)
+    with pytest.raises(RigError, match="conflict"):
+        session.stop()
+    assert target.read_bytes() == b"owner changed after worker death"
+    assert read_json(backend.directory / "display-state.json")["owner_input_seen"]
+    row = next(row for row in session.data["backups"] if row["path"] == str(target))
+    assert Path(row["archive"]).read_bytes() == baseline
+
+
+def test_prepare_start_gap_is_not_blessed_by_a_later_game_rewrite(rig):
+    session, backend = rig
+    session.prepare({})
+    target = backend.gamepath / "cfg/controls.ini"
+    target.write_bytes(b"owner edited while only prepared")
+    session.start({}, 30)
+    stop = backend.stop_process
+    def resave(process):
+        target.write_bytes(target.read_bytes() + b"\n; game resaved\n")
+        stop(process)
+    backend.stop_process = resave
+    with pytest.raises(RigError, match="conflict"):
+        session.stop()
+    assert target.read_bytes().startswith(b"owner edited while only prepared")
+
+
+@pytest.mark.parametrize("failure", ["missing", "no-start", "no-stop", "errors", "stale-coverage"])
+def test_monitor_receipt_must_prove_coverage(rig, failure):
+    session, backend = rig
+    session.start({}, 30)
+    path = backend.directory / "display-state.json"
+    receipt = read_json(path)
+    now = backend.wall_time()
+    receipt.update(stop_reason="explicit-stop", monitor_stopped_at=now + 100, monitor_covered_until=now + 100)
+    if failure == "no-start":
+        receipt.pop("monitor_started_at")
+    elif failure == "no-stop":
+        receipt.pop("stop_reason")
+    elif failure == "errors":
+        receipt["errors"] = ["hook failed"]
+    elif failure == "stale-coverage":
+        receipt["monitor_covered_until"] = now - 100
+    if failure == "missing":
+        path.unlink()
+    else:
+        atomic_json(path, receipt)
+    backend.stop_display = lambda _: None  # receipt left by a terminated monitor
+    target = backend.gamepath / "cfg/controls.ini"
+    target.write_bytes(b"unknown writer")
+    with pytest.raises(RigError, match="conflict"):
+        session.stop()
+    assert target.read_bytes() == b"unknown writer"
+
+
+def test_monitor_coverage_excludes_edits_before_monitor_start(rig):
+    session, backend = rig
+    session.start({}, 30)
+    target = backend.gamepath / "cfg/controls.ini"
+    target.write_bytes(b"unmonitored edit")
+    earlier = session.data["monitor_started_at"] - 1
+    os.utime(target, (earlier, earlier))
+    with pytest.raises(RigError, match="conflict"):
+        session.stop()
+    assert target.read_bytes() == b"unmonitored edit"
+
+
+def test_monitor_can_prove_autonomous_shutdown_while_still_alive():
+    row = {"monitor_started_at": 10, "monitor_covered_until": 30, "monitor_live": True,
+           "stop_reason": "deadline", "errors": []}
+    assert monitor_covers(row, 20)
+    row.pop("monitor_live")
+    assert not monitor_covers(row, 20)
+    row["monitor_stopped_at"] = 30
+    assert monitor_covers(row, 20)
+
+
+@pytest.mark.parametrize("damage", ["prefix", "zeros"])
+def test_torn_temporary_recovers_automatically(rig, damage):
+    session, backend = rig
+    session.prepare({})
+    row = session.data["backups"][0]
+    content = base64.b64decode(row["temporary_content"])
+    temporary = Path(row["temporary"])
+    temporary.write_bytes(content[:3] if damage == "prefix" else b"\0" * 3)
+    assert session.restore()["phase"] == "restored"
+    assert not temporary.exists()
+    assert all("temporary_content" not in row for row in session.data["backups"])
+
+
+@pytest.mark.parametrize("action", ["guard", "status", "prepare", "start"])
+def test_boot_identity_change_never_tears_down_live_owned_processes(rig, action):
+    session, backend = rig
+    session.start({"display": "vdd", "vdd_device": "virtual"}, 30)
+    snap = backend.snapshot
+    backend.snapshot = lambda: {**snap(), "boot_id": "counter:11"}
+    command = ["guard"] if action == "guard" else ["ac", action, "--session", backend.directory.name]
+    main(command + ["--state-dir", str(backend.directory.parents[1])], backend=backend)
+    assert backend.display.enabled
+    assert not (backend.directory / "display-stop").exists()
+    assert not backend.killed
+
+
+def test_boot_identity_change_never_stops_a_live_monitor(rig):
+    session, backend = rig
+    session.start({"display": "vdd", "vdd_device": "virtual"}, 30)
+    worker = {"pid": 50, "created": "worker-now", "path": "python.exe", "name": "python.exe"}
+    session.data["display_worker"] = worker
+    session.save()
+    backend.rows = backend.rows[:1] + [worker]
+    snap = {**backend.snapshot(), "boot_id": "counter:11"}
+    assert recover_leftover_displays(backend.directory.parents[1], backend, snap) == []
+    assert backend.display.enabled
+
+
+def test_previous_boot_recovery_rechecks_liveness_under_the_lock(rig):
+    session, backend = rig
+    session.start({"display": "vdd", "vdd_device": "virtual"}, 30)
+    initial = {**backend.snapshot(), "processes": backend.rows[:1], "boot_id": "counter:11"}
+    current = {**backend.snapshot(), "boot_id": "counter:11"}
+    backend.snapshot = lambda: current
+    assert recover_leftover_displays(backend.directory.parents[1], backend, initial) == []
+    assert backend.display.enabled
+
+
+def test_reused_worker_pid_does_not_prevent_previous_boot_recovery(rig):
+    session, backend = rig
+    session.start({"display": "vdd", "vdd_device": "virtual"}, 30)
+    session.data["display_worker"] = {"pid": 50, "created": "old-worker", "path": "python.exe"}
+    session.save()
+    backend.rows = backend.rows[:1] + [{"pid": 50, "created": "new-worker", "path": "python.exe", "name": "python.exe"}]
+    snap = {**backend.snapshot(), "boot_id": "counter:11"}
+    backend.snapshot = lambda: snap
+    assert recover_leftover_displays(backend.directory.parents[1], backend, snap)
+    assert not backend.display.enabled
+    assert not backend.killed
+
+
+def test_boot_time_fallback_requires_uptime_discontinuity():
+    saved = {"boot_id": "133000000000000000", "boot_uptime": 1000, "boot_observed_at": 10000}
+    drift = {"boot_id": "133000000012340000", "boot_uptime": 1002, "boot_observed_at": 10003.234}
+    assert not previous_boot(saved, drift)
+    continuous = {"boot_id": "133000005000000000", "boot_uptime": 1600, "boot_observed_at": 10600}
+    assert not previous_boot(saved, continuous)
+    rebooted = {**continuous, "boot_uptime": 5}
+    assert previous_boot(saved, rebooted)
+    assert not previous_boot({"boot_id": "counter:10"}, {**drift, "boot_id": "counter:10", "boot_time": drift["boot_id"]})
+
+
+def test_fake_file_clock_is_independent_of_polling_time(rig, monkeypatch):
+    _, backend = rig
+    backend.t += 1000
+    monkeypatch.setattr("test_testrig.time.time", lambda: 12345.5)
+    assert backend.wall_time() == 12345.5
+
+
+@pytest.mark.parametrize("name", ["nvcontainer.exe", "other-encoder.exe"])
+def test_unknown_hardware_encoder_refuses_by_name_unless_owned(name):
+    backend = Windows.__new__(Windows)
+    process = {"pid": 5, "name": name, "encoder_active": True, "created": "encoder-now", "path": name}
+    records, warnings = backend.activity([process], [])
+    with pytest.raises(RigError, match=name):
+        require_free(snapshot([process], activity=records, warnings=warnings))
+    require_free(snapshot([process], activity=records, warnings=warnings), owned=[process])
+
+
+@pytest.mark.parametrize("kind", ["SDL_app", "Chrome_WidgetWin_1", "vguiPopupWindow"])
+@pytest.mark.parametrize("title", ["Launching...", "Preparing to launch", "Steam"])
+def test_normal_owned_steam_windows_do_not_request_confirmation(kind, title):
+    assert blocking_prompt([{"title": title, "text": "Preparing to launch your game", "class": kind,
+                             "steam": True, "owner": 10}]) is None

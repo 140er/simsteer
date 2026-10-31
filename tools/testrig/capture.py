@@ -106,7 +106,7 @@ def capture_activity(processes, windows, read_log):
     records, warnings = [], []
     for process in processes:
         name, pid = process["name"].lower(), process["pid"]
-        if name not in CAPTURE_NAMES and not process.get("capture_tool"):
+        if name not in CAPTURE_NAMES and not process.get("capture_tool") and not process.get("encoder_active"):
             continue
         text = " ".join(row.get("title", "") + " " + row.get("text", "") for row in windows if row["pid"] == pid).lower()
         active = any(phrase in text for phrase in (

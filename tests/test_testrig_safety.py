@@ -391,7 +391,7 @@ def test_activity_log_start_stop_and_modal_confirmation():
     assert output_log_active("==== Recording Start ====", "recording")
     assert not output_log_active("==== Recording Start ====\n==== Recording Stop ====", "recording")
     assert output_log_active("Starting streaming session", "streaming")
-    assert "Steam launch confirmation" in blocking_prompt([{"title": "Steam", "class": "vguiPopupWindow", "owner": 10}])
+    assert "Steam launch confirmation" in blocking_prompt([{"title": "Steam", "text": "Allow game launch?", "class": "vguiPopupWindow", "owner": 10}])
 
 
 @pytest.mark.parametrize("game", ["ac", "ets2"])

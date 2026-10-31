@@ -127,7 +127,7 @@ def require_free(snapshot, owned=(), idle_seconds=120, *, check_idle=True, now=N
 
 def blocking_prompt(windows):
     groups = (
-        (("allow game launch", "allow this game to launch", "launch game with these options", "launch confirmation"),
+        (("allow game launch", "allow this game to launch", "launch game with these options"),
          "Steam launch confirmation detected; approve or cancel the launch manually outside the test session"),
         (("sign in", "sign-in", "log in", "login", "world of trucks", "steam guard"),
          "Sign-in screen detected; test sessions never sign in to accounts"),
@@ -143,12 +143,8 @@ def blocking_prompt(windows):
         for phrases, message in groups:
             if any(phrase in text for phrase in phrases):
                 return message
-        if window.get("class", "").lower() == "vguipopupwindow" and window.get("owner") and window.get("title", "").lower() == "steam":
-            return "Steam launch confirmation/modal detected; resolve it manually outside the test session"
-        if (window.get("class", "").lower() in ("sdl_app", "chrome_widgetwin_1") and
-                window.get("steam") and (window.get("owner") or "launch options" in text or "launch game" in text)):
-            return "Steam launch confirmation/modal detected; resolve it manually outside the test session"
-        if window.get("class", "").lower() == "sdl_app" and window.get("title", "").lower() == "launch options":
+        if (window.get("class", "").lower() in ("sdl_app", "chrome_widgetwin_1", "vguipopupwindow", "#32770") and
+                window.get("title", "").strip().casefold() in ("launch options", "steam - launch confirmation", "confirm game launch")):
             return "Steam launch confirmation detected; resolve launch options manually outside the test session"
     return None
 
