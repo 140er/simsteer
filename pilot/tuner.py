@@ -413,9 +413,7 @@ class Tuner:
             self._add_slider(sec.body, spec)
         self._add_switch(sec.body, "Mirror lateral sign",
                          get=lambda: self.calib.lateral_sign < 0,
-                         set_=lambda v: setattr(
-                             self.calib, "lateral_sign",
-                             -1.0 if v else 1.0),
+                         set_=self._set_mirror,
                          sid="mirror_lateral_sign")
         self._add_switch(sec.body,
                          "Simple warp (crop+resize, no perspective)",
@@ -424,6 +422,11 @@ class Tuner:
                          set_=lambda v: setattr(
                              self.calib, "simple_warp", bool(v)),
                          sid="simple_warp")
+
+    def _set_mirror(self, value: bool) -> None:
+        if self.device is not None and self.device.engaged:
+            return
+        self.calib.lateral_sign = -1.0 if value else 1.0
 
     def _build_lateral_section(self, parent) -> None:
         sec = _Section(parent, "Lateral steering", expanded=True)
