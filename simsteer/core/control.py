@@ -161,16 +161,11 @@ class ControllerConfig:
 
     # Confidence threshold on the model's desire_state for lane-change
     # indices (3 = lane-L, 4 = lane-R) above which we consider the
-    # controller to be mid-lane-change. Used to enable the steering
-    # boost during the maneuver.
+    # controller to be mid-lane-change for trim and calibration gating.
     lane_change_desire_threshold: float = 0.3
-    # How long to hold the desire pulse active after the user presses
-    # A/D. openpilot's DesireHelper holds the desire active across
-    # PRE_LANE_CHANGE + LANE_CHANGE_STARTING — a few seconds. A
-    # single-frame pulse gets washed out of our 5 s context buffer
-    # before the model commits. Default 2.5 s gives the model enough
-    # sustained input to see the maneuver through; bump to 4-5 s if
-    # lane changes still feel half-hearted.
+    # How long SimSteer treats a manual request as mid-lane-change for
+    # steering, calibration and HUD state. The model receives one
+    # rising-edge pulse per request; a longer window adds no model input.
     lane_change_hold_s: float = 2.5
 
     # ----- LONGITUDINAL -----
@@ -224,9 +219,9 @@ class ControllerConfig:
     corner_scan_horizon_s: float = 6.0
 
     # ----- ACC / lead following -----
-    # The model emits 3 lead-vehicle hypotheses with (x, y, v, a) at
-    # 6 future timesteps each, plus a per-lead probability. When the
-    # most-confident lead's probability exceeds `lead_min_prob`, we
+    # The model emits lead predictions at offsets 0, +2 and +4 s, with
+    # (x, y, v, a) at 6 timesteps each and a probability per offset.
+    # When the current lead's probability exceeds `lead_min_prob`, we
     # constrain v_target with a time-headway controller (this matches
     # openpilot's `longitudinal_planner.py` + `longitudinal_mpc_lib`
     # in concept, though we use a simpler closed-form law instead of
@@ -367,10 +362,10 @@ class LateralController:
         self.last_desired_k_raw = k_raw
         k_total = k_raw
 
-        # Detect lane-change state for the steer-authority boost. Reads
+        # Detect lane-change state for trim and calibration gating. Reads
         # the model's own desire_state plus the user-command flag —
         # `lane_change_command_active` catches the initial frames
-        # before the model's output reflects the user-pressed A/D.
+        # before the model's output reflects the manual request.
         lc_prob = float(decoded.desire_state[3]) + float(decoded.desire_state[4])
         in_lane_change = (lc_prob > cfg.lane_change_desire_threshold
                           or lane_change_command_active)
@@ -379,7 +374,7 @@ class LateralController:
         # Authority — flat multiplier on the commanded curvature.
         # openpilot has no such multiplier; we keep a flat one as a
         # project-specific knob. Lane changes use the model's own
-        # desire pulse + sustained desire input; no separate gain.
+        # plan after a rising-edge desire pulse; no separate gain.
         authority = cfg.steer_authority
         k_total *= authority
 
@@ -560,11 +555,10 @@ class LongitudinalController:
                 if v_safe_corner < v_target:
                     v_target = v_safe_corner
 
-        # ACC / lead following. The most-confident lead (index 0 in
-        # the decoded.leads tensor — already sorted by prob in MHP
-        # selection order) constrains v_target via a time-headway
-        # rule. Below `lead_ttc_brake_s` time-to-collision we engage
-        # AEB and override a_cmd directly to max decel.
+        # ACC / lead following. Lead indices represent offsets 0, +2
+        # and +4 s. Use index 0 (the current lead) to constrain v_target
+        # via a time-headway rule. Below `lead_ttc_brake_s`
+        # time-to-collision, AEB overrides a_cmd directly to max decel.
         lead_v_target = float("inf")
         lead_ttc = float("inf")
         aeb = False
@@ -575,7 +569,7 @@ class LongitudinalController:
                 and decoded.leads.size > 0
                 and lead_prob >= cfg.lead_min_prob):
             # leads[i, t, k] — k = 0:x, 1:y, 2:v, 3:a. Use the t=0
-            # (current-frame) sample for the most-confident lead.
+            # trajectory sample for the current lead at offset 0.
             lead_x = float(decoded.leads[0, 0, 0])
             lead_v = float(decoded.leads[0, 0, 2])
             # Closing rate (positive = closing). v_ego - lead_v.

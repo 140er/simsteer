@@ -11,9 +11,9 @@ openpilot's NOOP has three layers:
 The current driving_policy.onnx public model does NOT accept nav
 features as an input — comma 's recent split removed `nav_features`
 and `nav_instructions` from the policy head. So "executing" a
-maneuver in our port means injecting the same lane-change one-hot
-desire that the ← / → keys use today. That's enough for the model
-to commit to the inside lane before a turn.
+maneuver in our port means issuing the same lane-change request as
+the manual keys. DrivingModel converts its rising edge into one pulse;
+the model decides when the maneuver ends.
 
 Route source for games (none have a real Mapbox-equivalent):
   - **ETS2**: SCS exposes `navigation_distance` / `navigation_time` to
@@ -52,9 +52,8 @@ NAV_DEFAULT_DISTANCE_M = 180.0
 # distance so it works at any speed.
 NAV_TRIGGER_DISTANCE_M = 150.0
 
-# After firing, the desire is sustained for this long (matches
-# `ControllerConfig.lane_change_hold_s`). Without this the single-frame
-# pulse washes out of the model's 5 s temporal buffer.
+# How long the navigation request stays active. DrivingModel converts
+# its rising edge into one pulse; a longer request adds no model input.
 NAV_HOLD_S = 2.5
 
 # How long after the trigger distance to keep the maneuver in the
@@ -78,15 +77,15 @@ _DESIRE_LANE_CHANGE_RIGHT = 4
 class Maneuver:
     direction: ManeuverDir
     distance_m: float          # remaining distance until execution
-    fired: bool = False        # True once the lane-change pulse started
-    fire_until_t: float = 0.0  # wall time the pulse is held until
+    fired: bool = False        # True once the lane-change request started
+    fire_until_t: float = 0.0  # wall time the request expires
     age_s: float = 0.0         # seconds since added to queue
 
 
 class NavManager:
     """Holds a queue of pending maneuvers, counts them down with
-    v_ego, and decides what desire one-hot (if any) to feed the model
-    this frame."""
+    v_ego, and returns the active desire request (if any). DrivingModel
+    converts request changes into rising-edge pulses."""
 
     def __init__(self,
                  trigger_distance_m: float = NAV_TRIGGER_DISTANCE_M,
@@ -144,10 +143,9 @@ class NavManager:
         """Decrement the head-of-queue maneuver by v_ego * dt and
         determine whether to fire the lane-change desire this frame.
 
-        Returns the desire one-hot index to inject this frame, or None
-        for no nav-driven desire. The caller can OR this with manually
-        triggered lane-changes (← / →) — last-write-wins on the model
-        input.
+        Returns the active desire index this frame, or None. The caller
+        chooses between navigation and manual requests; DrivingModel
+        emits a pulse on a rising edge.
         """
         if not self._queue:
             return None
@@ -161,7 +159,7 @@ class NavManager:
             m.fire_until_t = now_t + self.hold_s
             self.last_fired_direction = m.direction
 
-        # Hold the desire active for the configured window. After the
+        # Keep the request active for the configured window. After the
         # window expires OR the maneuver ages out, pop it.
         if m.fired and now_t >= m.fire_until_t:
             self._queue.pop(0)

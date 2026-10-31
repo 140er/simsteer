@@ -321,7 +321,7 @@ class Tuner:
         self._build_steering(columns[0])
         lane = self._make_group(columns[0], "Lane change")
         self._add_number(
-            lane, _NumberSpec(self.ctrl_cfg, "lane_change_hold_s", "Hold (s)", 0.05, 6, 0.05)
+            lane, _NumberSpec(self.ctrl_cfg, "lane_change_hold_s", "State window (s)", 0.05, 6, 0.05)
         )
         self._build_fit(columns[1])
         self._build_trim(columns[1])

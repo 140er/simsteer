@@ -1,8 +1,8 @@
 """Decode the flat outputs from vision and policy into structured fields.
 
-For each MDN-ish output the model emits `mu` first then `std` of the
-same length, so we just take the first half. The single-hypothesis plan
-in the current model is shape (33, 15) for mu (and the same for std).
+For each MDN output the pinned model emits all means followed by all
+log standard deviations. The single-hypothesis plan is shape (33, 15)
+for both means and decoded linear standard deviations.
 """
 
 from __future__ import annotations
@@ -37,11 +37,16 @@ def _split_mu_std(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return arr[..., :half], arr[..., half:]
 
 
+def _linear_std(log_std: np.ndarray) -> np.ndarray:
+    # Match parse_model_outputs.safe_exp's float16 overflow bound.
+    return np.exp(np.minimum(log_std, 11))
+
+
 # Lead vehicle layout (matches openpilot's ModelConstants):
-#   - 3 selected hypotheses
+#   - 3 lead predictions
 #   - 6 timesteps per lead
 #   - 4 metrics per timestep (x, y, v, a)
-# 144 lead floats = 3 * (6*4 mu + 6*4 std).
+# 144 lead floats = 72 means followed by 72 log standard deviations.
 LEAD_MHP_SELECTION = 3
 LEAD_TRAJ_LEN = 6
 LEAD_WIDTH = 4
@@ -110,32 +115,26 @@ def decode(vision_flat: np.ndarray, policy_flat: np.ndarray) -> Decoded:
     re_per = NUM_ROAD_EDGES * IDX_N * 2
     re_mu = re_raw[:re_per].reshape(NUM_ROAD_EDGES, IDX_N, 2)
 
-    ll_prob_raw = _slice(vision_flat, "lane_lines_prob", VISION_SLICES)  # 8 = 4 mu + 4 std
-    ll_prob = _sigmoid(ll_prob_raw[:NUM_LANE_LINES])
+    ll_prob_raw = _slice(vision_flat, "lane_lines_prob", VISION_SLICES)
+    # Upstream fill_model_msg uses the probability entry of each logit pair.
+    ll_prob = _sigmoid(ll_prob_raw[1::2])
 
     lead_prob_raw = _slice(vision_flat, "lead_prob", VISION_SLICES)
     lead_prob = _sigmoid(lead_prob_raw)
 
-    # Lead trajectory predictions. Slice is 3*6*4*2 = 144 floats.
-    # Per-lead block: 24 mu values then 24 std values, each laid out
-    # as (timestep, metric) in row-major order. Order of leads is the
-    # MHP selection order (highest-confidence first by convention).
+    # This pinned head is non-MHP: split all means from all log-stds
+    # before reshaping into (lead, timestep, metric), as upstream does.
     lead_raw = _slice(vision_flat, "lead", VISION_SLICES)
-    leads_mu = np.empty((LEAD_MHP_SELECTION, LEAD_TRAJ_LEN, LEAD_WIDTH),
-                        dtype=np.float32)
-    leads_std = np.empty_like(leads_mu)
-    n_per_lead = LEAD_TRAJ_LEN * LEAD_WIDTH  # 24
-    for i in range(LEAD_MHP_SELECTION):
-        base = i * (2 * n_per_lead)
-        leads_mu[i] = lead_raw[base:base + n_per_lead].reshape(
-            LEAD_TRAJ_LEN, LEAD_WIDTH)
-        leads_std[i] = lead_raw[base + n_per_lead:base + 2 * n_per_lead].reshape(
-            LEAD_TRAJ_LEN, LEAD_WIDTH)
+    leads_mu, leads_log_std = _split_mu_std(lead_raw)
+    lead_shape = (LEAD_MHP_SELECTION, LEAD_TRAJ_LEN, LEAD_WIDTH)
+    leads_mu = leads_mu.reshape(lead_shape)
+    leads_std = _linear_std(leads_log_std).reshape(lead_shape)
 
     # --- Policy ---
     plan_raw = _slice(policy_flat, "plan", POLICY_SLICES)         # 990 = 33*15*2
-    plan = plan_raw[: IDX_N * PLAN_WIDTH].reshape(IDX_N, PLAN_WIDTH)
-    plan_std = plan_raw[IDX_N * PLAN_WIDTH:].reshape(IDX_N, PLAN_WIDTH)
+    plan_mu, plan_log_std = _split_mu_std(plan_raw)
+    plan = plan_mu.reshape(IDX_N, PLAN_WIDTH)
+    plan_std = _linear_std(plan_log_std).reshape(IDX_N, PLAN_WIDTH)
 
     desire_raw = _slice(policy_flat, "desire_state", POLICY_SLICES)
     desire_state = _softmax(desire_raw)
