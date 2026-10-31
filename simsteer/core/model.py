@@ -3,9 +3,9 @@
 Each step:
   1. Run vision on (img, big_img) — both (1, 12, 128, 256) uint8.
   2. Slice `hidden_state` from the vision output; push it onto the
-     features ringbuffer; sample 25 timesteps as `features_buffer`.
-  3. Push the desire pulse onto the desire ringbuffer; max-pool over
-     each FRAME_SKIP window to get 25 timesteps as `desire_pulse`.
+     features history; sample 25 targets 200 ms apart as `features_buffer`.
+  3. Push the desire pulse onto the desire history; max-pool over
+     200 ms windows to get 25 timesteps as `desire_pulse`.
   4. Run policy on (desire_pulse, traffic_convention, features_buffer).
   5. Return the flat outputs from both models (as float32 numpy arrays);
      postprocess.py decodes them.
@@ -27,7 +27,6 @@ from simsteer.core.constants import (
     DESIRE_LEN,
     FEATURE_BUFFER_LEN,
     FEATURE_LEN,
-    FRAME_SKIP,
     MODEL_H,
     MODEL_W,
     POLICY_SLICES,
@@ -35,6 +34,10 @@ from simsteer.core.constants import (
 )
 from simsteer.paths import model_path
 from simsteer.core.model_identity import actual_model_identity
+from simsteer.core.finite import require_finite
+from simsteer.core.timing import (
+    CONTEXT_PERIOD_S, FRAME_PERIOD_S, TIME_EPSILON_S, frame_gap,
+)
 
 VISION_PATH = model_path("driving_vision.onnx")
 POLICY_PATH = model_path("driving_policy.onnx")
@@ -50,10 +53,7 @@ def _make_session(path: Path, providers: list[str]) -> ort.InferenceSession:
 
 
 class DrivingModel:
-    """Stateful: holds the feature/desire ringbuffers between steps."""
-
-    FEAT_BUF_LEN = FRAME_SKIP * (FEATURE_BUFFER_LEN - 1) + 1   # 97
-    DESIRE_BUF_LEN = FRAME_SKIP * DESIRE_BUFFER_LEN            # 100
+    """Stateful: holds timestamped feature/desire history between steps."""
 
     def __init__(self, providers: list[str] | None = None,
                  policy_providers: list[str] | None = None) -> None:
@@ -71,16 +71,17 @@ class DrivingModel:
         self.policy_provider = self.policy.get_providers()[0]
         self.certification_identity = actual_model_identity(VISION_PATH, POLICY_PATH)
 
-        # Ringbuffers (float32 internally; cast to float16 only when feeding policy).
-        self._feat_q: deque[np.ndarray] = deque(
-            [np.zeros(FEATURE_LEN, dtype=np.float32) for _ in range(self.FEAT_BUF_LEN)],
-            maxlen=self.FEAT_BUF_LEN,
-        )
-        self._desire_q: deque[np.ndarray] = deque(
-            [np.zeros(DESIRE_LEN, dtype=np.float32) for _ in range(self.DESIRE_BUF_LEN)],
-            maxlen=self.DESIRE_BUF_LEN,
-        )
+        self._feat_q: deque[np.ndarray] = deque()
+        self._desire_q: deque[np.ndarray] = deque()
+        self._times: deque[float] = deque()
         self._prev_desire = np.zeros(DESIRE_LEN, dtype=np.float32)
+
+    def reset(self) -> None:
+        """Forget features and desire edges across a discontinuity."""
+        self._feat_q.clear()
+        self._desire_q.clear()
+        self._times.clear()
+        self._prev_desire.fill(0)
 
     def vision_only(self, img: np.ndarray, big_img: np.ndarray) -> np.ndarray:
         """Run the vision model alone and return its flat output. Vision is
@@ -93,6 +94,7 @@ class DrivingModel:
     def step(self, img: np.ndarray, big_img: np.ndarray | None = None,
              desire: np.ndarray | None = None,
              traffic_convention: tuple[float, float] = (1.0, 0.0),
+             *, timestamp: float | None = None,
              ) -> tuple[np.ndarray, np.ndarray]:
         """Run one inference step. Returns (vision_out_flat, policy_out_flat)
         as float32 numpy arrays of shapes (1576,) and (1000,)."""
@@ -101,6 +103,12 @@ class DrivingModel:
         #         (0, 1) = right-hand drive / left-side traffic.
         if big_img is None:
             big_img = img
+        previous = self._times[-1] if self._times else None
+        if timestamp is None:
+            timestamp = 0.0 if previous is None else previous + FRAME_PERIOD_S
+        require_finite("model", timestamp=timestamp)
+        if frame_gap(previous, timestamp):
+            self.reset()
 
         # --- Vision ---
         vision_outputs = self.vision.run(
@@ -123,14 +131,29 @@ class DrivingModel:
         pulse = np.where(desire - self._prev_desire > .99, desire, 0)
         self._prev_desire[:] = desire
         self._desire_q.append(pulse)
+        self._times.append(timestamp)
+        while self._times[0] <= timestamp - DESIRE_BUFFER_LEN * CONTEXT_PERIOD_S + TIME_EPSILON_S:
+            self._times.popleft()
+            self._feat_q.popleft()
+            self._desire_q.popleft()
 
-        # Build policy inputs by sampling the queues.
-        feat_arr = np.stack(list(self._feat_q), axis=0)        # (97, 512)
-        feat_sampled = feat_arr[::FRAME_SKIP]                  # (25, 512)
+        # At 20 Hz this reproduces upstream's skip-four features and max
+        # pooling of four desire pulses. On other streams sample in seconds.
+        # Pin: openpilot 0f17a9879364c6f410df7ddf990380ad623a4c92,
+        # selfdrive/modeld/compile_modeld.py:128-138,155-168.
+        times = np.asarray(self._times)
+        targets = timestamp - np.arange(FEATURE_BUFFER_LEN - 1, -1, -1) * CONTEXT_PERIOD_S
+        right = np.searchsorted(times, targets).clip(0, len(times) - 1)
+        left = (right - 1).clip(0)
+        nearest = np.where(abs(times[left] - targets) <= abs(times[right] - targets), left, right)
+        feat_sampled = np.stack(self._feat_q)[nearest]
+        feat_sampled[targets < times[0] - TIME_EPSILON_S] = 0
         features_buffer = feat_sampled[np.newaxis, ...].astype(np.float16)
 
-        des_arr = np.stack(list(self._desire_q), axis=0)        # (100, 8)
-        des_pooled = des_arr.reshape(DESIRE_BUFFER_LEN, FRAME_SKIP, DESIRE_LEN).max(axis=1)
+        buckets = DESIRE_BUFFER_LEN - 1 - np.floor(
+            (timestamp - times + TIME_EPSILON_S) / CONTEXT_PERIOD_S).astype(int)
+        des_pooled = np.zeros((DESIRE_BUFFER_LEN, DESIRE_LEN), dtype=np.float32)
+        np.maximum.at(des_pooled, buckets, np.stack(self._desire_q))
         desire_pulse = des_pooled[np.newaxis, ...].astype(np.float16)  # (1, 25, 8)
 
         tc = np.asarray([traffic_convention], dtype=np.float16)  # (1, 2)

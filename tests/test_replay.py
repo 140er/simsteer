@@ -21,7 +21,7 @@ class FakeModel:
 
     active_provider = policy_provider = "fake"
 
-    def step(self, img, big_img=None, desire=None):
+    def step(self, img, big_img=None, desire=None, *, timestamp=None):
         level = float(img[0, :4].mean()) / 255.0 - 0.5
         vision = np.zeros(1576, np.float32)
         vision[105 + 2] = 1.2  # road_transform height

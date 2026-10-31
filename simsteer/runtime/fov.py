@@ -47,6 +47,10 @@ from statistics import median
 import numpy as np
 
 from simsteer.core.constants import FRAME_SKIP
+from simsteer.core.finite import require_finite
+from simsteer.core.timing import (
+    CONTEXT_PERIOD_S, FRAME_PERIOD_S, frame_gap, frame_geometry,
+)
 
 FOV_MIN_DEG, FOV_MAX_DEG = 40.0, 150.0
 MIN_SPEED_MPS = 8.0
@@ -100,9 +104,19 @@ class FovSolver:
         self._ratios: list[float] = []
         self._cand_ratios: list[list[float]] = []
         self._prev: list[tuple[np.ndarray, np.ndarray] | None] = []
+        self._prev_times: list[float | None] = []
+        self._last_timestamp: float | None = None
+        self._geometry: tuple | None = None
         self._tick = 0
         self._candidate_phase = 0
         self.vision_s = 0.0
+
+    def reset(self) -> None:
+        # Keep the cumulative inference timer so a reset during update does
+        # not make the caller's per-frame model-time difference negative.
+        vision_s = self.vision_s
+        self.__init__(self.vision, self.views)
+        self.vision_s = vision_s
 
     # ----- progress -----
 
@@ -128,15 +142,33 @@ class FovSolver:
 
     def update(self, frame: np.ndarray | None, calib, vx_model: float | None,
                v_ego: float | None, yaw_rate: float | None,
-               perf_counter: Callable[[], float] | None = None) -> float | None:
-        """Returns the solved FOV on the frame it is found, else None."""
+               perf_counter: Callable[[], float] | None = None, *,
+               timestamp: float | None = None,
+               frame_span_s: float = CONTEXT_PERIOD_S) -> float | None:
+        """Use raw vision vx and the measured span of its stacked pair.
+
+        Candidate pairs have separate spans, since each candidate is
+        evaluated every fourth frame. Returns a newly solved FOV or None.
+        """
+        if timestamp is None:
+            timestamp = (0.0 if self._last_timestamp is None
+                         else self._last_timestamp + FRAME_PERIOD_S)
+        require_finite("fov", timestamp=timestamp, frame_span_s=frame_span_s)
+        shape = frame.shape if frame is not None else (calib.image_h, calib.image_w)
+        geometry = frame_geometry(calib, shape)
+        if (frame_gap(self._last_timestamp, timestamp)
+                or (self._geometry is not None and geometry != self._geometry)):
+            self.reset()
+        self._last_timestamp = timestamp
+        self._geometry = geometry
         if self.done:
             return None
         if self.applied_fov is None:
             self.applied_fov = float(calib.fov_h_deg)
         if self.stage == "estimate":
-            if _usable(v_ego, yaw_rate) and vx_model is not None and vx_model > 0.1:
-                self._ratios.append(vx_model / v_ego)
+            if (_usable(v_ego, yaw_rate) and vx_model is not None
+                    and vx_model > 0.1 and frame_span_s > 0):
+                self._ratios.append(vx_model / v_ego * CONTEXT_PERIOD_S / frame_span_s)
             if len(self._ratios) >= ESTIMATE_SAMPLES:
                 self.estimate = solve_from_ratio(self.applied_fov,
                                                  median(self._ratios))
@@ -158,6 +190,7 @@ class FovSolver:
         self.candidates = [round(centre + o, 3) for o in CANDIDATE_OFFSETS]
         self._cand_ratios = [[] for _ in self.candidates]
         self._prev = [None for _ in self.candidates]
+        self._prev_times = [None for _ in self.candidates]
         self._tick = 0
         self._candidate_phase = 0
 
@@ -169,11 +202,16 @@ class FovSolver:
             self._candidate_phase = phase
             # Changing phase breaks the cached pair's four-frame interval.
             self._prev = [None for _ in self.candidates]
+            self._prev_times = [None for _ in self.candidates]
         j = (self._tick + phase) % len(self.candidates)
         self._tick += 1
         cur = self.views(frame, replace(calib, fov_h_deg=self.candidates[j]))
         prev, self._prev[j] = self._prev[j], cur
-        if prev is None or not _usable(v_ego, yaw_rate):
+        previous_time, self._prev_times[j] = self._prev_times[j], self._last_timestamp
+        if prev is None or previous_time is None or not _usable(v_ego, yaw_rate):
+            return
+        span = self._last_timestamp - previous_time
+        if span <= 0:
             return
         img = np.concatenate([prev[0], cur[0]], axis=0)[np.newaxis, ...]
         big = np.concatenate([prev[1], cur[1]], axis=0)[np.newaxis, ...]
@@ -183,7 +221,7 @@ class FovSolver:
             self.vision_s += perf_counter() - t0
         if pose is None or pose[0] <= 0.1:
             return
-        self._cand_ratios[j].append(pose[0] / v_ego)
+        self._cand_ratios[j].append(pose[0] / v_ego * CONTEXT_PERIOD_S / span)
 
     def _solve_candidates(self) -> float | None:
         x = self.candidates
@@ -213,6 +251,8 @@ class FovSolver:
 
     def to_dict(self) -> dict:
         return {
+            "time_base_version": 1,
+            "geometry": self._geometry,
             "stage": self.stage,
             "applied_fov": self.applied_fov,
             "estimate": self.estimate,
@@ -225,6 +265,13 @@ class FovSolver:
         }
 
     def load_dict(self, d: dict) -> None:
+        if d.get("time_base_version") != 1:
+            # Old ratios do not describe measured time spans.
+            self.reset()
+            return
+        geometry = d.get("geometry")
+        self._geometry = ((tuple(geometry[0]), *geometry[1:])
+                          if geometry is not None else None)
         self.stage = d.get("stage", "estimate")
         self.applied_fov = d.get("applied_fov")
         self.estimate = d.get("estimate")
@@ -235,6 +282,8 @@ class FovSolver:
         self._ratios = [float(r) for r in d.get("ratios", [])]
         self._cand_ratios = [[float(r) for r in rs] for rs in d.get("cand_ratios", [])]
         self._prev = [None for _ in self.candidates]
+        self._prev_times = [None for _ in self.candidates]
+        self._last_timestamp = None
         if self.stage == "bracket" and len(self._cand_ratios) != len(self.candidates):
             self._cand_ratios = [[] for _ in self.candidates]
 

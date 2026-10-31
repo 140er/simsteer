@@ -220,14 +220,15 @@ def run_frames(monkeypatch, tmp_path, frames, observations, *, log=True, on_push
     clock = SimpleNamespace(now=lambda: max(0, state.i) * .05)
     lc = LiveCalib(clock=clock.now)
     monkeypatch.setattr(loop, "LiveCalib", lambda **kw: lc)
-    monkeypatch.setattr(loop, "decode", lambda *args: observations[state.i]["decoded"])
+    monkeypatch.setattr(loop, "decode", lambda *args, **kwargs: observations[state.i]["decoded"])
 
-    def push(frame, calib):
+    def push(frame, calib, **kwargs):
         if on_push:
             on_push(frame, calib)
         return None, None
 
-    monkeypatch.setattr(loop, "FrameQueue", lambda: SimpleNamespace(push=push))
+    monkeypatch.setattr(loop, "FrameQueue", lambda: SimpleNamespace(
+        push=push, ready=True, span_s=.2, resets=0, reset=lambda: None))
 
     class Source:
         done = False

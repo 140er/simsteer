@@ -20,7 +20,7 @@ T_IDXS = [_idx_function(i, max_val=10.0) for i in range(IDX_N)]   # seconds 0..1
 X_IDXS = [_idx_function(i, max_val=192.0) for i in range(IDX_N)]  # meters  0..192
 
 # Frame timing.
-MODEL_RUN_FREQ = 20      # Hz, how often we step the model
+MODEL_RUN_FREQ = 20      # Hz, the model's trained camera rate
 MODEL_CONTEXT_FREQ = 5   # Hz, temporal context sampling
 FRAME_SKIP = MODEL_RUN_FREQ // MODEL_CONTEXT_FREQ  # 4
 N_FRAMES = 2             # vision input stacks current + previous

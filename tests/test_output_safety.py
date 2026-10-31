@@ -127,7 +127,10 @@ def drive(monkeypatch, *, fault=None, frames=4, key=None, no_frames=False,
             st.flow = self
 
     monkeypatch.setattr(loop, "CalibFlow", Flow)
-    monkeypatch.setattr(loop, "FrameQueue", lambda: SimpleNamespace(push=lambda *a: (None, None)))
+    # Fault tests start at an already warm, certified checkpoint.
+    monkeypatch.setattr(loop, "FrameQueue", lambda: SimpleNamespace(
+        push=lambda *a, **kw: (None, None), ready=True, span_s=.2,
+        resets=0, reset=lambda: None))
 
     class Source:
         done = False
@@ -217,8 +220,8 @@ def drive(monkeypatch, *, fault=None, frames=4, key=None, no_frames=False,
     if fault == "decoded":
         original = loop.decode
 
-        def decode(*a):
-            d = original(*a)
+        def decode(*a, **kw):
+            d = original(*a, **kw)
             if st.i == 1:
                 d.plan[5, 11] = np.nan
             return d
@@ -234,8 +237,9 @@ def drive(monkeypatch, *, fault=None, frames=4, key=None, no_frames=False,
     if tuner_factory:
         monkeypatch.setattr(loop, "Tuner", lambda *a, **kw: tuner_factory(st, manager))
         monkeypatch.setattr(loop, "FrameQueue", lambda: SimpleNamespace(
-            push=lambda *a: (None, None), last_yuv=None,
-            last_yuv_narrow=None, last_yuv_wide=None))
+            push=lambda *a, **kw: (None, None), last_yuv=None,
+            last_yuv_narrow=None, last_yuv_wide=None, ready=True,
+            span_s=.2, resets=0, reset=lambda: None))
         monkeypatch.setattr(loop, "_setup_window_or_exit", lambda *a: None)
         monkeypatch.setattr(loop.cv2, "setWindowTitle", lambda *a: None)
         monkeypatch.setattr(loop.cv2, "destroyAllWindows", lambda: None)
