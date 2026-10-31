@@ -183,8 +183,11 @@ def test_livecalib_commits_keep_an_engaged_drive_and_skip_straddling_pairs(monke
         if not self._rpys:
             self._rpys.extend([np.zeros(3)] * INPUTS_NEEDED)
             self._heights.extend([calib.height_m] * INPUTS_NEEDED)
+            self.samples = INPUTS_NEEDED * 100
+            if hasattr(self, "bootstrap_samples"):
+                self.bootstrap_samples = self.samples
         # Exercise the real block-commit writer while retaining the existing
-        # certificate's pose tolerances. No hardware or learner fit is mocked.
+        # certificate's pose tolerances. No device is opened.
         before = calib.pitch_deg
         self._block_n = 100
         self._block_rpy_sum[:] = [0., np.radians(.02) * 100, 0.]
