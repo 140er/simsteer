@@ -682,11 +682,13 @@ def test_worker_records_startup_exception_only_once(tmp_path, monkeypatch):
     (tmp_path / "display-go").touch()
     state = {"display_parent": {}, "options": {"display": "vdd", "overlay": False}, "id": "test"}
     monkeypatch.setattr("tools.testrig.display.Journal", lambda _: SimpleNamespace(data=state))
-    monkeypatch.setattr("tools.testrig.display.Windows", lambda: SimpleNamespace(wall_time=lambda: 20))
+    monkeypatch.setattr("tools.testrig.display.Windows", lambda: SimpleNamespace(wall_time=lambda: 20,
+                       action_time=lambda: {"wall_time": 20, "tick": 20000}))
     monkeypatch.setattr("tools.testrig.display.ProcessHandle", lambda _: SimpleNamespace(alive=lambda: True, close=lambda: None))
     monkeypatch.setattr("tools.testrig.display.NativeDisplay", lambda: api)
     monkeypatch.setattr("tools.testrig.display.BlackOverlay", Overlay)
-    monkeypatch.setattr("tools.testrig.activity.OwnerInput", lambda: SimpleNamespace(active=lambda: False, close=lambda: None))
+    monkeypatch.setattr("tools.testrig.activity.OwnerInput", lambda: SimpleNamespace(active=lambda: False, close=lambda: None,
+                       diagnostics=lambda: {}))
     monkeypatch.setattr(api, "capture", lambda: (_ for _ in ()).throw(RigError("startup failure")))
     assert worker(tmp_path) == 1
     assert read_json(tmp_path / "display-state.json")["errors"] == ["startup failure"]

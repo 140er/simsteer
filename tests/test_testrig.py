@@ -201,7 +201,7 @@ class FakeWindows:
     def start_display(self, journal, options):
         path = journal.directory / "display-state.json"
         self.display_lifecycle = DisplayLifecycle(self.display, self.display, lambda row: atomic_json(path, row),
-                                                 options, journal.data["id"])
+                                                 options, journal.data["id"], action_time=self.action_time)
         self.display_lifecycle.row["monitor_started_at"] = self.wall_time()
         self.display_lifecycle.start()
 
@@ -223,6 +223,9 @@ class FakeWindows:
     def wall_time(self):
         # Game files use the filesystem's real clock, not virtual polling time.
         return time.time()
+
+    def action_time(self):
+        return {"wall_time": self.wall_time(), "tick": int(self.wall_time() * 1000) & 0xffffffff}
 
 
 @pytest.fixture

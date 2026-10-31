@@ -423,9 +423,9 @@ def test_stalled_hook_pump_aborts_without_a_new_input_tick(monkeypatch):
     monitor = OwnerInput.__new__(OwnerInput)
     monitor.info, monitor.error, monitor.failure = Info(100), None, None
     monitor.get_input = lambda _: True
-    monitor.heartbeat = InputHeartbeat(100)
+    monitor.heartbeat = InputHeartbeat(100, clock=lambda: 10)
     monitor.triggered = threading.Event()
-    monitor.last_pump = 0
+    monitor.heartbeat.last_pump = 0
     monkeypatch.setattr("tools.testrig.activity.time.monotonic", lambda: 10)
     assert monitor.active()
     assert "heartbeat lost" in monitor.failure

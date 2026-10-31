@@ -291,6 +291,26 @@ A killed worker or OS failure can prevent
 cleanup code from running; `restore` uses the saved receipt to recover. Do not
 delete its state until topology, VDD disable and file restoration all verify.
 
+The input receipt's `input_diagnostics` keeps both stop checks, the configured and
+effective `LowLevelHooksTimeout`, running maximum pump gap with clock pairs,
+callback-entry delivery lag, and real/injected keyboard/mouse counts. A failure is
+labelled `hook-pump-stall` when the lifetime maximum gap reaches the configured
+timeout; otherwise it is `unobserved-input-tick`. The one-second unmatched-tick and
+pump-age checks still stop the session. The label does not whitelist input or
+prove its origin. Each unmatched tick retains its first-poll time and whether a
+hook observed it late by the final worker poll. No keys or coordinates are stored.
+
+Windows caps the configured hook timeout at 1000ms on supported versions.
+An unreadable/missing setting is reported as unknown, with that upper bound used
+only for diagnostic classification. See Microsoft's
+[low-level hook documentation](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc).
+Owned actions record wall time beside `GetTickCount`: URI launch and observed
+process creation are in `state.json`'s `owned_actions`; display apply and cover
+creation are in the display receipt. Process entries also retain the actual
+creation time, distinct from the observation time. API rows carry clock pairs.
+These diagnostics help investigate a stopped session; they do not establish that
+hook delivery is reliable enough for a clean live run.
+
 Before `status`, `guard`, `prepare`, `start` or `display plan-primary`, the CLI scans
 the selected state root for incomplete VDD receipts. Interrupted previews have a
 receipt under `plan-primary/<session>/display-state.json` and recover after a kill
@@ -350,7 +370,31 @@ confined to their private session subdirectories.
 
 Changed generated files inside the disposable ETS2 home are retained with result
 `left_session_file`, without an owner-conflict warning. Untracked game outputs,
-saves and empty directories are retained. Temporary replacements have exact
+saves and empty directories in existing roots are retained.
+
+AC has one controlled exception: if the entire Documents game root was absent at
+prepare, its creation is journaled and its initial directories are created
+exclusively. At monitor start, only journaled written files and their owned parent
+directories may exist. Unknown entries in the prepare/start gap disqualify the
+whole tree. An existing owner root never qualifies.
+
+After writers stop, whole-tree cleanup requires clean monitoring through writer
+end, no owner input, no heartbeat warning or error, and an explicit stop, game
+exit or deadline. An aborted start remains a conflict, even if individual hashes
+match. New entries must have creation times within the covered interval; older
+entries must be the verified prepared files or explicitly created directories.
+The post-stop listing includes hashes, creation times and entry identities.
+
+The tool copies the complete eligible tree into `created-root-archive/` inside the
+private session directory and verifies every archived hash before deleting any
+file. It rechecks the listing and each entry before file removal, then removes
+only empty directories from the bottom up. Reparse points, changed entries or bad
+archive hashes refuse cleanup. A change during removal retains remaining entries
+and the archive as an explicit conflict. The archive is kept for inspection.
+Incomplete monitoring keeps the entire tree, including tracked files. A clean
+live session is required to validate automatic whole-tree cleanup.
+
+Temporary replacements have exact
 session/row names recorded before creation. Recovery removes only those manifest
 entries whose content matches their recorded hashes or the saved write intent.
 A shorter prefix or bounded zero-filled torn write is cleaned automatically after

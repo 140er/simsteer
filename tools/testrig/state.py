@@ -133,6 +133,33 @@ def file_fingerprint(path):
     return {"kind": "directory"} if path.is_dir() else fingerprint(path)
 
 
+def creation_time(path, info=None):
+    info = info or Path(path).stat()
+    # On supported Python/Windows, st_ctime is the file creation time.
+    return getattr(info, "st_birthtime", info.st_ctime)
+
+
+def entry_metadata(path):
+    reject_links(path)
+    info = path.stat()
+    row = {"created_at": creation_time(path, info), "identity": [info.st_dev, info.st_ino],
+           "mode": stat.S_IMODE(info.st_mode), "attributes": getattr(info, "st_file_attributes", 0)}
+    if path.is_file():
+        row.update(size=info.st_size, mtime_ns=info.st_mtime_ns)
+    return row
+
+
+def tree_listing(root):
+    listing = fingerprint(root)  # rejects reparse points at every entry
+    if listing["kind"] != "directory":
+        raise OwnerChanged("Session-created Documents root is no longer a directory")
+    entries = {name: entry_metadata(root / name) for name in
+               [".", *listing["directories"], *listing["files"]]}
+    if fingerprint(root) != listing:
+        raise OwnerChanged("Documents tree changed while listing; left as is")
+    return {"fingerprint": listing, "entries": entries}
+
+
 class OwnerChanged(RigError):
     pass
 
@@ -248,6 +275,143 @@ class Journal:
             self.storage_path(row, "archive")
             if row.get("temporary"):
                 self.temporary_path(row)
+        for row in self.data.get("created_roots", []):
+            if (self.data.get("game") != "ac" or row.get("created_by_session") is not True or
+                    row.get("path") != self.data.get("installation", {}).get("documents")):
+                raise RigError("Created-root cleanup is restricted to the recorded AC Documents root")
+
+    def create_documents_root(self, root, recorded_at):
+        """Only an absent AC root is eligible; exclusive mkdir proves our directories."""
+        root = Path(root).absolute()
+        if fingerprint(root)["kind"] != "absent":
+            return
+        row = {"path": str(root), "created_by_session": True, "recorded_at": recorded_at,
+               "created_directories": {}, "monitor_verified": False}
+        self.data.setdefault("created_roots", []).append(row)
+        self.validate_paths()
+        self.save()  # absence and ownership intent BEFORE either mkdir
+        for directory in (root, root / "cfg"):
+            reject_links(directory)
+            os.mkdir(directory)  # never adopt an existing owner directory
+            row["created_directories"][directory.relative_to(root).as_posix()] = entry_metadata(directory)
+            self.save()
+
+    def _root_coverage(self, receipt):
+        return (not self.data.get("owner_input_seen") and not self.data.get("error") and not self.data.get("failure_seen") and
+                not self.data.get("attribution_disabled") and receipt.get("owner_input_seen") is False and
+                isinstance(receipt.get("warnings"), list) and
+                receipt.get("errors") == [] and not receipt.get("heartbeat_warning") and
+                not (receipt.get("input_diagnostics") or {}).get("failure") and
+                not any("heartbeat" in str(warning).lower() for warning in receipt.get("warnings", [])) and
+                receipt.get("stop_reason") in ("explicit-stop", "game-exited", "deadline") and
+                receipt.get("monitor_started_at") == self.data.get("monitor_started_at") and
+                monitor_covers(receipt, self.data.get("session_end")))
+
+    def _check_root_window(self, row, listing):
+        started, covered = row["coverage"]["monitor_started_at"], row["coverage"]["monitor_covered_until"]
+        for name, entry in listing["entries"].items():
+            created = entry["created_at"]
+            if not valid_time(created) or created > covered:
+                raise OwnerChanged(f"Documents entry created outside covered session: {name}")
+            if created < started:
+                old = (row.get("begin_listing") or {}).get("entries", {}).get(name)
+                if (not old or any(entry[key] != old[key] for key in ("created_at", "identity")) or
+                        (name not in row["created_directories"] and name not in row["begin_listing"]["fingerprint"]["files"])):
+                    raise OwnerChanged(f"Documents entry predates owner-monitor coverage: {name}")
+
+    def _seal_created_roots(self, receipt):
+        for row in self.data.get("created_roots", []):
+            if row.get("result") or row.get("post_stop"):
+                continue
+            try:
+                if not row.get("monitor_verified") or not self._root_coverage(receipt):
+                    raise OwnerChanged("Incomplete clean owner-monitor coverage; Documents tree retained")
+                row["coverage"] = {key: receipt.get(key) for key in (
+                    "monitor_started_at", "monitor_covered_until", "monitor_stopped_at", "monitor_live",
+                    "stop_reason", "owner_input_seen", "errors", "warnings")}
+                row["post_stop"] = tree_listing(Path(row["path"]))
+                self._check_root_window(row, row["post_stop"])
+            except (OSError, RigError) as exc:
+                row.update(result="owner_changed", message="Created Documents tree conflict: " + str(exc))
+
+    def _recheck_root(self, row, expected):
+        current = tree_listing(Path(row["path"]))
+        if current["fingerprint"] != expected or any(
+                entry != row["post_stop"]["entries"].get(name) for name, entry in current["entries"].items()):
+            raise OwnerChanged("Documents tree changed after its post-stop listing; remaining entries retained")
+
+    def _archive_remove_root(self, row, index):
+        root = Path(row["path"])
+        if not row.get("monitor_verified") or not row.get("post_stop") or not self._root_coverage(row.get("coverage", {})):
+            raise OwnerChanged("Incomplete clean owner-monitor coverage; Documents tree retained")
+        expected = row["post_stop"]["fingerprint"]
+        self._check_root_window(row, row["post_stop"])
+        self._recheck_root(row, expected)
+        archive = self.directory / "created-root-archive" / str(index)
+        if row.get("archive") and row["archive"] != str(archive):
+            raise RigError("Invalid created-root archive path")
+        reject_links(archive)
+        row["archive"] = str(archive)
+        self.save()
+        archive.mkdir(parents=True, exist_ok=True)
+        for name in expected["directories"]:
+            destination = archive / name
+            reject_links(destination)
+            destination.mkdir(parents=True, exist_ok=True)
+        for name, sha in expected["files"].items():
+            source, destination = root / name, archive / name
+            reject_links(destination)
+            wanted = {"kind": "file", "sha256": sha}
+            if not destination.exists():
+                if fingerprint(source) != wanted:
+                    raise OwnerChanged(f"Documents entry changed before archive: {name}")
+                retry_sharing(lambda: shutil.copyfile(source, destination))
+            if fingerprint(destination) != wanted:
+                raise RigError(f"Created-root archive hash mismatch: {name}")
+        if fingerprint(archive) != expected:
+            raise RigError("Created-root archive hash/listing mismatch")
+        self._recheck_root(row, expected)  # ALL copies verified before ANY unlink
+        remaining = {**expected, "files": expected["files"].copy(), "directories": expected["directories"].copy()}
+        for name, sha in expected["files"].items():
+            row["remove_intent"] = name
+            self.save()
+            # Recheck this exact entry after persisting intent, just before unlink.
+            self._recheck_root(row, remaining)
+            if fingerprint(archive / name) != {"kind": "file", "sha256": sha}:
+                raise RigError(f"Created-root archive hash mismatch before unlink: {name}")
+            if (fingerprint(root / name) != {"kind": "file", "sha256": sha} or
+                    entry_metadata(root / name) != row["post_stop"]["entries"][name]):
+                raise OwnerChanged(f"Documents entry changed before unlink: {name}")
+            remove(root / name)
+            del remaining["files"][name]
+            row.setdefault("removed_entries", []).append(name)
+            self.save()
+        for name in sorted(expected["directories"], key=lambda value: len(Path(value).parts), reverse=True) + ["."]:
+            self._recheck_root(row, remaining)
+            directory = root / name
+            if fingerprint(directory) != {"kind": "directory", "files": {}, "directories": []}:
+                raise OwnerChanged(f"Documents directory is no longer empty: {name}")
+            row["remove_intent"] = name
+            self.save()
+            if entry_metadata(directory) != row["post_stop"]["entries"][name]:
+                raise OwnerChanged(f"Documents directory changed before rmdir: {name}")
+            reject_links(directory)
+            os.rmdir(directory)
+            if name != ".":
+                remaining["directories"].remove(name)
+            row.setdefault("removed_entries", []).append(name)
+            self.save()
+        row.update(result="removed", remove_intent=None)
+
+    def restore_created_roots(self):
+        for index, row in enumerate(self.data.get("created_roots", [])):
+            if row.get("result") in ("removed", "owner_changed"):
+                continue
+            try:
+                self._archive_remove_root(row, index)
+            except (OSError, RigError) as exc:
+                row.update(result="owner_changed", message="Created Documents tree conflict: " + str(exc))
+            self.save()
 
     def _verify_backup(self, row):
         stored = self.storage_path(row, "stored")
@@ -312,6 +476,22 @@ class Journal:
             for row in self.data["backups"]:
                 if row.get("written") and self.directory not in Path(row["path"]).parents:
                     row["monitor_verified"] = file_fingerprint(Path(row["path"])) == row["written"]
+            for root in self.data.get("created_roots", []):
+                try:
+                    path = Path(root["path"])
+                    listing = tree_listing(path)
+                    written = {Path(row["path"]).relative_to(path).as_posix(): row["written"]["sha256"]
+                               for row in self.data["backups"] if row.get("written") and path in Path(row["path"]).parents}
+                    directories = {parent.as_posix() for name in written for parent in Path(name).parents}
+                    if (listing["fingerprint"]["files"] != written or
+                            set(listing["fingerprint"]["directories"]) | {"."} != directories or
+                            set(root["created_directories"]) != directories or
+                            any(any(listing["entries"][name][key] != saved[key] for key in ("created_at", "identity"))
+                                for name, saved in root["created_directories"].items())):
+                        raise OwnerChanged("Unmonitored entries or changed files in the prepare/start gap")
+                    root.update(monitor_verified=True, begin_listing=listing)
+                except (OSError, RigError) as exc:
+                    root.update(result="owner_changed", message="Created Documents tree conflict: " + str(exc))
         self.save()
 
     def record_session_end(self, ended_at, *, owner_input_seen=False, monitor=None):
@@ -336,6 +516,7 @@ class Journal:
                     row["left_by_session"] = live
             except (OSError, RigError) as exc:
                 self.data.setdefault("warnings", []).append(f"Cannot attribute session write for {path}: {exc}")
+        self._seal_created_roots(monitor)
         self.save()
 
     def _expect(self, path, allowed):
@@ -414,14 +595,19 @@ class Journal:
 
     def report(self):
         return [{key: row[key] for key in ("path", "result", "message", "error", "archive") if key in row}
-                for row in self.data.get("backups", []) if row.get("result") or row.get("error")]
+                for row in self.data.get("backups", []) + self.data.get("created_roots", []) if row.get("result") or row.get("error")]
 
     def restore(self):
         self.validate_paths()
+        self.restore_created_roots()
         errors = []
         for row in self.data["backups"]:
             target = Path(row["path"])
             try:
+                if any(root.get("result") == "owner_changed" and Path(root["path"]) in target.parents
+                       for root in self.data.get("created_roots", [])):
+                    self._owner_changed(row)
+                    continue  # retain the entire conflicted tree, including tracked files
                 self.cleanup_temporary(row)
                 self._verify_backup(row)
                 if row.get("result") in ("owner_changed", "left_session_file"):

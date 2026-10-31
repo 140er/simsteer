@@ -8,7 +8,7 @@ import struct
 import time
 
 from . import RigError
-from .windows import desktop_pixels, dll, powershell, signature
+from .windows import Windows, desktop_pixels, dll, powershell, signature
 
 
 def encoded(buffer):
@@ -29,6 +29,7 @@ class NativeDisplay:
     def __init__(self):
         desktop_pixels()
         self.user = dll("user32")
+        self.action_time = Windows.action_time
         signature(self.user, "GetDisplayConfigBufferSizes", [W.UINT, C.POINTER(W.UINT), C.POINTER(W.UINT)], C.c_int32)
         signature(self.user, "QueryDisplayConfig", [W.UINT, C.POINTER(W.UINT), C.c_void_p,
                                                     C.POINTER(W.UINT), C.c_void_p, C.c_void_p], C.c_int32)
@@ -200,6 +201,8 @@ class NativeDisplay:
         if api == "EnumDisplaySettingsExW":
             symbol, failed, code = ("TRUE" if status else "FALSE"), not status, "BOOL result"
         row = {"api": api, "return_code": status, "return_name": symbol, "operation": operation, "inputs": inputs}
+        if hasattr(self, "action_time"):
+            row.update(self.action_time())
         if record:
             self.__dict__.setdefault("display_calls", []).append(row)
         if failed:

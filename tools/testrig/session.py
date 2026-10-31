@@ -46,7 +46,7 @@ class Session:
     def status(self, *, live=False):
         if not self.data:
             return {"game": self.game, "phase": "absent"}
-        row = {key: self.data.get(key) for key in ("id", "game", "phase", "error", "owned")}
+        row = {key: self.data.get(key) for key in ("id", "game", "phase", "error", "owned", "owned_actions")}
         row["state_file"] = str(self.journal.path)
         row["backups"] = len(self.data.get("backups", []))
         row["restoration"] = self.journal.report()
@@ -125,6 +125,8 @@ class Session:
         self.ensure_steam(snapshot)
         self.data["phase"] = "preparing"
         self.save()
+        if self.game == "ac":
+            self.journal.create_documents_root(installed.documents, self.backend.wall_time())
         self.adapter.prepare(installed, self.journal.directory, options, self.journal)
         self.data["phase"] = "prepared"
         self.save()
@@ -157,6 +159,8 @@ class Session:
                         not (helper or launch["began"] <= process.get("born", 0) <= launch["until"])):
                     continue
                 self.data["owned"].append(process.copy())
+                self.data.setdefault("owned_actions", []).append({"action": "owned-process-observed", "pid": process["pid"],
+                    "created_at": process.get("born"), **self.backend.action_time()})
                 changed = True
         if any(any(same_process(item, row) for row in rows) for item in self.data["owned"]):
             self.data["last_owned_at"] = self.backend.wall_time()
@@ -197,7 +201,11 @@ class Session:
                       if norm(item.get("path") or "") == norm(self.installed.steam / "steam.exe")],
         }
         self.save()  # durable launch intent also supports recovery after a crash
+        self.data.setdefault("owned_actions", []).append({"action": "steam-uri-launch", **self.backend.action_time()})
+        self.save()
         self.backend.launch_uri(self.adapter.launch_uri(self.installed, self.journal.directory))
+        self.data["owned_actions"].append({"action": "steam-uri-returned", **self.backend.action_time()})
+        self.save()
         return self.ready(timeout)
 
     def check_display(self):
@@ -341,10 +349,14 @@ class Session:
                 receipt["monitor_covered_until"] = self.backend.wall_time()
             except RigError:
                 receipt["owner_input_seen"] = True
+            if hasattr(monitor, "diagnostics"):
+                receipt["input_diagnostics"] = monitor.diagnostics()
+        receipt["owned_actions"] = receipt.get("owned_actions", []) + self.data.get("owned_actions", [])
         return receipt
 
     def conflict_error(self):
-        paths = [row["path"] for row in self.data["backups"] if row.get("result") == "owner_changed"]
+        paths = [row["path"] for row in self.data.get("created_roots", []) + self.data["backups"]
+                 if row.get("result") == "owner_changed"]
         if paths:
             self.data.update(phase="restored-with-conflicts", error="Restore conflicts: " + "; ".join(paths[:8]))
             self.save()
@@ -409,6 +421,7 @@ class Session:
     def failure_cleanup(self, error):
         if not self.data or self.data["phase"] in ("restored", "restored-with-conflicts"):
             return
+        self.data["failure_seen"] = True
         self.data["error"] = str(error)
         try:
             self.save()

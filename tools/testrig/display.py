@@ -20,13 +20,18 @@ from .windows import ProcessHandle, Windows
 
 class DisplayLifecycle:
     """Every mutation has a saved intent; cleanup steps cannot skip one another."""
-    def __init__(self, api, overlay, save, options, session, receipt=None):
+    def __init__(self, api, overlay, save, options, session, receipt=None, *, action_time=None):
         self.api, self.overlay, self.save, self.options = api, overlay, save, options
         self.row = receipt or {"session": session, "ready": False, "errors": [],
                                "original": None, "enable_intent": False, "topology_intent": False,
                                "overlay_closed": False, "vdd_disabled": False, "topology_restored": False}
         self.row.setdefault("warnings", [])
         self.api.display_calls = self.row.setdefault("display_calls", [])
+        self.action_time = action_time or (lambda: {"wall_time": time.time(), "tick": None})
+
+    def action(self, name):
+        self.row.setdefault("owned_actions", []).append({"action": name, **self.action_time()})
+        self.save(self.row)
 
     def start(self, *, plan_only=False):
         if plan_only:
@@ -52,12 +57,15 @@ class DisplayLifecycle:
                                                            self.options["width"], self.options["height"])
                     self.save(self.row)
                     return self.row["plan"]
+                self.action("display-apply-request")
                 self.row["virtual"] = self.api.extend_primary(instance, self.row["original"],
                                                               self.options["width"], self.options["height"])
+                self.action("display-applied")
                 self.save(self.row)
             if self.options["overlay"]:
                 rectangles = self.api.physical_rectangles(self.row["original"])
                 self.overlay.start(rectangles)
+                self.action("overlay-created")
             self.row["ready"] = True
             self.save(self.row)
         except BaseException as exc:
@@ -250,9 +258,12 @@ def watch_session(directory, state, parent, lifecycle, activity, *, open_process
                 lifecycle.row["owner_input_seen"] = True
                 if getattr(activity, "failure", None):
                     lifecycle.row["warnings"].append(activity.failure)
+                if hasattr(activity, "diagnostics"):
+                    lifecycle.row["input_diagnostics"] = activity.diagnostics()
                 lifecycle.save(lifecycle.row)
                 return "owner-input", True
             current = read_json(directory / "state.json")
+            lifecycle.row["cli_actions"] = current.get("owned_actions", [])
             if current["id"] != state["id"]:
                 return "session-changed", False
             if (directory / "display-stop").exists():
@@ -288,7 +299,7 @@ def worker(directory):
     parent = ProcessHandle(state["display_parent"])
     receipt = directory / "display-state.json"
     lifecycle = DisplayLifecycle(NativeDisplay(), BlackOverlay(), lambda row: atomic_json(receipt, row),
-                                 state["options"], state["id"])
+                                 state["options"], state["id"], action_time=backend.action_time)
     start = time.monotonic()
     recover = False
     supervisor_alive = True
@@ -301,6 +312,7 @@ def worker(directory):
         activity = OwnerInput()
         backend.owner_monitor = activity
         lifecycle.row["monitor_started_at"] = backend.wall_time()
+        lifecycle.row["input_diagnostics"] = activity.diagnostics()
         lifecycle.save(lifecycle.row)
         lifecycle.start()
         reason, recover = watch_session(directory, state, parent, lifecycle, activity)
@@ -324,10 +336,7 @@ def worker(directory):
             parent.close()
     try:
         if activity:
-            try:
-                lifecycle.row["owner_input_seen"] = bool(lifecycle.row.get("owner_input_seen") or activity.active())
-            except RigError:
-                lifecycle.row["owner_input_seen"] = True
+            record_activity(lifecycle, activity)
             lifecycle.row["monitor_covered_until"] = backend.wall_time()
             lifecycle.save(lifecycle.row)
         if recover and not supervisor_alive:
@@ -335,13 +344,27 @@ def worker(directory):
     finally:
         if activity:
             try:
-                lifecycle.row["owner_input_seen"] = bool(lifecycle.row.get("owner_input_seen") or activity.active())
+                record_activity(lifecycle, activity)
                 lifecycle.row["monitor_covered_until"] = backend.wall_time()
                 lifecycle.row["monitor_stopped_at"] = backend.wall_time()
                 lifecycle.save(lifecycle.row)
             finally:
                 activity.close()
     return int(bool(lifecycle.row["errors"]))
+
+
+def record_activity(lifecycle, activity):
+    try:
+        # Always poll, even after owner presence latched: a late hook match is
+        # diagnostic evidence and must not be hidden by Boolean short-circuiting.
+        detected = activity.active()
+        lifecycle.row["owner_input_seen"] = bool(lifecycle.row.get("owner_input_seen") or detected)
+    except RigError as exc:
+        lifecycle.row["owner_input_seen"] = True
+        if not lifecycle.row["errors"] or lifecycle.row["errors"][-1] != str(exc):
+            lifecycle.row["errors"].append(str(exc))
+    if hasattr(activity, "diagnostics"):
+        lifecycle.row["input_diagnostics"] = activity.diagnostics()
 
 
 def recover_session(directory, backend, lifecycle):

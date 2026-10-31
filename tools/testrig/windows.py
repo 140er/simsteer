@@ -401,6 +401,11 @@ class Windows:
         stop_worker(journal, self)
 
     sleep = staticmethod(time.sleep)
+    @staticmethod
+    def action_time():
+        tick = signature(dll("kernel32"), "GetTickCount", [], C.c_uint32)()
+        return {"wall_time": time.time(), "tick": tick}
+
     monotonic = staticmethod(time.monotonic)
     wall_time = staticmethod(time.time)
 
