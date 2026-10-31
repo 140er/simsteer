@@ -14,13 +14,38 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, fields, field
 import uuid
-
-from simsteer.runtime.input.mapping import validate_axes
+from types import UnionType
+from typing import Union, get_args, get_origin, get_type_hints
 
 from simsteer.paths import data_dir
+from simsteer.runtime.input.mapping import validate_axes
 
 
 _SETTINGS_FILE = "settings.json"
+
+
+def _loaded_value(value, expected):
+    """Validate JSON types without parsing strings or truncating fractions."""
+    if type(value) is expected:
+        return value
+    origin = get_origin(expected)
+    args = get_args(expected)
+    if origin in (Union, UnionType):
+        for member in args:
+            try:
+                return _loaded_value(value, member)
+            except (TypeError, ValueError, OverflowError):
+                continue
+    elif expected is float and type(value) is int:
+        return float(value)
+    elif expected is int and type(value) is float and value.is_integer():
+        return int(value)
+    elif origin is list and isinstance(value, list):
+        return [_loaded_value(item, args[0]) for item in value]
+    elif origin is dict and isinstance(value, dict):
+        return {_loaded_value(k, args[0]): _loaded_value(v, args[1])
+                for k, v in value.items()}
+    raise ValueError("incompatible setting type")
 
 
 @dataclass
@@ -64,7 +89,7 @@ class Settings:
     # List of simsteer.app.hotkeys ids that are disabled. Managed via
     # the Hotkeys tab. Stored as a list for JSON friendliness; lookup
     # treats it as a set.
-    disabled_hotkeys: list = None  # type: ignore[assignment]
+    disabled_hotkeys: list[str] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         # Dataclass defaults for mutable types (list/dict) can't be
@@ -73,13 +98,8 @@ class Settings:
             self.disabled_hotkeys = []
         # Runtime overrides are deliberately outside the persisted dataclass.
         self._runtime_overrides: dict = {}
-        # Saved annotations are strings; validate these fields explicitly.
-        if type(self.wheel_passthrough) is not bool:
-            self.wheel_passthrough = True
-        try:
-            self.rim_range_deg = max(180, min(2520, int(self.rim_range_deg)))
-        except (TypeError, ValueError, OverflowError):
-            self.rim_range_deg = 900
+        # load() validates types; these are wheel-specific value constraints.
+        self.rim_range_deg = max(180, min(2520, self.rim_range_deg))
         try:
             self.wheel_instance = str(uuid.UUID(self.wheel_instance)).upper() if self.wheel_instance else ""
         except (TypeError, ValueError, AttributeError):
@@ -115,26 +135,17 @@ class Settings:
             return cls()
         if "passive_fit_ets2" in raw:
             raw.setdefault("passive_fit", raw.pop("passive_fit_ets2"))
-        # Filter to only known fields; coerce types best-effort.
-        valid = {f.name: f for f in fields(cls)}
+        # Resolve postponed annotations before validating known fields.
+        valid = {f.name for f in fields(cls)}
+        hints = get_type_hints(cls)
         kwargs: dict = {}
         for k, v in raw.items():
-            f = valid.get(k)
-            if f is None:
+            if k not in valid:
                 continue
             try:
-                if f.type in (int, str):
-                    kwargs[k] = f.type(v)
-                elif k == "disabled_hotkeys":
-                    # JSON gives us a list; coerce + drop non-strings.
-                    if isinstance(v, list):
-                        kwargs[k] = [str(x) for x in v]
-                    else:
-                        kwargs[k] = []
-                else:
-                    kwargs[k] = v
-            except (TypeError, ValueError):
-                pass
+                kwargs[k] = _loaded_value(v, hints[k])
+            except (TypeError, ValueError, OverflowError):
+                print(f"warning: invalid setting {k!r}; using default")
         return cls(**kwargs)
 
     def save(self) -> None:
