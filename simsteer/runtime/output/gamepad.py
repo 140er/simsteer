@@ -66,9 +66,13 @@ class Gamepad:
         Reports sent before USB startup finishes can be lost even though
         the transport accepts them, especially when recreating a pad.
         """
-        from vgamepad.win import vigem_client, vigem_commons
+        from vgamepad.win import vigem_client
+        try:
+            from vgamepad.api import VIGEM_ERRORS
+        except ImportError:  # vgamepad 0.1.0
+            from vgamepad.win.vigem_commons import VIGEM_ERRORS
 
-        errors = vigem_commons.VIGEM_ERRORS
+        errors = VIGEM_ERRORS
         index = ctypes.c_ulong()
         state = ctypes.create_string_buffer(16)  # XINPUT_STATE
         get_state = ctypes.WinDLL("xinput1_4.dll").XInputGetState

@@ -90,6 +90,8 @@ def install_transport(monkeypatch, transport, *, ready_after=0):
                                      vigem_target_x360_get_user_index=user_index),
         vigem_commons=SimpleNamespace(VIGEM_ERRORS=SimpleNamespace(
             VIGEM_ERROR_NONE=0x20000000, VIGEM_ERROR_XUSB_USERINDEX_OUT_OF_RANGE=0xE0000014))))
+    monkeypatch.setitem(sys.modules, "vgamepad.win.vigem_commons",
+                        sys.modules["vgamepad.win"].vigem_commons)
     monkeypatch.setattr(ctypes, "WinDLL", lambda name: SimpleNamespace(XInputGetState=get_state), raising=False)
     now = SimpleNamespace(t=0.)
 
@@ -127,6 +129,18 @@ def test_item1_readiness_timeout_releases_device_without_pulse(monkeypatch):
         Gamepad()
     assert not transport.attached and transport.removed
     assert all(report == (0,) * 6 for report in transport.sent)
+
+
+def test_item1_current_library_api_layout(monkeypatch):
+    transport = BootTransport()
+    install_transport(monkeypatch, transport)
+    win = sys.modules["vgamepad.win"]
+    monkeypatch.setitem(sys.modules, "vgamepad.api", win.vigem_commons)
+    monkeypatch.delattr(win, "vigem_commons")
+    monkeypatch.delitem(sys.modules, "vgamepad.win.vigem_commons")
+    pad = Gamepad()
+    assert not pad.engaged and transport.ready_checks == 1
+    assert transport.visible == (0,) * 6
 
 
 def test_item1_repeated_zero_cannot_replace_boot_report():
