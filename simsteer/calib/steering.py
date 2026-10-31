@@ -148,6 +148,7 @@ class OutputDirection:
     SETTLE_S = 2.0
     TIMEOUT_S = 14.0
     METHOD = "stopped-pulses-v1"
+    SATURATED_RAW_REASON = "Release steering to check direction: raw input saturated"
 
     def __init__(self, lag_frames: int, prior: int = -1) -> None:
         self.prior = prior
@@ -192,6 +193,8 @@ class OutputDirection:
             return "Steering check needs steering telemetry"
         limit = max(self.PLAYER_THRESHOLD, self.RAW_MAX_GAIN * abs(self._command))
         if abs(raw) > limit:
+            if self.active and self._command and abs(raw) >= 0.9 and abs(raw) > 4 * abs(self._command):
+                return self.SATURATED_RAW_REASON
             return "Release steering to check direction"
         if (self.active and user_axis is not None and self._command
                 and self._pulse_s >= self.RAW_SETTLE_S and abs(raw) >= self.MIN_AXIS):

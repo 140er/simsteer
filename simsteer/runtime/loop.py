@@ -318,6 +318,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                         # waitKey only sleeps once a window exists.
                         time.sleep(0.002)
                     continue
+                calib.update_for_frame(frame.shape)
+                frame_fov_h_deg = float(calib.fov_h_deg)
                 n_frames += 1
                 t_warp = time.perf_counter()
                 restart_reason = flow.take_restart_request()
@@ -390,7 +392,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                     flow.feed_fov(frame, vx, v_real, actual_yaw,
                                   time.perf_counter)
                     fov_vision_s = flow.fov_solver.vision_s - before
-                if flow.camera_learning:
+                camera_learning = flow.camera_learning
+                if camera_learning:
                     live_calib.update(
                         calib, decoded.pose, decoded.road_transform,
                         actual_yaw, v_real,
@@ -398,6 +401,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                         road_transform_std=decoded.road_transform_std,
                         wide_from_device_euler=decoded.wide_from_device_euler,
                         game_steer=game_steer)
+                camera_rejection = (live_calib.last_rejection_reason
+                                    if camera_learning else None)
 
                 # --- Lateral + longitudinal control ---
                 output_fault = flow.observe_output(
@@ -644,6 +649,23 @@ def run(settings: Settings, game: GameProfile | str, *,
                         "brake": round(float(brake_out), 4),
                         "engaged": engaged_now,
                         "telemetry": "ok" if tel.available else "lost",
+                        "camera_learning": camera_learning,
+                        "camera_rejection": camera_rejection,
+                        "actual_speed_mps": v_real,
+                        "actual_yaw_rad_s": actual_yaw,
+                        "pose_vx": vx,
+                        "pose_lateral_std": (float(decoded.pose_std[1])
+                                             if decoded.pose_std is not None
+                                             and len(decoded.pose_std) >= 2 else None),
+                        "road_height_m": (float(decoded.road_transform[2])
+                                          if decoded.road_transform is not None
+                                          and len(decoded.road_transform) >= 3 else None),
+                        "road_height_std_m": (float(decoded.road_transform_std[2])
+                                              if decoded.road_transform_std is not None
+                                              and len(decoded.road_transform_std) >= 3 else None),
+                        "fov_h_deg": frame_fov_h_deg,
+                        "frame_width": calib.image_w,
+                        "frame_height": calib.image_h,
                         **flow.log_fields(),
                     }
                     if log_timing:
