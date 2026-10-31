@@ -22,10 +22,15 @@ def player_axis(pad):
 def engage_block(pad):
     p = getattr(pad, "physical", None)
     if p is not None:
+        status = getattr(pad, "pedal_status", "")
         if not p.ok:
-            return "wheel not found"
+            return "Confirming wheel" if status == "Confirming wheel" else "wheel not found"
+        if status == "Check pedals":
+            return "check pedals"
+        if status.startswith(("Press ", "Release pedals,")):
+            return "map pedals"
         if p.brake is None:
-            return "check pedals" if getattr(pad, "pedal_status", "") == "Check pedals" else "map pedals"
+            return "map pedals"
         if (p.brake or 0) >= BRAKE_TAKEOVER:
             return "release the brake"
     return ""

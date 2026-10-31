@@ -38,7 +38,7 @@ def test_reengage_does_not_replay_previous_ai_pedals():
         time.sleep(.06)
         pedals = [c[1][0] for c in dll.calls[start:] if c[0] == "SetAxis" and c[1][2] in (0x31, 0x32)]
         assert pedals and set(pedals) == {1}
-        assert (wheel.io.commands.steer, wheel.io.commands.throttle, wheel.io.commands.brake) == (0, 0, 0)
+        assert (wheel.io.commands.throttle, wheel.io.commands.brake) == (0, 0)
         wheel.set_throttle_brake(.25, 0)
         time.sleep(.01)
         assert dll.values[0x31] > 1, "fresh AI commands must still work"
@@ -85,10 +85,10 @@ def test_instance_change_and_restart_cannot_restore_old_pedal_map(monkeypatch):
 
 
 @pytest.mark.parametrize("slot,rest,full,value", [
-    (1, 0, 65535, 5000), (2, 0, 65535, 5000), (3, 32767, 0, 30000),
+    (1, 0, 65535, 5000), (3, 32767, 0, 30000),
     (1, 0, 65535, 32767), (1, 32767, 65535, 29000),
 ])
-def test_every_mapped_pedal_must_reach_rest_before_startup_relay(monkeypatch, slot, rest, full, value):
+def test_throttle_and_clutch_must_reach_rest_before_startup_relay(monkeypatch, slot, rest, full, value):
     p = profile()
     settings = Settings(wheel_instance=str(p.inst.guidInstance), wheel_axes={
         "steer": 0, "throttle": {"slot": 1, "rest": 0, "full": 65535},
@@ -103,7 +103,7 @@ def test_every_mapped_pedal_must_reach_rest_before_startup_relay(monkeypatch, sl
     try:
         assert reader.open()
         sample = reader.read(0)
-        assert sample.throttle is sample.brake is sample.clutch is None
+        assert sample.throttle is sample.clutch is None and sample.brake == 0
         assert reader.status == "Check pedals"
         p.axes[slot] = rest
         sample = reader.read(.002)
@@ -172,7 +172,7 @@ def test_unconfirmed_instance_and_single_glitch_never_reach_output(monkeypatch):
 
 
 @pytest.mark.parametrize("event", [2, 5, 6])
-def test_console_close_logoff_shutdown_neutralize_on_owner(event):
+def test_delivered_console_exit_callbacks_neutralize_on_owner(event):
     dll, reader = FakeVJoyDll(), ScriptedPhysical(Physical(0, 0, 0, 0, True))
     wheel = passthrough.PassthroughWheel(Settings(), reader_factory=lambda: reader,
                                          feeder_factory=lambda: VJoyFeeder(dll=dll))

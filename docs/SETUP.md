@@ -125,8 +125,11 @@ Move the rim a few degrees to confirm the input instance. In the developer
 workbench, choose **Wheel → Map pedals** while stopped.
 Start with all pedals released; press and release throttle, brake and
 clutch fully during their three-second windows. Clutch is optional.
-Pedals stay disabled until mapped; **Check pedals** means release all mapped
-pedals. At startup, each must reach within 5% of its mapped rest value.
+Pedals stay disabled until mapped; **Check pedals** means release throttle
+and clutch to within 5% of their mapped rest values. This hold applies at
+startup and with a new map, and stays cleared through read errors or a
+reconnect of the same wheel. A mapped brake is always relayed while input
+is available, including during the hold or remapping.
 The map and active wheel instance are saved together. An instance change
 clears the map and requires **Map pedals** again. Engagement requires a
 working mapped brake.
@@ -147,8 +150,10 @@ grace period, so gradual turns cannot be absorbed indefinitely. The test-fire
 key is disabled during passthrough; Bind remains available while disengaged.
 On disconnect or an input/output error the relay centres steering and
 releases all pedals. Stop the vehicle before quitting: exit also centres
-steering and releases pedals. Behaviour after a hard process kill still
-needs hardware validation.
+steering and releases pedals. Console close requests this cleanup too.
+Windows does not deliver logoff/shutdown console events after the app loads
+its window libraries; those events and hard process kills still need
+hardware validation.
 
 Read-only diagnostics: `python -m simsteer.runtime.input.physical --monitor
 --seconds 20`; add `--echo-vjoy` to compare the relayed steering with vJoy.

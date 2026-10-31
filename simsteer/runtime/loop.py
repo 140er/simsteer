@@ -593,13 +593,14 @@ def run(settings: Settings, game: GameProfile | str, *,
                             print("-> DISENGAGED")
                         else:
                             ok, why = engage_check()
+                            if ok and pad.engage() is False:
+                                ok, why = False, pad.last_reason
                             if not ok:
                                 audio.play("denied")
                                 set_banner(f"CANNOT ENGAGE — {why}",
                                            COL_ACCENT_BLUE, 3.0)
                                 print(f"-> ENGAGE BLOCKED: {why}")
                             else:
-                                pad.engage()
                                 lat_ctrl.reset()
                                 audio.play("engage")
                                 set_banner("ENGAGED", COL_ACCENT_GREEN, 1.5)

@@ -129,7 +129,6 @@ class Override:
                 self.anchor += (degrees - self.anchor) * (1 - math.exp(-dt / ANCHOR_TAU_S))
             steering = armed and (
                 abs(degrees - self.engage_anchor) + 1e-9 >= TAKEOVER_HARD_DEG
-                or travel + 1e-9 >= TAKEOVER_HARD_DEG
                 or self._held("travel", travel + 1e-9 >= TAKEOVER_ANGLE_DEG, now, TAKEOVER_HOLD_S)
                 or (self._held("flick", abs(self.rate) >= TAKEOVER_RATE_DPS,
                                now, TAKEOVER_RATE_HOLD_S) and travel > TAKEOVER_RATE_MIN_DEG))

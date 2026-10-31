@@ -117,9 +117,9 @@ class DeviceManager:
     def engaged(self) -> bool:
         return bool(self._device and self._device.engaged)
 
-    def engage(self) -> None:
+    def engage(self) -> bool | None:
         if self._device is not None:
-            self._device.engage()
+            return self._device.engage()
 
     def disengage(self) -> None:
         if self._device is not None:

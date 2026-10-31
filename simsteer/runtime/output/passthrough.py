@@ -12,10 +12,10 @@ from collections import deque
 from dataclasses import replace
 
 from simsteer.core.override import Commands, Output, Override, Physical, OVERRIDE_HOLD_S, clamp
-from simsteer.core.override import BRAKE_TAKEOVER
 from simsteer.runtime.input.physical import PhysicalWheel, RELAY_HZ, RELAY_MIN_HZ
 from simsteer.runtime.output.vjoy_feeder import VJoyFeeder
 from simsteer.runtime.output.wheel import WheelError
+from simsteer.runtime.wheel_session import engage_block
 
 RELAY_REFRESH_S = 0.10
 SWITCH_INTERVAL_S = 0.001
@@ -94,7 +94,7 @@ class WheelIo(threading.Thread):
                     p = reader.read(now)
                     if mapping and not machine.engaged and p.ok:
                         reader.map_pedals(now)
-                        p = replace(p, throttle=None, brake=None, clutch=None)
+                        p = replace(p, throttle=None, clutch=None)
                     machine.rim_range_deg = self.settings.rim_range_deg
                     out = machine.step(now, p, commands)
                     if out != previous or now - written_at >= RELAY_REFRESH_S:
@@ -158,6 +158,8 @@ class WheelIo(threading.Thread):
 class PassthroughWheel:
     def __init__(self, settings, device_id=1, **factories):
         self.settings, self.device_id = settings, device_id
+        self._lifecycle_lock = threading.RLock()
+        self._refused_reason = ""
         self._console = None
         self.io = WheelIo(settings, device_id, **factories)
         self.io.start()
@@ -193,7 +195,7 @@ class PassthroughWheel:
 
     @property
     def last_reason(self):
-        return self.io.output.reason
+        return self._refused_reason or self.io.output.reason
 
     @property
     def pedal_status(self):
@@ -211,23 +213,25 @@ class PassthroughWheel:
         with self.io.lock:
             cmd = self.io.commands
             if request == "engage":
-                p = self.physical
-                if not p.ok or p.brake is None or p.brake >= BRAKE_TAKEOVER:
-                    return
-                cmd = replace(cmd, steer=0.0, throttle=0.0, brake=0.0)
+                self._refused_reason = "map pedals" if self.io.map_request else engage_block(self)
+                if self._refused_reason:
+                    return False
+                cmd = replace(cmd, steer=self.io.output.steer, throttle=0.0, brake=0.0)
+            self._refused_reason = ""
             self.io.commands = replace(cmd, serial=cmd.serial + 1, request=request,
                                        ai_at=time.monotonic(), forced={})
+            return True
 
     def engage(self):
-        self._request("engage")
+        return self._request("engage")
 
     def disengage(self, reason="loop"):
         self._request(reason)
 
     def toggle(self):
         desired = not self.engaged
-        self._request("engage" if desired else "insert")
-        return desired
+        accepted = self._request("engage" if desired else "insert")
+        return desired and accepted
 
     def center(self):
         with self.io.lock:
@@ -258,20 +262,21 @@ class PassthroughWheel:
             return True
 
     def stats(self, *, consume=False):
-        with self.io.lock:
-            times, latency = tuple(self.io.times), tuple(self.io.latencies)
-            result = dict(relay_hz=(len(times) - 1) / (times[-1] - times[0]) if len(times) > 1 else 0,
-                          latency_p95_ms=percentile(latency, .95), latency_p99_ms=percentile(latency, .99),
-                          latency_max_ms=max(latency, default=0), relay_gap_max_ms=self.io.gap_max,
-                          name=self.io.name_text, pedal_status=self.io.map_status)
-            pending, self.io.pending = self.io.pending, {}
-            if consume:
-                self.io.gap_max = 0.0
-        edits = {k: v for k, v in pending.items() if getattr(self.settings, k) != v}
-        if edits:
-            self.settings.set_persistent(**edits)
-            self.settings.save()
-        return result
+        with self._lifecycle_lock:
+            with self.io.lock:
+                times, latency = tuple(self.io.times), tuple(self.io.latencies)
+                result = dict(relay_hz=(len(times) - 1) / (times[-1] - times[0]) if len(times) > 1 else 0,
+                              latency_p95_ms=percentile(latency, .95), latency_p99_ms=percentile(latency, .99),
+                              latency_max_ms=max(latency, default=0), relay_gap_max_ms=self.io.gap_max,
+                              name=self.io.name_text, pedal_status=self.io.map_status)
+                pending, self.io.pending = self.io.pending, {}
+                if consume:
+                    self.io.gap_max = 0.0
+            edits = {k: v for k, v in pending.items() if getattr(self.settings, k) != v}
+            if edits:
+                self.settings.set_persistent(**edits)
+                self.settings.save()
+            return result
 
     def wiggle(self, kind, duration_each_s=1.0):
         if kind not in ("steering", "throttle", "brake") or self.engaged:
@@ -285,13 +290,15 @@ class PassthroughWheel:
         self.center()
 
     def close(self):
+        # Signal neutralization before waiting for a concurrent settings save.
         self.io.stopping.set()
-        self.io.join(.45)
-        if self.io.is_alive():
-            raise WheelError("Wheel I/O did not stop")
-        try:
-            self.stats()
-        finally:
-            if self._console:
-                self._console.close()
-            atexit.unregister(self.close)
+        with self._lifecycle_lock:
+            self.io.join(.45)
+            if self.io.is_alive():
+                raise WheelError("Wheel I/O did not stop")
+            try:
+                self.stats()
+            finally:
+                if self._console:
+                    self._console.close()
+                atexit.unregister(self.close)

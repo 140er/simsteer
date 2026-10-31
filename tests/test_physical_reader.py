@@ -39,6 +39,7 @@ def test_full_format_and_selection_never_write_force(monkeypatch):
     wheel, api = reader(monkeypatch, a, b, other, vjoy)
     first = wheel.read(0)
     assert not first.ok and first.throttle is None
+    assert wheel.status == "Confirming wheel"
     b.axes[0] += 1000
     wheel.read(.002)
     wheel.read(.052)
@@ -92,7 +93,7 @@ def test_pedals_disabled_without_map_and_startup_throttle_latch(monkeypatch):
     p.axes[1:4] = [65535, 20000, 0]
     wheel, _ = reader(monkeypatch, p, settings=settings)
     sample = wheel.read(0)
-    assert sample.throttle is sample.brake is sample.clutch is None
+    assert sample.throttle is sample.clutch is None and sample.brake > 0
     assert wheel.status == "Check pedals"
     p.axes[1:4] = [0, 0, 32767]
     sample = wheel.read(.002)

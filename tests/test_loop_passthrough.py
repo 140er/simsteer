@@ -135,6 +135,40 @@ def test_capture_entry_failure_closes_relay(monkeypatch, tmp_path):
     assert device.closed
 
 
+def test_engage_race_reports_facade_refusal(monkeypatch, tmp_path, capsys):
+    import simsteer.runtime.loop as loop
+    device, sounds = FakeDeviceManager(), []
+
+    class ReadyFlow(CalibFlow):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.lc.cal_status = loop.CalStatus.CALIBRATED
+            self._finish_fov("kept")
+            self.direction.model_sign = self.direction.axis_sign = 1
+            self.output_direction.sign = 1
+            self.step = Step.STEERING
+
+    class Keys:
+        def poll(self):
+            return [loop.KEY_INSERT]
+
+    def refuse():
+        device.last_reason = "release the brake"
+        return False
+
+    device.engage = refuse
+    monkeypatch.setattr(loop, "DeviceManager", lambda **kw: device)
+    monkeypatch.setattr(loop, "CalibFlow", ReadyFlow)
+    monkeypatch.setattr(loop.audio, "play", sounds.append)
+    clip, clock = _make_clip(tmp_path / "clip", frames=1), ReplayClock()
+    assert loop.run(Settings(device="wheel", no_tuner=True), "ets2", source=ReplaySource(clip, clock),
+                    make_telemetry=lambda: ReplayTelemetry(clip, clock), clock=clock, keys=Keys(),
+                    model=FakeModel(), headless=True) == 0
+    assert "denied" in sounds and "engage" not in sounds
+    assert "ENGAGE BLOCKED: release the brake" in capsys.readouterr().out
+    assert device.closed and not device.engaged
+
+
 @pytest.mark.parametrize("action", ["test_fire", "periodic_center"])
 @pytest.mark.parametrize("passthrough", [True, False])
 def test_passthrough_skips_test_fire_and_periodic_center(monkeypatch, tmp_path, action, passthrough):
