@@ -12,9 +12,11 @@ from collections import deque
 from dataclasses import replace
 
 from simsteer.core.override import Commands, Output, Override, Physical, OVERRIDE_HOLD_S, clamp
+from simsteer.core.finite import NonFiniteError, require_finite
 from simsteer.runtime.input.physical import PhysicalWheel, RELAY_HZ, RELAY_MIN_HZ
 from simsteer.runtime.output.vjoy_feeder import VJoyFeeder
 from simsteer.runtime.output.wheel import WheelError
+from simsteer.runtime.output.safety import OutputGate
 from simsteer.runtime.wheel_session import engage_block
 
 RELAY_REFRESH_S = 0.10
@@ -59,11 +61,14 @@ class ConsoleExit:
 
 
 class WheelIo(threading.Thread):
-    def __init__(self, settings, device_id=1, *, reader_factory=None, feeder_factory=None):
+    def __init__(self, settings, device_id=1, *, reader_factory=None, feeder_factory=None, write_output=None):
         super().__init__(name="wheel-io", daemon=True)
         self.settings = settings
         self.reader_factory = reader_factory or (lambda: PhysicalWheel(settings))
         self.feeder_factory = feeder_factory or (lambda: VJoyFeeder(device_id))
+        self.write_output = write_output or OutputGate().write_output
+        self.inhibited, self.reset = threading.Event(), threading.Event()
+        self.stop_epoch = 0
         self.lock, self.ready, self.stopping = threading.Lock(), threading.Event(), threading.Event()
         self.commands, self.output, self.physical = Commands(), Output(), Physical()
         self.available, self.error, self.map_request = False, None, False
@@ -80,7 +85,7 @@ class WheelIo(threading.Thread):
             reader = self.reader_factory()
             if not reader.open():
                 return
-            feeder = self.feeder_factory()
+            feeder = self.write_output(lambda _: self.feeder_factory())
             self.available = True
             sys.setswitchinterval(SWITCH_INTERVAL_S)
             self.ready.set()
@@ -90,15 +95,25 @@ class WheelIo(threading.Thread):
                 with self.lock:
                     commands, mapping = self.commands, self.map_request
                     self.map_request = False
+                    reset, epoch = self.reset.is_set(), self.stop_epoch
+                    self.reset.clear()
                 try:
                     p = reader.read(now)
                     if mapping and not machine.engaged and p.ok:
                         reader.map_pedals(now)
                         p = replace(p, throttle=None, clutch=None)
                     machine.rim_range_deg = self.settings.rim_range_deg
-                    out = machine.step(now, p, commands)
+                    if reset:
+                        machine.step(now, Physical(), Commands())
+                    out = machine.step(now, Physical() if self.inhibited.is_set() else p, commands)
                     if out != previous or now - written_at >= RELAY_REFRESH_S:
-                        feeder.write(out)
+                        def emit(_):
+                            with self.lock:
+                                actual = (Output() if self.inhibited.is_set() or self.stopping.is_set()
+                                          or epoch != self.stop_epoch else out)
+                                feeder.write(actual)
+                                return actual
+                        out = self.write_output(emit)
                         finished = time.monotonic()
                         if p.ok:
                             self.latencies.append(max(0, finished - p.sampled_at) * 1000)
@@ -111,7 +126,7 @@ class WheelIo(threading.Thread):
                     out = machine.step(now, p, commands)
                     # Never keep the previous throttle after a reader/writer error.
                     try:
-                        feeder.write(Output())
+                        self.write_output(lambda _: feeder.write(Output()))
                     except Exception:
                         break
                     previous = None
@@ -148,7 +163,7 @@ class WheelIo(threading.Thread):
             finally:
                 try:
                     if feeder:
-                        feeder.close()
+                        self.write_output(lambda _: feeder.close())
                 finally:
                     self.output, self.physical = Output(reason="lost" if self.error else "closed"), Physical()
                     sys.setswitchinterval(previous_interval)
@@ -161,6 +176,7 @@ class PassthroughWheel:
         self._lifecycle_lock = threading.RLock()
         self._refused_reason = ""
         self._console = None
+        self._released = False
         self.io = WheelIo(settings, device_id, **factories)
         self.io.start()
         if not self.io.ready.wait(2):
@@ -183,7 +199,7 @@ class PassthroughWheel:
 
     @property
     def engaged(self):
-        return self.io.output.engaged
+        return not (self.io.inhibited.is_set() or self.io.stopping.is_set()) and self.io.output.engaged
 
     @property
     def physical(self):
@@ -211,12 +227,15 @@ class PassthroughWheel:
 
     def _request(self, request):
         with self.io.lock:
+            if self.io.stopping.is_set():
+                return False
             cmd = self.io.commands
             if request == "engage":
                 self._refused_reason = "map pedals" if self.io.map_request else engage_block(self)
                 if self._refused_reason:
                     return False
                 cmd = replace(cmd, steer=self.io.output.steer, throttle=0.0, brake=0.0)
+                self.io.inhibited.clear()
             self._refused_reason = ""
             self.io.commands = replace(cmd, serial=cmd.serial + 1, request=request,
                                        ai_at=time.monotonic(), forced={})
@@ -227,6 +246,19 @@ class PassthroughWheel:
 
     def disengage(self, reason="loop"):
         self._request(reason)
+
+    def stop_output(self):
+        """Fault stop: keep every axis neutral until a healthy loop or engage."""
+        with self.io.lock:
+            self.io.inhibited.set()
+            self.io.reset.set()
+            self.io.stop_epoch += 1
+            self.io.commands = Commands(serial=self.io.commands.serial + 1)
+            self.io.output = Output(reason="stopped")
+
+    def resume_output(self):
+        if not self.io.stopping.is_set():
+            self.io.inhibited.clear()
 
     def toggle(self):
         desired = not self.engaged
@@ -239,8 +271,15 @@ class PassthroughWheel:
 
     def _axes(self, values, force):
         now = time.monotonic()
+        try:
+            require_finite("wheel", **values)
+        except NonFiniteError:
+            self.stop_output()
+            raise
         values = {k: clamp(v, -1 if k == "steer" else 0, 1) for k, v in values.items()}
         with self.io.lock:
+            if self.io.stopping.is_set():
+                return
             cmd = self.io.commands
             if self.engaged:
                 self.io.commands = replace(cmd, **values, ai_at=now)
@@ -293,6 +332,8 @@ class PassthroughWheel:
         # Signal neutralization before waiting for a concurrent settings save.
         self.io.stopping.set()
         with self._lifecycle_lock:
+            if self._released:
+                return
             self.io.join(.45)
             if self.io.is_alive():
                 raise WheelError("Wheel I/O did not stop")
@@ -302,3 +343,4 @@ class PassthroughWheel:
                 if self._console:
                     self._console.close()
                 atexit.unregister(self.close)
+                self._released = True

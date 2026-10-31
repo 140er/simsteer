@@ -11,7 +11,7 @@ def output_guard(pad):
         yield
     finally:
         if getattr(pad, "physical", None) is not None:
-            pad.close()
+            (getattr(pad, "shutdown_output", None) or pad.close)()
 
 
 def player_axis(pad):

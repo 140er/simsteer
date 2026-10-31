@@ -54,6 +54,7 @@ def test_player_fit_takeover_edge_controller_reset_and_log(monkeypatch, tmp_path
     import simsteer.runtime.loop as loop
     clip, clock, holder = _make_clip(tmp_path / "clip", frames=16), ReplayClock(), {}
     device = FakeDeviceManager()
+    device.insert_disengage = lambda: pytest.fail("takeover was already disengaged")
     class Flow(CalibFlow):
         def __init__(self, *a, **kw):
             super().__init__(*a, **kw)
@@ -171,7 +172,7 @@ def test_engage_race_reports_facade_refusal(monkeypatch, tmp_path, capsys):
 
 @pytest.mark.parametrize("action", ["test_fire", "periodic_center"])
 @pytest.mark.parametrize("passthrough", [True, False])
-def test_passthrough_skips_test_fire_and_periodic_center(monkeypatch, tmp_path, action, passthrough):
+def test_no_test_fire_and_passthrough_skips_periodic_center(monkeypatch, tmp_path, action, passthrough):
     import simsteer.runtime.loop as loop
     device = FakeDeviceManager()
     device.passthrough = passthrough
@@ -196,8 +197,8 @@ def test_passthrough_skips_test_fire_and_periodic_center(monkeypatch, tmp_path, 
                     make_telemetry=lambda: ReplayTelemetry(clip, clock), clock=clock, keys=Keys(),
                     model=FakeModel(), headless=True) == 0
     if action == "test_fire":
-        assert bool(engages) == (not passthrough)
-        assert bool(sleeps) == (not passthrough)
+        # The shared safety pipeline removed test-fire in both modes.
+        assert not engages and not sleeps
     else:
         assert bool(centers) == (not passthrough)
 
@@ -205,7 +206,7 @@ def test_passthrough_skips_test_fire_and_periodic_center(monkeypatch, tmp_path, 
 def test_passthrough_off_replay_matches_base_bytes(tmp_path, monkeypatch):
     import simsteer.runtime.loop as loop
     # Execute the exact parent loop against the same replay/model/state.
-    original = subprocess.run(["git", "show", "1d276e0f1e0fc8a44813341f0f35e0b05fac4348:simsteer/runtime/loop.py"],
+    original = subprocess.run(["git", "show", "0f63703:simsteer/runtime/loop.py"],
                               check=True, capture_output=True, text=True).stdout
     parent = ModuleType("parent_loop")
     exec(compile(original, "parent_loop.py", "exec"), parent.__dict__)

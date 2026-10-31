@@ -58,6 +58,8 @@ from pathlib import Path
 
 import numpy as np
 
+from simsteer.core.finite import require_finite
+
 from simsteer.core.constants import T_IDXS
 from simsteer.core.learners.liveparams import LiveParams
 from simsteer.paths import load_with_fallback, state_path
@@ -329,6 +331,10 @@ class LateralController:
         for this frame. `dt` (s) is used by the integrator + leak —
         defaults to 0.05 s (20 Hz) for callers that don't measure it."""
         cfg = self.cfg
+        require_finite("lateral", plan=decoded.plan, desire=decoded.desire_state,
+                       speed=v_ego, wheel=actual_wheel_angle, dt=dt,
+                       sign=wheel_sign, config=vars(cfg), previous=self.last_desired_k_raw,
+                       trim=self.axis_trim_state, error=self.lpf_wheel_error)
         if v_ego < cfg.min_speed:
             self.last_curvature = 0.0
             self.last_target_wheel = 0.0
@@ -446,6 +452,7 @@ class LateralController:
         # serve different roles — bias is a static user knob, trim is
         # the dynamic auto-knob. Both stack additively on top of FF.
         axis = axis_ff + self.axis_trim_state + cfg.axis_bias
+        require_finite("lateral", command=axis)
         axis = max(-cfg.steer_max, min(cfg.steer_max, axis))
         self.last_axis = axis
         return axis
@@ -506,6 +513,8 @@ class LongitudinalController:
 
     def compute(self, decoded: Decoded, v_ego: float) -> tuple[float, float]:
         cfg = self.cfg
+        require_finite("longitudinal", plan=decoded.plan, speed=v_ego,
+                       leads=decoded.leads, probability=decoded.lead_prob, config=vars(cfg))
 
         v_plan = decoded.plan[:, 3]   # vel_x over the 33 plan timesteps
         a_plan = decoded.plan[:, 6]   # accel_x
@@ -604,6 +613,7 @@ class LongitudinalController:
         if aeb:
             a_cmd = -cfg.max_decel_mps2
 
+        require_finite("longitudinal", acceleration=a_cmd)
         # Deadband around zero so we don't ping-pong between throttle
         # and brake when the model is happy with current speed.
         if abs(a_cmd) < cfg.accel_deadband_mps2:
@@ -623,4 +633,5 @@ class LongitudinalController:
         self.last_v_safe_corner = v_safe_corner
         self.last_corner_t = corner_t
         self.last_corner_k = corner_k
+        require_finite("longitudinal", throttle=throttle, brake=brake)
         return throttle, brake

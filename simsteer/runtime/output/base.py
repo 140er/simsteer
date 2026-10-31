@@ -26,14 +26,16 @@ Reset the fit (`Reset RLS` button in tuner) after a swap.
 from __future__ import annotations
 
 from typing import Literal
+from threading import RLock
 
 from simsteer.runtime.output.gamepad import Gamepad, GamepadError
 from simsteer.runtime.output.wheel import Wheel, WheelError
+from simsteer.runtime.output.safety import OutputSafety, output_locked
 
 DeviceKind = Literal["gamepad", "wheel"]
 
 
-class DeviceManager:
+class DeviceManager(OutputSafety):
     """Single point of contact for whichever virtual controller is
     active. Public interface mirrors `Gamepad` / `Wheel` so callers
     can use a `DeviceManager` anywhere either was previously used."""
@@ -48,6 +50,9 @@ class DeviceManager:
         self._kind: DeviceKind | None = None
         self._device: Gamepad | Wheel | None = None
         self.last_error: str | None = None
+        self._lifecycle_lock = RLock()
+        self._shutdown_requested = False
+        self._init_safety()
         # Best effort — if initial_kind fails (e.g. no vJoy driver), the
         # caller can see `self.kind is None` and react.
         self.set_kind(initial_kind)
@@ -68,37 +73,41 @@ class DeviceManager:
         return self._kind == "wheel"
 
     def set_kind(self, kind: DeviceKind) -> bool:
+        # Never hold the output lock while waiting for the relay owner.
+        with self._lifecycle_lock:
+            return self._set_kind(kind)
+
+    def _set_kind(self, kind: DeviceKind) -> bool:
         """Switch to a different output device. Disengages and releases
         the current one before acquiring the new one. Returns True on
         success; on failure leaves whatever was active untouched and
         sets `self.last_error`."""
+        if self._closed or self._shutdown_requested:
+            return False
         if kind == self._kind:
             return True
+        self.cancel_bind()
         # Save was-engaged state so a swap mid-drive doesn't drop control.
         was_engaged = bool(self._device and self._device.engaged)
         # Tear down current device first — vJoy needs exclusive access,
         # ViGEm doesn't care but it's cleaner.
         if self._device is not None:
-            try:
-                self.close()
-            except Exception:
-                pass
-            self._device = None
-            self._kind = None
+            self.release_device()
         # Acquire new device.
         try:
             if kind == "gamepad":
-                self._device = Gamepad()
+                self._device = self.write_output(lambda _: Gamepad())
             elif kind == "wheel":
                 if self._passthrough:
                     from simsteer.runtime.output.passthrough import PassthroughWheel
-                    self._device = PassthroughWheel(self._settings, self._vjoy_id)
+                    self._device = PassthroughWheel(self._settings, self._vjoy_id,
+                                                     write_output=self.write_output)
                     if not self._device.available:
                         self._device.close()
                         self._device = None
                         print("No Fanatec wheel; using plain vJoy")
                 if self._device is None:
-                    self._device = Wheel(device_id=self._vjoy_id)
+                    self._device = self.write_output(lambda _: Wheel(device_id=self._vjoy_id))
             else:
                 self.last_error = f"unknown device kind: {kind}"
                 return False
@@ -108,7 +117,7 @@ class DeviceManager:
         self._kind = kind
         self.last_error = None
         if was_engaged and not self.passthrough:
-            self._device.engage()
+            self.engage()
         return True
 
     # ----- delegate the controller API -----
@@ -117,15 +126,25 @@ class DeviceManager:
     def engaged(self) -> bool:
         return bool(self._device and self._device.engaged)
 
+    @output_locked
     def engage(self) -> bool | None:
+        self.cancel_bind()
         if self._device is not None:
             return self._device.engage()
 
+    @output_locked
     def disengage(self) -> None:
-        if self._device is not None:
+        self.cancel_bind()
+        if self.passthrough:
+            self._device.stop_output()
+        elif self._device is not None:
             self._device.disengage()
 
+    @output_locked
     def insert_disengage(self) -> None:
+        if not self.engaged:
+            return
+        self.cancel_bind()
         if self.passthrough:
             self._device.disengage("insert")
         else:
@@ -161,24 +180,50 @@ class DeviceManager:
     def map_pedals(self):
         return self._device.map_pedals() if self.passthrough else False
 
-    def close(self):
-        if self._device:
-            getattr(self._device, "close", self._device.disengage)()
-            self._device, self._kind = None, None
+    def release_device(self):
+        """Release for a swap; permanent exit uses shutdown_output()."""
+        with self._lifecycle_lock:
+            if self._device:
+                if self.passthrough:
+                    self._device.close()
+                else:
+                    self.write_output(lambda dev: getattr(dev, "close", dev.disengage)())
+                with self._output_lock:
+                    self._device, self._kind = None, None
 
+    def shutdown_output(self):
+        with self._lifecycle_lock:
+            with self._output_lock:
+                self._shutdown_requested = True
+                if self.passthrough:
+                    self._device.io.stopping.set()
+            if self.passthrough:
+                self._device.close()
+            super().shutdown_output()
+
+    @output_locked
+    def resume_output(self):
+        if self.passthrough:
+            self._device.resume_output()
+
+    @output_locked
     def toggle(self) -> bool:
+        self.cancel_bind()
         if self._device is None:
             return False
         return self._device.toggle()
 
+    @output_locked
     def center(self) -> None:
         if self._device is not None:
             self._device.center()
 
+    @output_locked
     def set_steering(self, x: float, force: bool = False) -> None:
         if self._device is not None:
             self._device.set_steering(x, force=force)
 
+    @output_locked
     def set_throttle_brake(self, throttle: float, brake: float,
                            force: bool = False) -> None:
         if self._device is not None:
