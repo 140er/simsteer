@@ -12,7 +12,8 @@ from simsteer.calib.flow import CAMERA_NO_PROGRESS_S, CalibFlow, CameraOutcome, 
 from simsteer.core.calibration import Calibration
 from simsteer.core.finite import NonFiniteError
 from simsteer.core.learners.livecalib import (
-    BLOCK_SIZE, CERTAINTY_BOOTSTRAP_BLOCKS, CalStatus, CameraBlockedReason, LiveCalib,
+    BLOCK_SIZE, CERTAINTY_BOOTSTRAP_BLOCKS, CERTAIN_BLOCKS_NEEDED,
+    CalStatus, CameraBlockedReason, LiveCalib,
 )
 from simsteer.core.learners.liveparams import LiveParams
 from simsteer.ui.hud import HudRenderer, HudState
@@ -32,18 +33,98 @@ def sample(learner, calib, **changes):
     ({"road_transform_std": np.array([.01, .01, 1.])}, CameraBlockedReason.HEIGHT_UNCERTAINTY),
 ])
 def test_pinned_upstream_bootstrap_lasts_five_blocks_not_three(uncertainty, reason):
-    # calibrationd.py at the driving-model pin: INPUTS_NEEDED=5 (line 28),
-    # certain_if_calib bypasses both gates below that count (line 178).
+    # calibrationd.py at the pin: INPUTS_NEEDED=5 (line 32),
+    # certain_if_calib bypasses both bootstrap gates (lines 189-200, 198).
     assert CERTAINTY_BOOTSTRAP_BLOCKS == 5
     learner, calib = LiveCalib(), Calibration()
     for _ in range(5 * BLOCK_SIZE):
         sample(learner, calib, **uncertainty)
-        assert learner.last_rejection_reason is None
-    assert learner.samples == 500 and learner.blocks == 5
-    assert learner.cal_status is CalStatus.CALIBRATED
+        assert learner.last_rejection_reason is reason
+    assert learner.bootstrap_samples == 500 and learner.bootstrap_blocks == 5
+    assert learner.samples == 0 and learner.blocks == 0
+    assert learner.cal_status is CalStatus.UNCALIBRATED and not learner._wrote_to_calib
     sample(learner, calib, **uncertainty)
-    assert learner.samples == 500 and learner.last_rejection_reason is reason
-    assert learner.blocked_counts == {reason: 1}
+    assert learner.bootstrap_samples == 500 and learner.last_rejection_reason is reason
+    assert learner.blocked_counts == {reason: 501}
+
+
+@pytest.mark.parametrize("simple", [True, False])
+@pytest.mark.parametrize("field,reason", [
+    ("pose_std", CameraBlockedReason.LATERAL_UNCERTAINTY),
+    ("road_transform_std", CameraBlockedReason.HEIGHT_UNCERTAINTY),
+])
+def test_uncertain_pose_never_certifies_and_times_out_with_its_reason(simple, field, reason):
+    flow = make_flow(simple=simple)
+    initial_pose = (flow.calib.pitch_deg, flow.calib.yaw_deg, flow.calib.height_m)
+    uncertainty = {field: np.array([.01, 5., .3])}
+    for i in range(720):
+        sample(flow.lc, flow.calib, pose=np.array([10., .35, -.52]),
+               road_transform=np.array([0., 0., 1.6]), **uncertainty)
+        flow.tick(Obs(now=(i + 1) * .25, dt=.25, v=10.))
+        if i == 299:
+            assert flow.lc.cal_status is CalStatus.UNCALIBRATED
+            assert not flow.lc.writes_enabled and not flow.lc._wrote_to_calib
+    assert (flow.calib.pitch_deg, flow.calib.yaw_deg, flow.calib.height_m) == initial_pose
+    assert flow.lc.samples == 0 and flow.lc.bootstrap_samples == 500
+    assert flow.camera_outcome is CameraOutcome.NO_PROGRESS
+    assert flow.result["camera_blocked_counts"] == {reason: 720}
+    assert reason.name in flow.result["reason"]
+
+
+@pytest.mark.parametrize("simple", [True, False])
+def test_mixed_scene_saves_only_certain_blocks(data_dir, simple):
+    learner, calib = LiveCalib(), Calibration(simple_warp=simple)
+    for i in range(200):
+        sample(learner, calib)
+        sample(learner, calib, pose=np.array([10., .35, -.52]),
+               road_transform=np.array([0., 0., 1.6]), pose_std=np.array([.01, 5., .1]))
+        if i == 149:
+            assert learner.cal_status is CalStatus.UNCALIBRATED
+            assert not (data_dir / "calibration.json").exists()
+    assert CERTAIN_BLOCKS_NEEDED == 2 and learner.blocks == 2
+    assert learner.samples == 200 and learner.bootstrap_samples == 400
+    assert learner.cal_status is CalStatus.CALIBRATED
+    saved = json.loads((data_dir / "calibration.json").read_text())
+    assert saved["pitch_deg"] == pytest.approx(0., abs=.01)
+    assert saved["yaw_deg"] == pytest.approx(0., abs=.01)
+    assert saved["height_m"] == pytest.approx(1.2, abs=.001)
+    certain_only, reference = LiveCalib(), Calibration(simple_warp=simple)
+    for _ in range(300):
+        sample(certain_only, reference)
+    assert calib.pitch_deg == pytest.approx(reference.pitch_deg, abs=.01)
+    assert calib.yaw_deg == pytest.approx(reference.yaw_deg, abs=.01)
+    assert calib.height_m == pytest.approx(reference.height_m, abs=.001)
+
+
+def test_missing_uncertainty_cannot_certify_and_old_history_is_not_trusted(data_dir):
+    learner, calib = LiveCalib(), Calibration()
+    for _ in range(300):
+        sample(learner, calib, pose_std=None)
+    assert learner.samples == 0 and learner.cal_status is CalStatus.UNCALIBRATED
+    assert learner.last_rejection_reason is CameraBlockedReason.MISSING_UNCERTAINTY
+    for _ in range(300):
+        sample(learner, calib)
+    learner.save_state("ets2")
+    path = data_dir / "livecalib_state_ets2.json"
+    saved = json.loads(path.read_text())
+    saved.pop("certainty_state_version")
+    path.write_text(json.dumps(saved))
+    restored = LiveCalib(game="ets2")
+    assert restored.cal_status is CalStatus.UNCALIBRATED and restored.blocks == 0
+    assert not restored.writes_enabled
+
+
+def test_bootstrap_finishing_after_certain_blocks_saves_only_the_verified_pose(data_dir):
+    learner, calib = LiveCalib(), Calibration()
+    for _ in range(200):
+        sample(learner, calib)
+    assert learner.blocks == 2 and learner.cal_status is CalStatus.UNCALIBRATED
+    for _ in range(100):
+        sample(learner, calib, pose=np.array([10., 0., -.52]), pose_std=np.array([.01, 5., .1]))
+    assert learner.samples == 200 and learner.bootstrap_samples == 300
+    assert learner.cal_status is CalStatus.CALIBRATED
+    assert calib.pitch_deg == pytest.approx(0., abs=.01)
+    assert (data_dir / "calibration.json").exists()
 
 
 @pytest.mark.parametrize("changes,reason", [
@@ -124,6 +205,38 @@ def test_accepted_progress_restarts_the_clock_and_reason_window():
     assert flow._camera_no_progress_s == 0 and not flow._camera_blocked_counts
     reject_tick(flow)
     assert flow.step is Step.CAMERA and flow._camera_no_progress_s == .25
+
+
+def test_auto_reset_clears_stale_turning_window_before_accepted_driving():
+    flow = make_flow()
+    for i in range(250):
+        sample(flow.lc, flow.calib)
+        flow.tick(Obs(now=(i + 1) * .05, dt=.05, v=10.))
+    for _ in range(700):
+        sample(flow.lc, flow.calib, actual_yaw_rate=.1)
+        flow.tick(Obs(now=flow._now + .25, dt=.25, v=10.))
+    assert flow._camera_no_progress_s == 175.
+    flow.lc.reset(reason="auto-reset after 3 consecutive INVALID blocks")
+    for _ in range(100):
+        sample(flow.lc, flow.calib)
+        flow.tick(Obs(now=flow._now + .05, dt=.05, v=10.))
+    assert flow.lc.samples == 100 and flow.step is Step.CAMERA
+    assert flow._camera_no_progress_s == 0 and not flow._camera_blocked_counts
+
+
+def test_certainty_history_and_bootstrap_are_separate_after_resume(data_dir):
+    learner, calib = LiveCalib(), Calibration()
+    for _ in range(150):
+        sample(learner, calib)
+        sample(learner, calib, pose=np.array([10., 0., -.52]), pose_std=np.array([.01, 5., .1]))
+    learner.save_state("ets2")
+    restored = LiveCalib(game="ets2")
+    assert restored.samples == 150 and restored.bootstrap_samples == 300
+    assert restored.blocks == 1 and restored._block_n == 50
+    for _ in range(50):
+        sample(restored, calib)
+    assert restored.cal_status is CalStatus.CALIBRATED and restored.blocks == 2
+    assert calib.pitch_deg == pytest.approx(0., abs=.01)
 
 
 def test_discarded_blocks_cannot_keep_resetting_the_progress_clock():

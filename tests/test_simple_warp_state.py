@@ -20,6 +20,7 @@ def saved_camera():
     lc._rpys.extend([np.array([0.0, math.radians(2.0), 0.0])] * INPUTS_NEEDED)
     lc._heights.extend([1.4] * INPUTS_NEEDED)
     lc.samples = BLOCK_SIZE * INPUTS_NEEDED
+    lc.bootstrap_samples = lc.samples
     lc._refresh_cal_status()
     assert lc.cal_status == CalStatus.CALIBRATED
     lc.save_state("ets2")

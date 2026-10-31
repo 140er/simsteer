@@ -43,7 +43,7 @@ from simsteer.calib.score import CheckPolicy, CheckStats, Verdict, certified_res
 from simsteer.calib.steering import OutputDirection, SteeringDirection
 from simsteer.core.calibration import SIMPLE_WARP_VERSION
 from simsteer.core.learners.livecalib import (
-    BLOCK_SIZE, INPUTS_NEEDED, MIN_SPEED_FILTER_MPS, CalStatus,
+    BLOCK_SIZE, INPUTS_NEEDED, CERTAIN_BLOCKS_NEEDED, MIN_SPEED_FILTER_MPS, CalStatus,
     CAMERA_GUIDANCE, CameraBlockedReason,
 )
 from simsteer.core.learners.liveparams import TRUSTED_MIN_SAMPLES
@@ -296,6 +296,12 @@ class CalibFlow:
         self._camera_no_progress_s = 0.0
         self._camera_progress_mark = self.lc.blocks * BLOCK_SIZE + self.lc._block_n
         self._camera_blocked_counts: Counter[CameraBlockedReason] = Counter()
+        self._camera_samples_seen = self.lc.samples
+        self._camera_reset_seen = getattr(self.lc, "reset_generation", 0)
+        self._camera_blocks_seen = self.lc.blocks
+        self._camera_jumps_seen = getattr(self.lc, "rej_block_jump", 0)
+        self._camera_discard_s: float | None = None
+        self._camera_discard_jumps = 0
 
     def switch_device(self, device: str) -> None:
         """Keep the tuner's flow reference, but load this device's state."""
@@ -451,8 +457,9 @@ class CalibFlow:
         if self.step is Step.FOV:
             return 1.0 if self.fov_proposal is not None else self.fov_solver.progress
         if self.step is Step.CAMERA:
-            return min(1.0, (self.lc.blocks * BLOCK_SIZE + self.lc._block_n)
-                       / float(INPUTS_NEEDED * BLOCK_SIZE))
+            return getattr(self.lc, "progress", min(1.0,
+                (self.lc.blocks * BLOCK_SIZE + self.lc._block_n)
+                / float(INPUTS_NEEDED * BLOCK_SIZE)))
         if self.step is Step.STEERING:
             if self.output_direction.active:
                 return min(self.direction.progress, self.output_direction.progress)
@@ -555,8 +562,17 @@ class CalibFlow:
                 "blocked_counts": dict(getattr(self.lc, "blocked_counts", {})),
                 "samples": self.lc.samples, "blocks": self.lc.blocks,
                 "block_n": self.lc._block_n,
+                "bootstrap_samples": getattr(self.lc, "bootstrap_samples", 0),
+                "bootstrap_blocks": getattr(self.lc, "bootstrap_blocks", 0),
+                "required_certain_blocks": CERTAIN_BLOCKS_NEEDED,
                 "no_progress_s": round(self._camera_no_progress_s, 6),
                 "progress_mark": self._camera_progress_mark,
+                "samples_seen": self._camera_samples_seen,
+                "reset_seen": self._camera_reset_seen,
+                "blocks_seen": self._camera_blocks_seen,
+                "jumps_seen": self._camera_jumps_seen,
+                "discard_no_progress_s": self._camera_discard_s,
+                "discard_jumps": self._camera_discard_jumps,
                 "no_progress_counts": dict(self._camera_blocked_counts)}
 
     def _tick_camera(self, o: Obs, dt: float) -> None:
@@ -565,21 +581,46 @@ class CalibFlow:
             self._advance()
             return
         progress = self.lc.blocks * BLOCK_SIZE + self.lc._block_n
-        if progress > self._camera_progress_mark:
+        generation = getattr(self.lc, "reset_generation", 0)
+        reset = (generation != self._camera_reset_seen or self.lc.samples < self._camera_samples_seen)
+        if reset:
+            self._reset_camera_progress()
+        accepted = self.lc.samples > self._camera_samples_seen
+        if accepted:
             self._camera_progress_mark = progress
             self._camera_no_progress_s = 0.0
             self._camera_blocked_counts.clear()
-            return
+        # A separate deadline bounds repeated block discards. Accepted samples
+        # reset the sample window even after a learner reset, but a stream of
+        # discarded blocks still cannot keep Camera alive indefinitely.
+        if self.lc.blocks > self._camera_blocks_seen:
+            self._camera_discard_s = None
+            self._camera_discard_jumps = 0
+        jumps = getattr(self.lc, "rej_block_jump", 0)
+        if jumps > self._camera_jumps_seen:
+            if self._camera_discard_s is None:
+                self._camera_discard_s = 0.0
+            self._camera_discard_jumps += jumps - self._camera_jumps_seen
+        self._camera_samples_seen = self.lc.samples
+        self._camera_reset_seen = generation
+        self._camera_blocks_seen = self.lc.blocks
+        self._camera_jumps_seen = jumps
         # Camera is driven manually, so eligibility does not require engagement.
         # Missing telemetry and slow/stopped frames pause the timer. The normal
         # flow dt cap excludes stalls; it is shared with the other steps.
         if not (o.telemetry_ok and o.v is not None and o.v >= MIN_SPEED_FILTER_MPS):
             return
-        self._camera_no_progress_s += dt
-        reason = getattr(self.lc, "last_rejection_reason", None)
-        if reason is not None:
-            self._camera_blocked_counts[CameraBlockedReason(reason)] += 1
-        if self._camera_no_progress_s + 1e-9 < CAMERA_NO_PROGRESS_S:
+        if not (accepted or reset):
+            self._camera_no_progress_s += dt
+            reason = getattr(self.lc, "last_rejection_reason", None)
+            if reason is not None:
+                self._camera_blocked_counts[CameraBlockedReason(reason)] += 1
+        if self._camera_discard_s is not None:
+            self._camera_discard_s += dt
+        if (self._camera_discard_s or 0.) + 1e-9 >= CAMERA_NO_PROGRESS_S:
+            self._camera_no_progress_s = self._camera_discard_s
+            self._camera_blocked_counts = Counter({CameraBlockedReason.BLOCK_JUMP: self._camera_discard_jumps})
+        elif self._camera_no_progress_s + 1e-9 < CAMERA_NO_PROGRESS_S:
             return
         top = self._camera_blocked_counts.most_common(3)
         counts = ", ".join(f"{reason.name} {count}" for reason, count in top)
@@ -869,7 +910,9 @@ class CalibFlow:
                 reason = CameraBlockedReason(reason)
                 return f"Camera {reason.name}: {CAMERA_GUIDANCE[reason]}"
             return (f"Camera {self.lc.blocks * BLOCK_SIZE + self.lc._block_n}/"
-                    f"{INPUTS_NEEDED * BLOCK_SIZE} samples")
+                    f"{CERTAIN_BLOCKS_NEEDED * BLOCK_SIZE} certain samples; "
+                    f"bootstrap {getattr(self.lc, 'bootstrap_samples', 0)}/"
+                    f"{INPUTS_NEEDED * BLOCK_SIZE}")
         if self.step is Step.STEERING:
             if not self.direction.ready:
                 return "Drive gentle left and right bends manually"
@@ -1029,11 +1072,24 @@ class CalibFlow:
             mark = int(camera.get("progress_mark", self._camera_progress_mark))
             counts = Counter({CameraBlockedReason(k): int(v)
                               for k, v in camera.get("no_progress_counts", {}).items()})
+            seen = [int(camera.get(name, default)) for name, default in (
+                ("samples_seen", mark), ("reset_seen", 0),
+                ("blocks_seen", self.lc.blocks), ("jumps_seen", 0), ("discard_jumps", 0))]
+            discard_s = camera.get("discard_no_progress_s")
+            if discard_s is not None:
+                discard_s = float(discard_s)
+                if not math.isfinite(discard_s) or discard_s < 0:
+                    return False
             if not math.isfinite(elapsed) or elapsed < 0 or mark < 0 or any(v < 0 for v in counts.values()):
+                return False
+            if any(v < 0 for v in seen):
                 return False
             self._camera_no_progress_s = elapsed
             self._camera_progress_mark = mark
             self._camera_blocked_counts = counts
+            (self._camera_samples_seen, self._camera_reset_seen,
+             self._camera_blocks_seen, self._camera_jumps_seen, self._camera_discard_jumps) = seen
+            self._camera_discard_s = discard_s
             self.step = Step(d["step"])
             self.attempts = int(d.get("attempts", 0))
             self.result = d.get("result")

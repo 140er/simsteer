@@ -19,6 +19,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -42,17 +43,28 @@ def replay(paths: list[Path], kind: str, *, game: str = "ac") -> tuple[dict, lis
 def _replay(paths: list[Path], kind: str, *, game: str) -> tuple[dict, list[dict]]:
     from simsteer.core.calibration import Calibration
     from simsteer.core.learners.livecalib import LiveCalib
+    from simsteer.calib.flow import CalibFlow, Obs, Step
 
     reasons = Counter()
     details = []
     accepted = unknown = total = 0
     calibrated_at = []
     discarded_blocks = 0
+    camera_runs = []
     for path in paths:
         now = 0.0
         learner = LiveCalib(clock=lambda: now)
         calib = Calibration()
+        flow = CalibFlow(game, "gamepad", live_calib=learner, calib=calib,
+                         live_params=SimpleNamespace(lag_frames=1, end_validation=lambda: None,
+                                                     trusted=lambda: False),
+                         persist=False, model_identity={})
+        flow._enter(Step.CAMERA)
         start = None
+        previous_time = None
+        eligible_s = 0.
+        camera_end = None
+        unknown_start = unknown
         calibrated = False
         for line, row in read_rows(path):
             if kind == "frames" and row.get("calib") != "camera":
@@ -90,6 +102,23 @@ def _replay(paths: list[Path], kind: str, *, game: str) -> tuple[dict, list[dict
             delta = int(learner.samples > previous or (
                 learner.samples < previous and learner.last_rejection_reason is None))
             reason = learner.last_rejection_reason
+            dt = 0. if previous_time is None else min(.25, max(0., now - previous_time))
+            previous_time = now
+            speed = inputs["v_ego"]
+            if speed is not None and speed >= 15 * .44704:
+                eligible_s += dt
+            # Telemetry-only logs cannot establish a Camera outcome once they
+            # reach missing model inputs. Do not time out on the placeholder.
+            if kind != "frames" and flow.step is Step.CAMERA:
+                flow.tick(Obs(now=now, dt=dt, v=speed, telemetry_ok=speed is not None))
+                if flow.step is not Step.CAMERA:
+                    camera_end = dict(line=line, eligible_s=round(eligible_s, 6),
+                                      samples=learner.samples,
+                                      certain_blocks=(learner.blocks if hasattr(learner, "bootstrap_samples") else None),
+                                      reason=(flow.result or {}).get("reason"),
+                                      status="NO_PROGRESS" if flow.step is Step.FAILED else "CALIBRATED",
+                                      pose={name: getattr(calib, name)
+                                            for name in ("pitch_deg", "yaw_deg", "height_m")})
             if kind == "frames" and reason == "model_speed":
                 reason = "model_inputs_unlogged"
                 unknown += 1
@@ -107,12 +136,21 @@ def _replay(paths: list[Path], kind: str, *, game: str) -> tuple[dict, list[dict
                 calibrated_at.append(dict(source=path.name, line=line,
                                           elapsed_s=round(now - start, 3)))
         discarded_blocks += learner.rej_block_jump
+        camera_runs.append(dict(source=path.name, eligible_s=round(eligible_s, 6),
+                                samples=learner.samples,
+                                certain_blocks=learner.blocks if hasattr(learner, "bootstrap_samples") else None,
+                                bootstrap_samples=getattr(learner, "bootstrap_samples", None),
+                                no_progress_s=round(getattr(flow, "_camera_no_progress_s", 0.), 6),
+                                camera_end=camera_end,
+                                status=(("UNRESOLVED" if unknown > unknown_start else "BLOCKED_TELEMETRY") if kind == "frames" else
+                                        camera_end["status"] if camera_end else "COLLECTING")))
     assert total == accepted + sum(reasons.values()), "each frame needs an outcome"
     return dict(frames=total, accepted=None if unknown else accepted,
                 measured_accepted=accepted, unresolved=unknown,
                 reasons=dict(reasons.most_common()),
                 coverage="telemetry gates only" if kind == "frames" else "full learner inputs",
                 first_calibrated=calibrated_at, discarded_blocks=discarded_blocks,
+                camera_runs=camera_runs,
                 inputs=[dict(name=p.name, sha256=hashlib.sha256(p.read_bytes()).hexdigest())
                         for p in paths]), details
 

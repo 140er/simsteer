@@ -618,6 +618,7 @@ def test_livecalib_rescale_matches_the_new_fov():
         lc._heights.append(1.35)
     lc._block_rpy_sum = np.radians([0.0, 2.42, 1.71]) * 10
     lc._block_n = 10
+    lc.bootstrap_samples = INPUTS_NEEDED * BLOCK_SIZE + 10
     lc._refresh_cal_status()
     lc.rescale_for_fov(cal, 90.0, 71.0)
     assert lc.pitch_estimate == pytest.approx(1.73, abs=0.01)

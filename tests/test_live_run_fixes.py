@@ -294,7 +294,8 @@ def test_item4_manual_fov_survives_restart_with_history(monkeypatch, data_dir):
     lp = LiveParams(game="ets2", device_kind="gamepad")
     flow = CalibFlow("ets2", "gamepad", live_calib=lc, live_params=lp, calib=cal)
     for _ in range(120):
-        lc.update(cal, np.array([10., .02, -.03]), np.array([0., 0., 1.2]), 0., 10.)
+        lc.update(cal, np.array([10., .02, -.03]), np.array([0., 0., 1.2]), 0., 10.,
+                  pose_std=np.full(3, .01), road_transform_std=np.full(3, .01))
     assert lc.blocks == 1 and lc._block_n == 20
     save_flow = flow.save
 
