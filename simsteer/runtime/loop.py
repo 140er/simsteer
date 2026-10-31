@@ -30,6 +30,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import asdict, replace
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -58,6 +59,7 @@ from simsteer.core.learners.liveparams import LiveParams
 from simsteer.core.model import DrivingModel
 from simsteer.core.postprocess import decode
 from simsteer.core.preprocess import FrameQueue, model_views, yuv6_to_bgr
+from simsteer.core.timing import CONTEXT_PERIOD_S, MIN_HEALTHY_FPS
 from simsteer.games.base import GameProfile, get_profile
 from simsteer.paths import data_dir
 from simsteer.state import flush_state, take_state_warnings, with_background_saves
@@ -91,13 +93,10 @@ DESIRE_LANE_CHANGE_RIGHT = 4
 
 KEY_BACKSPACE = 8
 
-MIN_HEALTHY_FPS = 8.0
 DISENGAGED_RECENTER_EVERY_N = 20
 # DirectML compiles its kernels on the first few inferences (<5 fps);
 # don't enforce the fps auto-disengage until past this many frames.
 WARMUP_FRAMES = 20
-# Until the frame queue holds distinct frames the model sees no motion.
-FRAME_QUEUE_FILL = 5
 # Telemetry detection is a one-shot handshake; retry this often (frames)
 # while unavailable so it recovers without a restart.
 TELEMETRY_RETRY_EVERY_N = 40
@@ -172,6 +171,7 @@ def run(settings: Settings, game: GameProfile | str, *,
     game_id = profile.id
     import_legacy_state()
     state_root = data_dir()
+    live_capture = source is None or isinstance(source, Capture)
     if source is None:
         source = Capture(CaptureConfig(target_fps=20))
     if make_telemetry is None:
@@ -268,6 +268,7 @@ def run(settings: Settings, game: GameProfile | str, *,
     banner_color = (200, 200, 200)
     banner_until = 0.0
     was_engaged_last_frame = False
+    was_force_engaged = False
     last_device_axis: float | None = None
     was_measuring = False
     last_fault = ""
@@ -277,10 +278,22 @@ def run(settings: Settings, game: GameProfile | str, *,
     healthy_since = None
     display_decoded = neutral_decoded()
     last_frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    telemetry_was_available = tel.available
+    live_periods: dict[tuple[int, int, str], list[float]] = {}
+    previous_live_tick = None
+    previous_live_geometry = None
+
+    def reset_temporal_state() -> None:
+        fq.reset()
+        getattr(model, "reset", lambda: None)()
+        if not flow.fov_solver.done:
+            flow.fov_solver.reset()
 
     def engage_check() -> tuple[bool, str]:
         if current_fault:
             return False, current_fault
+        if not fq.ready:
+            return False, "Frame history warming up"
         if not flow.ai_steering_ready:
             return False, flow.engage_block()
         if pad is None or pad.kind is None:
@@ -345,6 +358,7 @@ def run(settings: Settings, game: GameProfile | str, *,
     def restart_calibration(reason: str) -> None:
         stop_output(reason)
         flow.restart(reason)
+        reset_temporal_state()
         set_banner("CALIBRATION RESET", (80, 220, 255), 4.0)
 
     with source as cap:
@@ -356,10 +370,11 @@ def run(settings: Settings, game: GameProfile | str, *,
             keys = WindowKeys(GlobalKeys(watched)
                               if sys.platform == "win32" else None)
 
-        if settings.force_engage and pad is not None and flow.ai_steering_ready:
+        # Even development engagement waits for a fresh temporal pair.
+        if (settings.force_engage and fq.ready and pad is not None
+                and flow.ai_steering_ready):
             pad.engage()
-            print("force-engage: pad engaged at startup (DEV — needs "
-                  "calibration to actually track)")
+            was_force_engaged = True
 
         was_engaged_last_frame = bool(pad and pad.engaged)
         try:
@@ -378,6 +393,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                 fresh_frame = frame is not None
                 if not fresh_frame and cap.done:
                     break
+                if not fresh_frame:
+                    reset_temporal_state()
                 pressed = keys.poll()
                 if ord("q") in pressed and hk("quit"):
                     break
@@ -396,6 +413,18 @@ def run(settings: Settings, game: GameProfile | str, *,
                                      for name in ("pitch_deg", "yaw_deg", "height_m")}
                 t_warp = t_model = t_ctrl = time.perf_counter()
                 now_perf = clock.now()
+                frame_timestamp = getattr(cap, "frame_timestamp", None)
+                if frame_timestamp is None:
+                    frame_timestamp = now_perf
+                live_frame_period_ms = None
+                if live_capture and not headless and fresh_frame:
+                    geometry = (*frame.shape[:2], settings.hud_mode)
+                    if previous_live_tick is not None and geometry == previous_live_geometry:
+                        live_frame_period_ms = (now_perf - previous_live_tick) * 1e3
+                        stats = live_periods.setdefault(geometry, [0.0, 0.0])
+                        stats[0] += 1
+                        stats[1] += live_frame_period_ms
+                    previous_live_tick, previous_live_geometry = now_perf, geometry
                 dt = max(1e-3, now_perf - last)
                 now_wall = now_perf
                 lane_change_active = (lane_change_idx is not None and now_wall < lane_change_until)
@@ -405,6 +434,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                 fov_vision_s = 0.
                 camera_learning = False
                 camera_rejection = None
+                camera_commit_delta_deg = None
                 pipeline_healthy = False
                 restart_reason = flow.take_restart_request()
                 if restart_reason:
@@ -432,6 +462,12 @@ def run(settings: Settings, game: GameProfile | str, *,
                 wheel_angle = tel.wheel_angle_rad(ctrl_cfg.wheelbase_m)
                 game_steer = tel.game_steer()
                 user_steer = getattr(tel, "user_steer", lambda: None)()
+                telemetry_available = tel.available
+                if telemetry_available != telemetry_was_available:
+                    # A pause makes SCS telemetry unavailable. Reset on both
+                    # edges, including when capture continued during the pause.
+                    reset_temporal_state()
+                telemetry_was_available = telemetry_available
 
                 try:
                     require_finite("telemetry", speed=v_real, yaw=actual_yaw,
@@ -446,8 +482,21 @@ def run(settings: Settings, game: GameProfile | str, *,
                         now_perf, v_real if tel.available else None,
                         manual_override=manual.steer_override or manual.long_override))
                     if fresh_frame:
+                        try:
+                            require_finite("frame", timestamp=frame_timestamp)
+                        except NonFiniteError:
+                            reset_temporal_state()
+                            raise
                         # --- Compose desire, then run the model ---
-                        img_narrow, img_wide = fq.push(frame, calib)
+                        resets = fq.resets
+                        img_narrow, img_wide = fq.push(frame, calib, timestamp=frame_timestamp)
+                        if fq.resets != resets:
+                            getattr(model, "reset", lambda: None)()
+                            if not flow.fov_solver.done:
+                                flow.fov_solver.reset()
+                        if not fq.ready:
+                            current_fault = current_fault or "Frame history warming up"
+                            stop_output(current_fault, preserve_bind=True)
                         nav_desire_idx = nav.tick(v_ego=v_ego, dt=dt, now_t=now_perf)
                         if hasattr(tel, "nav_distance_m"):
                             nav.update_destination(tel.nav_distance_m(), tel.nav_time_s())
@@ -459,9 +508,10 @@ def run(settings: Settings, game: GameProfile | str, *,
                             desire_vec = None
                             lane_change_idx = None
                         t_model = time.perf_counter()
-                        vision_out, policy_out = model.step(img_narrow, img_wide, desire=desire_vec)
+                        vision_out, policy_out = model.step(
+                            img_narrow, img_wide, desire=desire_vec, timestamp=frame_timestamp)
                         t_ctrl = time.perf_counter()
-                        decoded = decode(vision_out, policy_out)
+                        decoded = decode(vision_out, policy_out, frame_span_s=fq.span_s)
                         require_finite("decoded", **vars(decoded))
                         vx = (float(decoded.pose[0])
                               if decoded.pose is not None and len(decoded.pose) > 0
@@ -469,12 +519,16 @@ def run(settings: Settings, game: GameProfile | str, *,
 
                         # --- Calibration: FOV measurement, then camera pose ---
                         fov_vision_s = 0.0
-                        if flow.step is Step.FOV and frame_idx > FRAME_QUEUE_FILL:
+                        if flow.step is Step.FOV and telemetry_available:
                             before = flow.fov_solver.vision_s
-                            flow.feed_fov(frame, vx, v_real, actual_yaw,
-                                          time.perf_counter)
+                            # The solver consumes raw vision velocity plus
+                            # its measured span; decoded pose is corrected.
+                            raw_vx = vx * fq.span_s / CONTEXT_PERIOD_S if vx is not None else None
+                            flow.feed_fov(frame, raw_vx, v_real, actual_yaw,
+                                          time.perf_counter, timestamp=frame_timestamp,
+                                          frame_span_s=fq.span_s, pair_ok=fq.pair_ok)
                             fov_vision_s = flow.fov_solver.vision_s - before
-                        camera_learning = flow.camera_learning
+                        camera_learning = flow.camera_learning and fq.pair_ok and telemetry_available
                         if camera_learning:
                             live_calib.update(
                                 calib, decoded.pose, decoded.road_transform,
@@ -483,8 +537,11 @@ def run(settings: Settings, game: GameProfile | str, *,
                                 road_transform_std=decoded.road_transform_std,
                                 wide_from_device_euler=decoded.wide_from_device_euler,
                                 game_steer=game_steer)
-                        camera_rejection = (live_calib.last_rejection_reason
-                                            if camera_learning else None)
+                            camera_rejection = live_calib.last_rejection_reason
+                            camera_commit_delta_deg = live_calib.last_commit_delta_deg
+                        elif flow.camera_learning and not fq.pair_ok:
+                            live_calib.record_blocked(CameraBlockedReason.FRAME_TIMING)
+                            camera_rejection = live_calib.last_rejection_reason
 
                         # --- Lateral + longitudinal control ---
                         output_fault = flow.observe_output(
@@ -578,7 +635,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                                                            manual.brake, force=True)
                             was_measuring = flow.output_direction.active
 
-                        pipeline_healthy = True
+                        pipeline_healthy = fq.ready and not current_fault
                 except NonFiniteError as exc:
                     stop_output(exc)
                     if flow.camera_learning:
@@ -627,6 +684,12 @@ def run(settings: Settings, game: GameProfile | str, *,
                         and pad is not None and pad.engaged):
                     stop_output("Steering calibration required")
                 allowed, blocked_reason = engage_check()
+                if (settings.force_engage and allowed and pad is not None
+                        and not pad.engaged and not was_force_engaged):
+                    pad.engage()
+                    was_force_engaged = True
+                    was_engaged_last_frame = True
+                    engaged_now = True
                 t_render = time.perf_counter()
 
                 # --- Keys (game-focused global + overlay-focused cv2) ---
@@ -740,6 +803,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                         "output_fault": current_fault or None,
                         "camera_learning": camera_learning,
                         "camera_rejection": camera_rejection,
+                        "camera_commit_delta_deg": camera_commit_delta_deg,
                         "camera_sample": ({
                             **{name: (getattr(decoded, name).tolist()
                                       if getattr(decoded, name) is not None else None)
@@ -752,6 +816,11 @@ def run(settings: Settings, game: GameProfile | str, *,
                         "actual_speed_mps": v_real,
                         "actual_yaw_rad_s": actual_yaw,
                         "pose_vx": vx,
+                        "vision_span_s": fq.span_s,
+                        "vision_pair_ok": fq.pair_ok,
+                        "frame_timestamp": frame_timestamp,
+                        "engage_blocked_reason": blocked_reason or None,
+                        "live_frame_period_ms": live_frame_period_ms,
                         "pose_lateral_std": (float(decoded.pose_std[1])
                                              if decoded.pose_std is not None
                                              and len(decoded.pose_std) >= 2 else None),
@@ -848,6 +917,15 @@ def run(settings: Settings, game: GameProfile | str, *,
             tel.close()
             if log_f is not None:
                 log_f.close()
+            if live_capture and not headless:
+                metrics = [{"capture_width": w, "capture_height": h, "hud_mode": mode,
+                            "samples": int(count), "mean_ms": total / count}
+                           for (h, w, mode), (count, total) in live_periods.items()]
+                receipt = {"metric": "live_frame_period_ms", "runs": metrics}
+                print(json.dumps(receipt))
+                if log_path:
+                    Path(log_path).with_suffix(".metrics.json").write_text(
+                        json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
             if window_open:
                 cv2.destroyAllWindows()
     # Output is neutral and capture is closed. A replacement process must

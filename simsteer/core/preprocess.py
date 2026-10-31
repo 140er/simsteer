@@ -15,7 +15,7 @@ scene at two different effective zooms, mirroring what the parallax
 pair provides on the comma 3.
 
 Each frame's 12-channel tensor is 2 stacked 6-channel YUV frames at
-t and t-4 (`frame_skip=4`). Each YUV6 = 4 strided Y planes + half-res
+t and the time nearest t-200 ms. Each YUV6 = 4 strided Y planes + half-res
 U + half-res V.
 """
 
@@ -27,8 +27,13 @@ from typing import TYPE_CHECKING
 import cv2
 import numpy as np
 
-from simsteer.core.constants import FRAME_SKIP, MODEL_H, MODEL_W, SRC_H, SRC_W
+from simsteer.core.constants import MODEL_H, MODEL_W, SRC_H, SRC_W
 from simsteer.core.warp import warp_to_model
+from simsteer.core.finite import require_finite
+from simsteer.core.timing import (
+    CONTEXT_PERIOD_S, FRAME_PERIOD_S, PAIR_SPAN_TOL_S, TIME_EPSILON_S,
+    frame_gap, frame_geometry, frame_pose,
+)
 
 if TYPE_CHECKING:
     from simsteer.core.calibration import Calibration
@@ -73,7 +78,7 @@ def crop_for_model(bgr: np.ndarray,
     Each output is reprojected onto a fixed virtual camera using
     `pilot.warp.warp_to_model`:
       - narrow: medmodel  (fl=910, cy=47.6) -> tight forward view (~31° HFOV)
-      - wide:   sbigmodel (fl=455, cy=152)  -> wider context view (~59° HFOV)
+      - wide:   sbigmodel (fl=455, cy=151.8) -> wider context view (~59° HFOV)
 
     Both outputs are (256, 512, 3) BGR — the model's canonical input
     size. The mount pitch / yaw stored on `calib` is folded into the
@@ -112,9 +117,11 @@ def model_views(bgr: np.ndarray,
 
 
 class FrameQueue:
-    """Holds the last 5 YUV6 frames per camera (narrow + wide) and emits
-    the (1, 12, 128, 256) tensors the vision model wants — frames at
-    t and t-4 stacked.
+    """Stack the current frame with the one nearest 200 ms earlier.
+
+    `span_s` is their actual separation, for decoding ego motion. At the
+    trained 20 Hz this is the upstream t/t-4 pair. Capture timestamps keep
+    slower streams from stretching that interval by a frame-count factor.
 
     Each `push` returns `(narrow_tensor, wide_tensor)`.
 
@@ -124,11 +131,16 @@ class FrameQueue:
     one for backward-compat with overlay code.
     """
 
-    BUF_LEN = FRAME_SKIP + 1  # 5
-
     def __init__(self) -> None:
-        self._buf_narrow: deque[np.ndarray] = deque(maxlen=self.BUF_LEN)
-        self._buf_wide: deque[np.ndarray] = deque(maxlen=self.BUF_LEN)
+        self._buf_narrow: deque[np.ndarray] = deque()
+        self._buf_wide: deque[np.ndarray] = deque()
+        self._times: deque[float] = deque()
+        self._poses: deque[tuple] = deque()
+        self._geometry: tuple | None = None
+        self.span_s = 0.0
+        self.ready = False
+        self.pair_ok = False
+        self.resets = 0
         self.last_yuv_narrow: np.ndarray | None = None
         self.last_yuv_wide: np.ndarray | None = None
         # Shapes captured each frame so the overlay can compute the model's
@@ -136,6 +148,18 @@ class FrameQueue:
         self.last_captured_shape: tuple[int, int] | None = None
         self.last_narrow_shape: tuple[int, int] | None = None
         self.last_wide_shape: tuple[int, int] | None = None
+
+    def reset(self) -> None:
+        self._buf_narrow.clear()
+        self._buf_wide.clear()
+        self._times.clear()
+        self._poses.clear()
+        self._geometry = None
+        self.span_s = 0.0
+        self.ready = False
+        self.pair_ok = False
+        self.last_yuv_narrow = self.last_yuv_wide = None
+        self.resets += 1
 
     @property
     def last_yuv(self) -> np.ndarray | None:
@@ -149,7 +173,18 @@ class FrameQueue:
 
     def push(self, bgr: np.ndarray,
              calib: "Calibration | None" = None,
+             *, timestamp: float | None = None,
              ) -> tuple[np.ndarray, np.ndarray]:
+        # Untimed callers (standalone tools) retain the trained 20 Hz clock.
+        previous = self._times[-1] if self._times else None
+        if timestamp is None:
+            timestamp = 0.0 if previous is None else previous + FRAME_PERIOD_S
+        geometry = frame_geometry(calib, bgr.shape)
+        if (frame_gap(previous, timestamp)
+                or (self._geometry is not None and geometry != self._geometry)):
+            self.reset()
+        require_finite("frame", timestamp=timestamp)
+        self._geometry = geometry
         self.last_captured_shape = bgr.shape[:2]
         narrow_bgr, wide_bgr = crop_for_model(bgr, calib)
         self.last_narrow_shape = narrow_bgr.shape[:2]
@@ -160,16 +195,28 @@ class FrameQueue:
         self.last_yuv_narrow = narrow_yuv
         self.last_yuv_wide = wide_yuv
 
-        # Pre-fill both buffers with copies of the first frame so we can
-        # produce a valid stacked input from frame 1.
-        while len(self._buf_narrow) < self.BUF_LEN:
-            self._buf_narrow.append(narrow_yuv.copy())
-            self._buf_wide.append(wide_yuv.copy())
         self._buf_narrow.append(narrow_yuv)
         self._buf_wide.append(wide_yuv)
+        self._times.append(timestamp)
+        self._poses.append(frame_pose(calib))
+        target = timestamp - CONTEXT_PERIOD_S
+        self.ready = self.ready or target >= self._times[0] - TIME_EPSILON_S
+        # Keep the sample just before the target as well as the newer ones.
+        while len(self._times) > 2 and self._times[1] <= target:
+            self._times.popleft()
+            self._buf_narrow.popleft()
+            self._buf_wide.popleft()
+            self._poses.popleft()
+        j = min(range(len(self._times)), key=lambda i: abs(self._times[i] - target))
+        self.span_s = timestamp - self._times[j]
+        # A pose refinement keeps engagement and policy history. Only the
+        # calibration consumers skip pairs warped with different poses.
+        self.pair_ok = (self.ready and self._poses[j] == self._poses[-1]
+                        and abs(self.span_s - CONTEXT_PERIOD_S)
+                        <= PAIR_SPAN_TOL_S + TIME_EPSILON_S)
 
         narrow_stack = np.concatenate(
-            [self._buf_narrow[0], self._buf_narrow[-1]], axis=0)
+            [self._buf_narrow[j], self._buf_narrow[-1]], axis=0)
         wide_stack = np.concatenate(
-            [self._buf_wide[0], self._buf_wide[-1]], axis=0)
+            [self._buf_wide[j], self._buf_wide[-1]], axis=0)
         return narrow_stack[np.newaxis, ...], wide_stack[np.newaxis, ...]

@@ -51,6 +51,7 @@ class Capture:
         self._previous = None
         self._unchanged = 0
         self._timer = None
+        self.frame_timestamp: float | None = None
 
     def __enter__(self) -> "Capture":
         self.start()
@@ -79,6 +80,7 @@ class Capture:
         self._stop = Event()
         self._frames = Queue(maxsize=1)
         self._previous, self._unchanged = None, 0
+        self.frame_timestamp = None
         self._reader = Thread(target=self._read, args=(self._cam, self._frames, self._stop), daemon=True)
         self._reader.start()
 
@@ -141,4 +143,5 @@ class Capture:
             self._unchanged = 0
         if self._unchanged >= self.cfg.unchanged_ticks:
             return None
+        self.frame_timestamp = captured_at
         return frame

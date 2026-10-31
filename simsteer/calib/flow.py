@@ -40,7 +40,7 @@ from simsteer.app import audio
 from simsteer.calib.fov_source import FovReader
 from simsteer.calib.score import CheckPolicy, CheckStats, Verdict, certified_result, evaluate
 from simsteer.calib.steering import OutputDirection, SteeringDirection
-from simsteer.core.calibration import SIMPLE_WARP_VERSION
+from simsteer.core.calibration import Calibration, SIMPLE_WARP_VERSION
 from simsteer.core.learners.livecalib import (
     BLOCK_SIZE, INPUTS_NEEDED, CERTAIN_BLOCKS_NEEDED, MIN_SPEED_FILTER_MPS, CalStatus,
     CAMERA_GUIDANCE, CameraBlockedReason, blocked_counts_from_state,
@@ -48,9 +48,12 @@ from simsteer.core.learners.livecalib import (
 from simsteer.core.learners.liveparams import TRUSTED_MIN_SAMPLES
 from simsteer.core.model_identity import pinned_model_identity
 from simsteer.paths import state_path
-from simsteer.state import atomic_save_json, bounded_int, bounded_number, read_json_object, state_warning
+from simsteer.state import (
+    atomic_save_json, bounded_int, bounded_number, dataclass_values, read_json_object, state_warning,
+)
 from simsteer.runtime.fov import (
-    CANDIDATE_OFFSETS, CANDIDATE_SAMPLES, ESTIMATE_SAMPLES, FovSolver,
+    CANDIDATE_OFFSETS, CANDIDATE_SAMPLES, ESTIMATE_SAMPLES, FOV_MIN_DEG, FOV_MAX_DEG,
+    MAX_SHIFTS, FovSolver,
 )
 
 CALIB_VERSION = 6
@@ -676,7 +679,9 @@ class CalibFlow:
         self._enter(Step.FAILED)
 
     def feed_fov(self, frame, vx_model: float | None, v_ego: float | None,
-                 yaw_rate: float | None, perf_counter=None) -> None:
+                 yaw_rate: float | None, perf_counter=None, *,
+                 timestamp: float | None = None, frame_span_s: float = 0.2,
+                 pair_ok: bool) -> None:
         if self.step is not Step.FOV or self.fov_proposal is not None:
             return
         if self._config_pending:
@@ -689,7 +694,9 @@ class CalibFlow:
                 self._finish_fov("config")
                 return
         fov = self.fov_solver.update(frame, self.calib, vx_model, v_ego,
-                                     yaw_rate, perf_counter)
+                                     yaw_rate, perf_counter,
+                                     timestamp=timestamp, frame_span_s=frame_span_s,
+                                     pair_ok=pair_ok)
         if fov is None:
             return
         current = float(self.calib.fov_h_deg)
@@ -1141,6 +1148,53 @@ class CalibFlow:
         for name in ("fov", "steering"):
             if name in d and not isinstance(d[name], dict):
                 raise ValueError("invalid calibration progress")
+        fov = d.get("fov", {})
+        if fov.get("proposal") is not None:
+            bounded_number(fov["proposal"], FOV_MIN_DEG, FOV_MAX_DEG)
+        if not isinstance(fov.get("source", ""), str):
+            raise ValueError("invalid FOV source")
+        solver = fov.get("solver", {})
+        if not isinstance(solver, dict):
+            raise ValueError("invalid FOV evidence")
+        # Untimed evidence is discarded by load_dict. Current evidence also
+        # passes these bounds during legacy import, before it can be copied.
+        if solver.get("time_base_version") == 1:
+            bounded_int(solver["time_base_version"], 1, 1)
+            if solver.get("stage", "estimate") not in ("estimate", "bracket"):
+                raise ValueError("invalid FOV stage")
+            bounded_int(solver.get("tick", 0))
+            bounded_int(solver.get("shifts", 0), 0, MAX_SHIFTS)
+            for name in ("applied_fov", "estimate", "result"):
+                if solver.get(name) is not None:
+                    angle = bounded_number(solver[name], 0, 180)
+                    if not 0 < angle < 180:
+                        raise ValueError("invalid saved FOV")
+            candidates, ratios = solver.get("candidates", []), solver.get("ratios", [])
+            candidate_ratios = solver.get("cand_ratios", [])
+            if (not all(isinstance(v, list) for v in (candidates, ratios, candidate_ratios))
+                    or len(candidates) not in (0, len(CANDIDATE_OFFSETS))
+                    or len(candidate_ratios) != len(candidates)
+                    or (solver.get("stage") == "bracket" and not candidates)):
+                raise ValueError("invalid FOV evidence shape")
+            for candidate in candidates:
+                bounded_number(candidate, FOV_MIN_DEG, FOV_MAX_DEG)
+            for samples in (ratios, *candidate_ratios):
+                if not isinstance(samples, list):
+                    raise ValueError("invalid FOV ratios")
+                bounded_int(len(samples))
+                for ratio in samples:
+                    bounded_number(ratio, 0, 1e12)
+            geometry = solver.get("geometry")
+            if geometry is not None:
+                if (not isinstance(geometry, (list, tuple)) or len(geometry) != 9
+                        or not isinstance(geometry[0], (list, tuple)) or len(geometry[0]) != 2):
+                    raise ValueError("invalid FOV geometry")
+                for size in geometry[0]:
+                    bounded_int(size, 1, 32768)
+                names = ("image_w", "image_h", "fov_h_deg", "cx_frac", "cy_frac",
+                         "crop_top_pct", "crop_bottom_pct", "simple_warp")
+                values = dataclass_values(Calibration, dict(zip(names, geometry[1:])))
+                Calibration(**values).validate()
         for name in ("prompt", "lane_changes"):
             bounded_int(d.get("steering", {}).get(name, 0))
         for name in ("prompt_s", "regime_s"):

@@ -53,7 +53,10 @@ def test_v012_flow_preserves_completed_stages(step, through_import, tmp_path, mo
                     model_identity={"model": "upgrade-fixture", "sha256": "0" * 64})
     assert not take_state_warnings(target)
     restored = json.loads(json.dumps(flow.to_dict()))
-    assert restored["fov"] == raw["fov"]
+    # The empty legacy solve gains the timestamp contract; the completed
+    # FOV stage, source and every other saved value remain unchanged.
+    assert restored["fov"] == {**raw["fov"], "solver": {
+        **raw["fov"]["solver"], "time_base_version": 1, "geometry": None}}
     assert restored["steering"] == raw["steering"]
     assert flow.camera_diagnostics() == raw["camera"]
     assert asdict(cal) == json.loads((FIXTURES / step / "calibration_ets2.json").read_text())
