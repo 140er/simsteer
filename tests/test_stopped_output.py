@@ -47,7 +47,8 @@ def run_plant(monkeypatch, tmp_path, *, polarity=-1, convention=1, inversion=1,
               fps=20, lag_s=0.25, smoothing_s=0.0, moving=False,
               interrupt=None, no_probe=False, drive_s=0.0, flip=False,
               correction=False, no_response=False, raw_lag_frames=0,
-              raw_gain=1.0, deadzone=0.0, player_axis=0.3):
+              raw_gain=1.0, deadzone=0.0, player_axis=0.3, fail_check=False,
+              excited_drive=False):
     import simsteer.runtime.loop as loop
 
     dt = 1 / fps
@@ -57,7 +58,7 @@ def run_plant(monkeypatch, tmp_path, *, polarity=-1, convention=1, inversion=1,
     st = SimpleNamespace(t=0.0, speed=22.0, raw=0.0, game=0.0, phi=0.0,
                          pad=0.0, engaged=False, writes=[], throttle=[],
                          first_verified=None, first_engaged=None, tripped=None,
-                         inserts=set(), smooth=0.0, frame=0)
+                         inserts=set(), smooth=0.0, frame=0, failed_at=None)
     history = deque([0.0] * max(1, round(lag_s * fps)))
     raw_history = deque([0.0] * raw_lag_frames)
 
@@ -112,6 +113,12 @@ def run_plant(monkeypatch, tmp_path, *, polarity=-1, convention=1, inversion=1,
             st.frame += 1
             st.t = clock.t = st.frame * dt
             flow = holder["flow"]
+            if (fail_check and st.first_engaged is not None
+                    and st.t >= st.first_engaged + 1 and st.failed_at is None):
+                from simsteer.calib.score import Verdict
+                flow.attempts = 1
+                flow._finish_check(Verdict(False, 0.0, "steering", "bad fit"))
+                st.failed_at = st.t
             if st.t < 16.0:
                 # The player drives both bends. No fitted signs or gains
                 # are injected; LiveParams uses its real seed and updates.
@@ -121,6 +128,8 @@ def run_plant(monkeypatch, tmp_path, *, polarity=-1, convention=1, inversion=1,
                 st.raw = st.game
             else:
                 st.speed = 22.0 if moving or st.engaged else 0.0
+                if excited_drive and st.engaged:
+                    st.speed = 20.0 + 5.0 * math.sin((st.t - st.first_engaged) * 0.1)
                 if interrupt == "speed" and st.t >= 19:
                     st.speed = 2.0
                 human = player_axis if interrupt == "player" and 19 <= st.t < 20 else 0.0
@@ -144,7 +153,8 @@ def run_plant(monkeypatch, tmp_path, *, polarity=-1, convention=1, inversion=1,
             return np.zeros((2, 2, 3), np.uint8)
 
     def decoded():
-        curvature = st.phi / 2.65 if st.t < 16 else 0.004
+        curvature = st.phi / 2.65 if st.t < 16 else (
+            0.004 * math.sin(st.t * 0.5) if excited_drive else 0.004)
         d = _plan(curvature, st.speed)
         d.pose = np.array([st.speed, 0.0, 0.0])
         return d
@@ -180,6 +190,20 @@ def run_plant(monkeypatch, tmp_path, *, polarity=-1, convention=1, inversion=1,
                     headless=True, max_frames=round((33 + drive_s) * fps),
                     log_path=str(log)) == 0
     return holder["flow"], st, [json.loads(line) for line in log.read_text().splitlines()]
+
+
+def test_failed_check_revokes_engagement_and_neutralizes_device(monkeypatch, tmp_path):
+    flow, st, rows = run_plant(monkeypatch, tmp_path, drive_s=5, fail_check=True)
+    assert st.failed_at is not None
+    assert flow.step is Step.FAILED
+    assert all(value == 0.0 for t, _, value, _, _ in st.writes if t >= st.failed_at)
+    assert all(throttle == brake == 0.0 for t, throttle, brake, _ in st.throttle
+               if t >= st.failed_at)
+    assert all(not row["engaged"] and row["ai_steer_axis"] == 0.0
+               for row in rows if row["t"] > st.failed_at)
+    assert flow.engage_block()
+    assert not flow.ai_steering_ready
+    assert not st.engaged and st.pad == 0.0
 
 
 @pytest.mark.parametrize("polarity", [1, -1])
@@ -396,11 +420,19 @@ def test_runtime_mirrored_binding_disengages_quickly(monkeypatch, tmp_path, fps)
     stopped = next(r["t"] for r in rows if r["t"] >= changed and not r["engaged"])
     assert stopped - changed <= 1.0 + 1 / fps
     assert flow.direction.ready and flow.lp.axis_sign == 1
-    assert flow.lp.trusted() and not flow.output_direction.ready
+    # This plant drives at one speed, so direction evidence can be valid
+    # without identifying both coefficients of the speed-dependent fit.
+    assert not flow.lp.trusted() and not flow.output_direction.ready
+
+
+def test_single_speed_plant_cannot_certify(monkeypatch, tmp_path):
+    flow, st, rows = run_plant(monkeypatch, tmp_path, drive_s=150)
+    assert flow.step is Step.STEERING and not flow.lp.trusted()
+    assert not any(r["calib"] == "done" for r in rows)
 
 
 def test_real_liveparams_reaches_check_and_done(monkeypatch, tmp_path):
-    flow, st, rows = run_plant(monkeypatch, tmp_path, drive_s=150)
+    flow, st, rows = run_plant(monkeypatch, tmp_path, drive_s=220, excited_drive=True)
     assert any(r["calib"] == "check" for r in rows)
     assert flow.step is Step.DONE and flow.result["passed"]
     assert flow.lp.trusted()
