@@ -1,9 +1,9 @@
 """Evidence-complete certification of a two-minute check drive.
 
-The weakest required measurement decides the score. Missing measurements
-remain visible and produce INSUFFICIENT_EVIDENCE, including a nominally good
-score without enough engaged driving. Lane changes are excluded by the caller;
-large offsets during lane keeping are excursions, never discarded outliers.
+The weakest required measurement decides failure before missing evidence is
+considered. An otherwise good drive with missing evidence has no score.
+Uncommanded lane reassignment jumps count as crossings, including when the
+model re-references its ego lanes and offsets remain inside half a lane width.
 """
 
 from __future__ import annotations
@@ -14,6 +14,9 @@ from dataclasses import asdict, dataclass, field
 PASS_SCORE = 0.5
 SATURATION_AXIS = 0.9
 MAX_LANE_OFFSET_M = 1.8
+# At 20 Hz, opposite-sign offsets jumping this far indicate ego-lane
+# reassignment, rather than ordinary continuous motion within one lane.
+LANE_REASSIGNMENT_JUMP_M = 2.0
 MAX_LOG_RATIO = 0.5
 STRAIGHT_YAW_RAD_S = 0.06
 STRAIGHT_MIN_SPEED_MPS = 8.0
@@ -83,6 +86,9 @@ class CheckStats:
     off_mean: float = 0.0
     off_m2: float = 0.0
     off_excursions: int = 0
+    off_crossings: int = 0
+    off_last: float = 0.0
+    off_last_valid: bool = False
     ratio_total: int = 0
     ratio_n: int = 0
     ratio_log_sum: float = 0.0
@@ -95,12 +101,20 @@ class CheckStats:
     fit_act_sum: float = 0.0
     fit_source: str = "measured"
 
-    def add_offset(self, offset_m: float | None) -> None:
+    def add_offset(self, offset_m: float | None, *, lane_change: bool = False) -> None:
+        if lane_change:
+            self.off_last_valid = False
+            return
         self.off_total += 1
         if not _finite(offset_m):
+            self.off_last_valid = False
             return
+        crossing = (self.off_last_valid and offset_m * self.off_last < 0
+                    and abs(offset_m - self.off_last) > LANE_REASSIGNMENT_JUMP_M)
         self.off_n += 1
-        self.off_excursions += abs(offset_m) > MAX_LANE_OFFSET_M
+        self.off_excursions += abs(offset_m) > MAX_LANE_OFFSET_M or crossing
+        self.off_crossings += crossing
+        self.off_last, self.off_last_valid = offset_m, True
         d = offset_m - self.off_mean
         self.off_mean += d / self.off_n
         self.off_m2 += d * (offset_m - self.off_mean)
@@ -183,7 +197,7 @@ class Measurement:
 @dataclass(frozen=True)
 class Verdict:
     passed: bool
-    score: float
+    score: float | None
     redo: str | None
     reason: str
     measurements: tuple[Measurement, ...] = field(default_factory=tuple)
@@ -195,7 +209,7 @@ class Verdict:
         return {
             "passed": self.passed,
             "status": self.status,
-            "score": round(self.score, 3),
+            "score": round(self.score, 3) if self.score is not None else None,
             "redo": self.redo,
             "reason": self.reason,
             "missing": list(self.missing),
@@ -234,8 +248,10 @@ def evaluate(stats: CheckStats, policy: CheckPolicy = CheckPolicy()) -> Verdict:
                   and n >= MIN_COVERAGE * denominator)
         if required and (not enough or source != "measured"):
             missing.append(rule.name)
-        measured.append((rule, Measurement(rule.name, rule.step, value,
-                                          _sub_score(rule, value) if enough else None,
+        score = _sub_score(rule, value) if enough else None
+        if enough and rule.name == "lane_excursions" and stats.off_crossings:
+            score = 0.0
+        measured.append((rule, Measurement(rule.name, rule.step, value, score,
                                           n, denominator, rule.min_samples, required, source)))
     if stats.engaged_seconds + 1e-6 < CHECK_SECONDS:
         missing.append("engaged_driving")
@@ -244,18 +260,23 @@ def evaluate(stats: CheckStats, policy: CheckPolicy = CheckPolicy()) -> Verdict:
     coverage = {"frames": stats.frames, "driving": stats.driving_n,
                 "engaged": stats.sat_n, "engaged_seconds": round(stats.engaged_seconds, 3),
                 "left": stats.left_n, "right": stats.right_n,
-                "lane_changes": stats.lane_change_n}
+                "lane_changes": stats.lane_change_n, "lane_crossings": stats.off_crossings}
     ms = tuple(m for _, m in measured)
-    scored = [(r, m) for r, m in measured if m.required and m.score is not None]
-    score = min((m.score for _, m in scored), default=0.0)
+    scored = [(r, m) for r, m in measured
+              if m.required and m.score is not None and m.source == "measured"]
+    failed = [(r, m) for r, m in scored if m.score < PASS_SCORE]
+    if failed:
+        rule, worst = min(failed, key=lambda rm: rm[1].score)
+        reason = (f"uncommanded lane crossing ({stats.off_crossings})"
+                  if rule.name == "lane_excursions" and stats.off_crossings
+                  else _describe(rule, worst.value))
+        return Verdict(False, worst.score, worst.step, reason,
+                       ms, "FAIL", tuple(missing), coverage)
     if missing:
-        return Verdict(False, score, "check", "Check again: " + missing[0].replace("_", " "),
+        return Verdict(False, None, "check", "Check again: " + missing[0].replace("_", " "),
                        ms, "INSUFFICIENT_EVIDENCE", tuple(missing), coverage)
-    rule, worst = min(scored, key=lambda rm: rm[1].score)
-    if worst.score >= PASS_SCORE:
-        return Verdict(True, worst.score, None, "", ms, "PASS", (), coverage)
-    return Verdict(False, worst.score, worst.step, _describe(rule, worst.value),
-                   ms, "FAIL", (), coverage)
+    score = min(m.score for _, m in scored)
+    return Verdict(True, score, None, "", ms, "PASS", (), coverage)
 
 
 def certified_result(result: dict | None, context: dict | None) -> bool:

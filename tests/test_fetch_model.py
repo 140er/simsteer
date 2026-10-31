@@ -55,3 +55,10 @@ def test_pin_is_a_full_commit_and_sha256s():
     assert set(mod.MODELS) == {"driving_vision.onnx", "driving_policy.onnx"}
     for _, sha, size in mod.MODELS.values():
         assert len(sha) == 64 and size > 1_000_000
+    from simsteer.core.model_identity import pinned_model_identity
+    identity = pinned_model_identity()
+    assert identity["source_revision"] == mod.OPENPILOT_COMMIT
+    assert identity["vision_sha256"] == mod.MODELS["driving_vision.onnx"][1]
+    assert identity["policy_sha256"] == mod.MODELS["driving_policy.onnx"][1]
+    assert identity["adapter_version"]
+    assert len(identity["adapter_sha256"]) == 64

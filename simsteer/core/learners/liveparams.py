@@ -243,12 +243,16 @@ def _seed_for(seeds: Seeds, device_kind: str | None) -> tuple[float, float, floa
 
 
 # At a single speed, wheel and wheel*v² are collinear: arbitrarily many
-# samples cannot identify a and b separately. Require both turns at two
-# separated speed ranges, using only accepted, excited training samples.
+# samples cannot identify a and b separately. Require both turns and a
+# measured speed span, using only accepted, excited training samples.
 TRUSTED_MIN_SAMPLES = 100
 TRUSTED_MIN_EACH_TURN = 10
-TRUSTED_MIN_WHEEL = 0.005
+# The highway calibration replay peaks below 0.005 rad. At 0.003 rad it
+# supplies both turns with variation in speed without requiring tight bends.
+TRUSTED_MIN_WHEEL = 0.003
 TRUSTED_SPEED_BIN_MPS = 3.0
+TRUSTED_MIN_SPEED_SPAN_MPS = 3.0
+TRUST_COVERAGE_VERSION = 1
 
 # Auto-freeze: once we've accumulated this many samples the fit is
 # mature enough that further RLS updates are more likely to fit
@@ -264,6 +268,9 @@ class _Persisted:
     samples: int = 0
     axis_sign: int | None = None
     coverage: dict[str, list[int]] = field(default_factory=dict)
+    coverage_speed_min: float | None = None
+    coverage_speed_max: float | None = None
+    legacy_fit: bool = False
 
 
 class LiveParams:
@@ -307,6 +314,9 @@ class LiveParams:
         self.x = np.array([loaded.a, loaded.b, loaded.c], dtype=np.float64)
         self.axis_sign = loaded.axis_sign
         self.coverage = loaded.coverage
+        self.coverage_speed_min = loaded.coverage_speed_min
+        self.coverage_speed_max = loaded.coverage_speed_max
+        self.legacy_fit = loaded.legacy_fit
         self.validation_model: tuple[float, float, float] | None = None
         # Initial state-covariance diagonal (P0). Per-game — Forza/AC
         # use bigger values to converge from defaults faster, ETS2
@@ -515,10 +525,40 @@ class LiveParams:
         return False
 
     def trusted(self) -> bool:
-        bins = [int(k) for k, counts in self.coverage.items()
-                if min(counts) >= TRUSTED_MIN_EACH_TURN]
-        return (max(self.samples, self.session_samples) >= TRUSTED_MIN_SAMPLES
-                and bool(bins) and max(bins) - min(bins) >= 2)
+        return self.trust_progress >= 1.0
+
+    @property
+    def coverage_turns(self) -> tuple[int, int]:
+        return tuple(sum(counts[i] for counts in self.coverage.values()) for i in (0, 1))
+
+    @property
+    def coverage_speed_span(self) -> float:
+        if self.coverage_speed_min is not None and self.coverage_speed_max is not None:
+            return self.coverage_speed_max - self.coverage_speed_min
+        # Older coverage has bins only. Use their conservative lower bound,
+        # never a span inferred from crossing a single bin boundary.
+        bins = [int(k) for k in self.coverage]
+        return max(0, max(bins) - min(bins) - 1) * TRUSTED_SPEED_BIN_MPS if bins else 0.0
+
+    @property
+    def trust_progress(self) -> float:
+        left, right = self.coverage_turns
+        return min(1.0, max(self.samples, self.session_samples) / TRUSTED_MIN_SAMPLES,
+                   left / TRUSTED_MIN_EACH_TURN, right / TRUSTED_MIN_EACH_TURN,
+                   self.coverage_speed_span / TRUSTED_MIN_SPEED_SPAN_MPS)
+
+    @property
+    def trust_need(self) -> str:
+        left, right = self.coverage_turns
+        if max(left, right) < TRUSTED_MIN_EACH_TURN:
+            return "Need left and right curves"
+        if left < TRUSTED_MIN_EACH_TURN:
+            return "Need left curves"
+        if right < TRUSTED_MIN_EACH_TURN:
+            return "Need right curves"
+        if self.coverage_speed_span < TRUSTED_MIN_SPEED_SPAN_MPS:
+            return "Need varied speed"
+        return "Need more steering samples"
 
     def _adaptation_warm(self) -> bool:
         # Preserve the existing filter's gain/outlier/watchdog schedule.
@@ -759,6 +799,10 @@ class LiveParams:
         if abs(wheel) >= TRUSTED_MIN_WHEEL:
             counts = self.coverage.setdefault(str(int(v_lagged // TRUSTED_SPEED_BIN_MPS)), [0, 0])
             counts[int(wheel > 0)] += 1
+            self.coverage_speed_min = (v_lagged if self.coverage_speed_min is None
+                                       else min(self.coverage_speed_min, v_lagged))
+            self.coverage_speed_max = (v_lagged if self.coverage_speed_max is None
+                                       else max(self.coverage_speed_max, v_lagged))
         self.last_innovation = innovation
         self.last_predicted = predicted
         self.last_actual = actual
@@ -822,6 +866,8 @@ class LiveParams:
         self.samples = 0
         self.session_samples = 0
         self.coverage = {}
+        self.coverage_speed_min = self.coverage_speed_max = None
+        self.legacy_fit = False
         self.end_validation()
         self._axis_buf.clear()
         self._commanded_buf.clear()
@@ -979,8 +1025,14 @@ class LiveParams:
                 and all(type(n) is int and n >= 0 for n in v)
                 for k, v in coverage.items())):
             coverage = {}
+        speed_min, speed_max = data.get("coverage_speed_min"), data.get("coverage_speed_max")
+        if not all(type(v) in (int, float) and np.isfinite(v) for v in (speed_min, speed_max)):
+            speed_min = speed_max = None
+        legacy_fit = data.get("legacy_fit", data.get("coverage_version") is None
+                              and samples >= TRUSTED_MIN_SAMPLES and not coverage) is True
         return _Persisted(a=a, b=b, c=c, samples=samples, axis_sign=axis_sign,
-                          coverage=coverage)
+                          coverage=coverage, coverage_speed_min=speed_min,
+                          coverage_speed_max=speed_max, legacy_fit=legacy_fit)
 
     def save(self, path: Path | None = None) -> None:
         if path is None:
@@ -998,6 +1050,10 @@ class LiveParams:
                 "samples": self.samples,
                 "axis_sign": self.axis_sign,
                 "coverage": self.coverage,
+                "coverage_version": TRUST_COVERAGE_VERSION,
+                "coverage_speed_min": self.coverage_speed_min,
+                "coverage_speed_max": self.coverage_speed_max,
+                "legacy_fit": self.legacy_fit,
             }, indent=2))
         except OSError:
             pass
@@ -1032,6 +1088,9 @@ class LiveParams:
         self.x = np.array([loaded.a, loaded.b, loaded.c], dtype=np.float64)
         self.axis_sign = loaded.axis_sign
         self.coverage = loaded.coverage
+        self.coverage_speed_min = loaded.coverage_speed_min
+        self.coverage_speed_max = loaded.coverage_speed_max
+        self.legacy_fit = loaded.legacy_fit
         self.end_validation()
         self.P = np.diag(self._gates["P_init"])
         self.samples = loaded.samples

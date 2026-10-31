@@ -277,6 +277,17 @@ def test_calibrated_label_is_green_and_resets_when_not_calibrated(tuner, monkeyp
     assert tuner._cal_label.cget("text_color") == MUTED
 
 
+def test_insufficient_calibration_can_display_without_a_numeric_score(tuner):
+    from test_calib_flow import new_flow
+
+    flow = new_flow()
+    flow._invalidate_check("missing evidence")
+    tuner.calib_flow = flow
+    tuner.settings.hud_mode = "dev"
+    tuner._refresh()
+    assert tuner._status_rows["calibration"].cget("text") == "Check again"
+
+
 @pytest.mark.parametrize("attr, label", [
     ("force_engage", "Force engage"), ("passive_fit", "Passive fit"),
 ])

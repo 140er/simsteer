@@ -44,12 +44,36 @@ from simsteer.core.learners.livecalib import (
     BLOCK_SIZE, INPUTS_NEEDED, MIN_SPEED_FILTER_MPS, CalStatus,
 )
 from simsteer.core.learners.liveparams import TRUSTED_MIN_SAMPLES
+from simsteer.core.model_identity import pinned_model_identity
 from simsteer.paths import state_path
 from simsteer.runtime.fov import (
     CANDIDATE_OFFSETS, CANDIDATE_SAMPLES, ESTIMATE_SAMPLES, FovSolver,
 )
 
-CALIB_VERSION = 4
+CALIB_VERSION = 5
+# Perspective calibration continues to adapt. Compare to the certified pose,
+# not the previous frame, so accumulated drift still revokes the certificate.
+POSE_ANGLE_TOLERANCE_DEG = 0.5
+POSE_HEIGHT_TOLERANCE_M = 0.05
+FULL_CHECK_LOG_INTERVAL_S = 1.0
+
+
+def contexts_match(saved: dict | None, current: dict) -> bool:
+    if not saved:
+        return False
+    old_camera, camera = saved.get("camera", {}), current.get("camera", {})
+    if old_camera.get("simple_warp", True) or camera.get("simple_warp", True):
+        return saved == current
+    old_camera, camera = old_camera.copy(), camera.copy()
+    for name, tolerance in (("pitch_deg", POSE_ANGLE_TOLERANCE_DEG),
+                            ("yaw_deg", POSE_ANGLE_TOLERANCE_DEG),
+                            ("height_m", POSE_HEIGHT_TOLERANCE_M)):
+        try:
+            if not abs(old_camera.pop(name) - camera.pop(name)) <= tolerance + 1e-9:
+                return False
+        except (KeyError, TypeError):
+            return False
+    return {**saved, "camera": old_camera} == {**current, "camera": camera}
 
 
 class Step(str, Enum):
@@ -169,6 +193,7 @@ class CalibFlow:
     def __init__(self, game: str, device: str, *, live_calib, live_params,
                  calib, steering_fit: bool = True, passive_fit: bool = False,
                  check_policy: CheckPolicy | None = None,
+                 model_identity: dict | None = None,
                  certification_context: Callable[[], dict] = lambda: {},
                  make_fov_solver: Callable[[], FovSolver] = FovSolver,
                  fov_config: FovReader | None = None,
@@ -183,6 +208,7 @@ class CalibFlow:
         self.steering_fit = steering_fit
         self.passive_fit = passive_fit
         self.check_policy = check_policy or CheckPolicy.for_capabilities(steering_fit)
+        self.model_identity = model_identity if model_identity is not None else pinned_model_identity()
         self._context_provider = certification_context
         self._make_fov_solver = make_fov_solver
         self._fov_config = fov_config
@@ -201,6 +227,7 @@ class CalibFlow:
         self.step = Step.FOV
         self.attempts = 0
         self.result: dict | None = None
+        self.legacy_result: dict | None = None
         self.redo_note = ""
         self.fov_solver = self._make_fov_solver()
         self.fov_proposal: float | None = None
@@ -223,6 +250,8 @@ class CalibFlow:
         self._now = 0.0
         self._banner_until = 0.0
         self._last_save = 0.0
+        self._last_full_check_log = float("-inf")
+        self._last_check_log_signature = None
 
     def switch_device(self, device: str) -> None:
         """Keep the tuner's flow reference, but load this device's state."""
@@ -260,7 +289,7 @@ class CalibFlow:
     def calibrated(self) -> bool:
         return (self.step is Step.DONE and certified_result(self.result, self._check_context)
                 and self.lc.cal_status == CalStatus.CALIBRATED
-                and self._check_context == self._context())
+                and contexts_match(self._check_context, self._context()))
 
     def _context(self) -> dict:
         # Normalize tuples to JSON lists, so a saved certificate compares
@@ -269,6 +298,7 @@ class CalibFlow:
             "schema": CALIB_VERSION, "game": self.game, "device": self.device,
             "camera": asdict(self.calib), "policy": asdict(self.check_policy),
             "controls": self._context_provider(),
+            "model": self.model_identity,
         }))
 
     def confirm_check(self) -> None:
@@ -277,11 +307,20 @@ class CalibFlow:
             self._check_requested = True
 
     def _invalidate_check(self, reason: str) -> None:
+        old_controls = (self._check_context or {}).get("controls", {})
+        device_changed = old_controls.get("device_id") != self._context_provider().get("device_id")
         self.redo_note = "Check again: " + reason
         self.result = {**evaluate(CheckStats(), self.check_policy).to_dict(),
                        "reason": self.redo_note}
         self._check_requested = False
-        self._enter(Step.CHECK)
+        if device_changed and self.steering_fit:
+            self.output_direction = OutputDirection(self.lp.lag_frames,
+                                                    int(self.calib.lateral_sign))
+            self.redo_note = "Output device changed: stop to check steering direction"
+            self.result["reason"] = self.redo_note
+            self._enter(Step.STEERING)
+        else:
+            self._enter(Step.CHECK)
 
     @property
     def camera_learning(self) -> bool:
@@ -313,7 +352,8 @@ class CalibFlow:
         return (self.step in (Step.STEERING, Step.CHECK, Step.DONE)
                 and self.lc.cal_status == CalStatus.CALIBRATED
                 and self._check_requested
-                and (self.step is Step.STEERING or self._check_context == self._context())
+                and (self.step is Step.STEERING
+                     or contexts_match(self._check_context, self._context()))
                 and (not self.steering_fit
                      or (self.direction.ready and self.output_direction.ready)))
 
@@ -371,7 +411,8 @@ class CalibFlow:
                 return min(self.direction.progress, self.output_direction.progress)
             return min(self.direction.progress,
                        self.output_direction.evidence.progress,
-                       self._lp_samples() / float(TRUSTED_MIN_SAMPLES), 1.0)
+                       getattr(self.lp, "trust_progress",
+                               self._lp_samples() / float(TRUSTED_MIN_SAMPLES)), 1.0)
         if self.step is Step.CHECK:
             return min(1.0, self.check.engaged_seconds / CHECK_SECONDS)
         return 1.0
@@ -387,6 +428,8 @@ class CalibFlow:
             return self.lc.eta_to_calibrated_s()
         if self.step is Step.STEERING:
             if not self.ai_steering_ready or rate <= 0:
+                return None
+            if self._lp_samples() >= TRUSTED_MIN_SAMPLES and not self.lp.trusted():
                 return None
             return max(0.0, TRUSTED_MIN_SAMPLES - self._lp_samples()) / rate
         if self.step is Step.CHECK:
@@ -424,7 +467,7 @@ class CalibFlow:
             self._invalidate_check("camera calibration changed")
             self._enter(Step.CAMERA)
             return
-        if self.step in (Step.CHECK, Step.DONE) and self._check_context != self._context():
+        if self.step in (Step.CHECK, Step.DONE) and not contexts_match(self._check_context, self._context()):
             self._invalidate_check("calibration changed")
             return
         if abs(self.calib.fov_h_deg - self._fov_reference) > 0.05:
@@ -530,7 +573,7 @@ class CalibFlow:
             return
         samples = self._lp_samples()
         self._rate.add(o.now, samples)
-        if self.lp.trusted():
+        if self.lp.trusted() or getattr(self.lp, "legacy_fit", False):
             print(f"calib: steering done (a={self.lp.a_linear:.3f} "
                   f"b={self.lp.b_quad:.5f} c={self.lp.c_bias:+.4f})")
             self._advance()
@@ -580,9 +623,9 @@ class CalibFlow:
             self.check.add_axis(o.axis, dt)
             self.check.add_speed(o.vx_model, o.v, o.yaw_rate)
         self.check.lane_change_n += int(o.engaged and o.lane_change)
-        if o.engaged and not o.lane_change:
+        if o.engaged:
             # Only SimSteer's own lane keeping says anything about the fit.
-            self.check.add_offset(o.lane_offset)
+            self.check.add_offset(o.lane_offset, lane_change=o.lane_change)
         if o.engaged and new_prediction:
             self.check.add_fit(self.lp.last_innovation, self.lp.last_actual,
                                held_out=self.lp.validating,
@@ -744,11 +787,15 @@ class CalibFlow:
                 return f"Redo: {self.redo_note}"
             if not self.passive_fit and not engaged:
                 return "Press INSERT and let SimSteer drive"
+            if not self.lp.trusted() and hasattr(self.lp, "trust_need"):
+                return self.lp.trust_need
             if self.prompt_idx < len(PROMPTS):
                 return PROMPTS[self.prompt_idx].text
             return "Keep driving"
         if self.step is Step.CHECK:
             if not self._check_requested and self.result:
+                if not self.result.get("coverage", {}).get("engaged"):
+                    return self.redo_note or self.result.get("reason", "Check again")
                 ms = self.result.get("measurements", {})
                 counts = " ".join(
                     f"{label} {ms.get(name, {}).get('samples', 0)}/"
@@ -793,13 +840,35 @@ class CalibFlow:
         return None
 
     def log_fields(self) -> dict:
-        return {"calib": self.step.value, "calib_pct": round(self.progress * 100, 1),
-                "calib_check": (evaluate(self.check, self.check_policy).to_dict()
-                                if self.step is Step.CHECK and self._check_requested else
-                                self.result or evaluate(self.check, self.check_policy).to_dict()),
+        verdict = (evaluate(self.check, self.check_policy).to_dict()
+                   if self.step is Step.CHECK and self._check_requested else
+                   self.result or evaluate(self.check, self.check_policy).to_dict())
+        measurements = verdict["measurements"]
+        fields = {"calib": self.step.value, "calib_pct": round(self.progress * 100, 1),
+                "calib_check": {
+                    "status": verdict["status"], "score": verdict["score"],
+                    "coverage": {k: verdict["coverage"].get(k, 0)
+                                 for k in ("engaged", "engaged_seconds")},
+                    "samples": {key: [measurements.get(name, {}).get("samples", 0),
+                                      measurements.get(name, {}).get("denominator", 0)]
+                                for key, name in (("lane", "lane_offset_spread"),
+                                                  ("speed", "speed_ratio_error"),
+                                                  ("fit", "steering_fit_error"),
+                                                  ("axis", "steering_saturation"))}},
+                "steering_trusted": self.lp.trusted(),
+                "steering_coverage": {
+                    "turns": getattr(self.lp, "coverage_turns", (0, 0)),
+                    "speed_span": round(getattr(self.lp, "coverage_speed_span", 0.0), 3)},
                 "steering_model_sign": self.direction.model_sign,
                 "steering_input_sign": self.direction.axis_sign,
                 "steering_output_sign": self.output_direction.sign}
+        signature = (self.step, verdict["status"], verdict["reason"], self.attempts)
+        if (signature != self._last_check_log_signature
+                or self._now - self._last_full_check_log >= FULL_CHECK_LOG_INTERVAL_S):
+            fields["calib_check_result"] = verdict
+            self._last_full_check_log = self._now
+            self._last_check_log_signature = signature
+        return fields
 
     # ----- persistence -----
 
@@ -811,6 +880,7 @@ class CalibFlow:
             "step": self.step.value,
             "attempts": self.attempts,
             "result": self.result,
+            "legacy_result": self.legacy_result,
             "redo_note": self.redo_note,
             "fov": {"solver": self.fov_solver.to_dict(),
                     "proposal": self.fov_proposal,
@@ -845,13 +915,14 @@ class CalibFlow:
             d = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return False
-        if (d.get("version") not in (2, 3, CALIB_VERSION) or d.get("game") != self.game
+        if (d.get("version") not in (2, 3, 4, CALIB_VERSION) or d.get("game") != self.game
                 or d.get("device") != self.device):
             return False
         try:
             self.step = Step(d["step"])
             self.attempts = int(d.get("attempts", 0))
             self.result = d.get("result")
+            self.legacy_result = d.get("legacy_result")
             self.redo_note = d.get("redo_note", "")
             fov = d.get("fov", {})
             self.fov_solver.load_dict(fov.get("solver", {}))
@@ -873,10 +944,12 @@ class CalibFlow:
         if self.step is Step.FOV and self.fov_proposal is None:
             self._config_pending = self._fov_config is not None
         if self.step in (Step.CHECK, Step.DONE):
-            if (d.get("version") != CALIB_VERSION or self._check_context != self._context()
+            if (d.get("version") != CALIB_VERSION or not contexts_match(self._check_context, self._context())
                     or self._check_model is None
                     or (self.step is Step.DONE
                         and not certified_result(self.result, self._check_context))):
+                if self.result and self.legacy_result is None:
+                    self.legacy_result = self.result
                 self._invalidate_check("saved evidence is outdated")
             else:
                 if self.step is Step.CHECK:
@@ -886,7 +959,8 @@ class CalibFlow:
         elif self.steering_fit:
             if self.direction.ready:
                 self.lp.set_axis_sign(self.direction.axis_sign)
-            if self.step in (Step.CHECK, Step.DONE) and not self.lp.trusted():
+            if (self.step in (Step.CHECK, Step.DONE) and not self.lp.trusted()
+                    and not getattr(self.lp, "legacy_fit", False)):
                 self._invalidate_check("steering coverage missing")
                 self._enter(Step.STEERING)
             if (not (self.direction.ready and self.output_direction.ready)

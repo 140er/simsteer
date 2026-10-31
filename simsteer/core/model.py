@@ -34,6 +34,7 @@ from simsteer.core.constants import (
     VISION_SLICES,
 )
 from simsteer.paths import model_path
+from simsteer.core.model_identity import actual_model_identity
 
 VISION_PATH = model_path("driving_vision.onnx")
 POLICY_PATH = model_path("driving_policy.onnx")
@@ -68,6 +69,7 @@ class DrivingModel:
         self.policy = _make_session(POLICY_PATH, policy_providers)
         self.active_provider = self.vision.get_providers()[0]
         self.policy_provider = self.policy.get_providers()[0]
+        self.certification_identity = actual_model_identity(VISION_PATH, POLICY_PATH)
 
         # Ringbuffers (float32 internally; cast to float16 only when feeding policy).
         self._feat_q: deque[np.ndarray] = deque(

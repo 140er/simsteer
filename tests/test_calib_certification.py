@@ -142,7 +142,12 @@ def test_control_device_binding_and_schema_changes_revoke_immediately(field, val
     driver.frames(1)
     assert not flow.ai_steering_ready and flow.engage_block()
     flow.confirm_check()
-    assert flow.ai_steering_ready and not flow.calibrated
+    if field == "device_id":
+        # A new output device must repeat the stopped direction check.
+        assert not flow.ai_steering_ready and not flow.output_direction.ready
+    else:
+        assert flow.ai_steering_ready
+    assert not flow.calibrated
 
 
 def test_camera_invalidation_revokes_output_without_a_pose_change():

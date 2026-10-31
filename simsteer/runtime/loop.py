@@ -202,6 +202,7 @@ def run(settings: Settings, game: GameProfile | str, *,
         passive_fit=passive_fit_allowed(),
         check_policy=CheckPolicy.for_capabilities(
             steering_fit_for(profile), profile.capabilities.synth_wheel_angle),
+        model_identity=getattr(model, "certification_identity", None),
         certification_context=lambda: {
             "controller": asdict(ctrl_cfg), "device": settings.device,
             "device_id": settings.vjoy_device,

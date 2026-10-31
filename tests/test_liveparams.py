@@ -66,10 +66,8 @@ def test_cold_fit_forgets_faster_while_wrong_then_settles():
     assert lp.adaptive_forget() < FORGET
 
     _drive(lp, a=10.0 / 3.0, b=0.0, frames=range(40, 400))
-    # The first short speed sweep has not covered both turns in separated
-    # speed ranges. More samples alone used to claim trust here.
-    assert not lp.trusted()
-    _drive(lp, a=10.0 / 3.0, b=0.0, frames=range(400, 2000))
+    # Both signs and the measured speed span qualify this highway sweep;
+    # requiring both signs separately in distant bins delayed it needlessly.
     assert lp.trusted()
     assert lp.adaptive_forget() == FORGET
 

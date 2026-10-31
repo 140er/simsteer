@@ -44,7 +44,7 @@ def status(game: str, device: str) -> CalibStatus:
         d = json.loads(flow_path(game, device).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         d = {}
-    if d.get("version") in (2, 3) and d.get("step") in ("done", "check"):
+    if d.get("version") in (2, 3, 4) and d.get("step") in ("done", "check"):
         return CalibStatus(game, device, False, "check", None, None,
                            "check", "Check again")
     if d.get("version") != CALIB_VERSION:
