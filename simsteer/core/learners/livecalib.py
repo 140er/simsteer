@@ -186,6 +186,7 @@ class LiveCalib:
         self.rej_lat_acc = 0
         self.rej_human = 0
         self.rej_block_jump = 0       # block-level (not sample-level)
+        self.last_rejection_reason: str | None = None
 
         # Human-input gate state. Frame countdown so the suppress
         # actually elapses (a sample-count target wouldn't, since
@@ -272,6 +273,7 @@ class LiveCalib:
                road_transform_std: np.ndarray | None = None,
                wide_from_device_euler: np.ndarray | None = None,
                game_steer: float | None = None) -> None:
+        self.last_rejection_reason = None
         # Human-input gate: tracked even when we'd reject for other
         # reasons, so the cooldown starts the instant a yank happens
         # rather than the next time we'd otherwise pass.
@@ -284,23 +286,31 @@ class LiveCalib:
             self._suppress_frames_remaining -= 1
 
         # --- gate set 1: telemetry ---
-        if pose is None or v_ego is None:
+        if pose is None:
+            self.last_rejection_reason = "missing_pose"
+            return
+        if v_ego is None:
+            self.last_rejection_reason = "missing_speed"
             return
         if v_ego < MIN_SPEED_FILTER_MPS:
+            self.last_rejection_reason = "speed"
             self.rej_speed += 1
             self.rejected += 1
             return
         if (actual_yaw_rate is not None
                 and abs(actual_yaw_rate) > MAX_YAW_RATE_FILTER):
+            self.last_rejection_reason = "turning"
             self.rej_turning += 1
             self.rejected += 1
             return
         if (actual_yaw_rate is not None
                 and abs(actual_yaw_rate) * v_ego > MAX_LAT_ACC_MPS2):
+            self.last_rejection_reason = "lateral_acceleration"
             self.rej_lat_acc += 1
             self.rejected += 1
             return
         if self._suppress_frames_remaining > 0:
+            self.last_rejection_reason = "human_steering"
             self.rej_human += 1
             self.rejected += 1
             return
@@ -309,6 +319,7 @@ class LiveCalib:
 
         # --- gate set 2: model self-consistency ---
         if vx < MIN_SPEED_FILTER_MPS:
+            self.last_rejection_reason = "model_speed"
             self.rej_speed += 1
             self.rejected += 1
             return
@@ -320,6 +331,7 @@ class LiveCalib:
         if pose_std is not None and len(pose_std) >= 2:
             vel_angle_std = math.atan2(float(pose_std[1]), max(vx, 1e-3))
             if vel_angle_std > MAX_VEL_ANGLE_STD:
+                self.last_rejection_reason = "lateral_uncertainty"
                 self.rej_vel_std += 1
                 self.rejected += 1
                 return
@@ -333,6 +345,7 @@ class LiveCalib:
             self.last_observed_height = observed_height
             if road_transform_std is not None and len(road_transform_std) >= 3:
                 if float(road_transform_std[2]) > MAX_HEIGHT_STD:
+                    self.last_rejection_reason = "height_uncertainty"
                     self.rej_height_std += 1
                     self.rejected += 1
                     return
@@ -354,15 +367,18 @@ class LiveCalib:
         new_pitch_deg = math.degrees(new_rpy[1])
         new_yaw_deg = math.degrees(new_rpy[2])
         if not (PITCH_MIN_DEG <= new_pitch_deg <= PITCH_MAX_DEG):
+            self.last_rejection_reason = "pitch_bounds"
             self.rej_pitch += 1
             self.rejected += 1
             return
         if not (YAW_MIN_DEG <= new_yaw_deg <= YAW_MAX_DEG):
+            self.last_rejection_reason = "yaw_bounds"
             self.rej_yaw += 1
             self.rejected += 1
             return
         if (observed_height is not None
                 and not (HEIGHT_MIN_M <= observed_height <= HEIGHT_MAX_M)):
+            self.last_rejection_reason = "height_bounds"
             self.rejected += 1
             return
 
@@ -554,6 +570,7 @@ class LiveCalib:
         self.rej_lat_acc = 0
         self.rej_human = 0
         self.rej_block_jump = 0
+        self.last_rejection_reason = None
         self.cal_status = CalStatus.UNCALIBRATED
         self._consecutive_invalid_blocks = 0
         self._wrote_to_calib = False

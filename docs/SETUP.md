@@ -154,7 +154,8 @@ Forza and AC need no plugin (see per-game setup below).
 Only do the game(s) you'll actually drive.
 
 ### Euro Truck Simulator 2
-- **Steering deadzone MUST be 0.** ETS2 defaults to ~16%, which eats the
+- **Use Wheel (absolute) steering and set steering deadzone to 0%.**
+  ETS2 defaults to ~16%, which eats the
   AI's small steering inputs and makes driving look broken.
   *Options → Controls → Steering deadzone → 0%.* The app warns on startup
   if it detects a non-zero value.

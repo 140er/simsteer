@@ -21,6 +21,7 @@ class GamepadError(RuntimeError):
 
 class Gamepad:
     def __init__(self) -> None:
+        self._engaged = False
         try:
             import vgamepad as vg
         except ImportError as e:
@@ -34,8 +35,26 @@ class Gamepad:
                 "driver installed? https://github.com/nefarius/ViGEmBus/releases"
             ) from e
 
-        self._engaged = False
-        self.center()
+        try:
+            try:
+                # ViGEm's boot packet differs from its all-zero cache, so
+                # repeated neutral reports can be discarded. Change only
+                # one raw LSB of the unused right stick to force delivery.
+                self._pad.reset()
+                self._pad.right_joystick(x_value=1, y_value=0)
+                self._pad.update()
+            finally:
+                self.center()
+        except Exception as e:
+            # vgamepad has no public close. Detach now: a traceback can
+            # keep the transport alive until well after construction fails.
+            # Its destructor still owns freeing the detached target.
+            try:
+                from vgamepad.win import vigem_client
+                vigem_client.vigem_target_remove(self._pad._busp, self._pad._devicep)
+            finally:
+                self._pad = None
+                raise GamepadError("could not initialize a neutral virtual gamepad") from e
 
     @property
     def engaged(self) -> bool:
@@ -57,10 +76,7 @@ class Gamepad:
 
     def center(self) -> None:
         """Force all controls to neutral and flush."""
-        self._pad.left_joystick_float(x_value_float=0.0, y_value_float=0.0)
-        self._pad.right_joystick_float(x_value_float=0.0, y_value_float=0.0)
-        self._pad.left_trigger_float(value_float=0.0)
-        self._pad.right_trigger_float(value_float=0.0)
+        self._pad.reset()
         self._pad.update()
 
     def set_steering(self, x: float, force: bool = False) -> None:

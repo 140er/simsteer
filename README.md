@@ -55,7 +55,8 @@ If Smart App Control blocks `SimSteer.exe`, [run from source](#run-from-source).
      If that fails (UAC denied), the plugin is at `prereqs\scs-telemetry.dll`
      inside the install folder — copy it manually into
      `<ETS2>\bin\win_x64\plugins\`.
-   - **Steering deadzone must be 0.** ETS2 defaults to 16%, which silences
+   - **Use Wheel (absolute) steering and set steering deadzone to 0%.**
+     ETS2 defaults to 16%, which silences
      the AI's small steering inputs. Fix in-game:
      Options → Controls → find the Steering deadzone slider → set to 0%.
      SimSteer will warn you on startup if it detects a non-zero deadzone.

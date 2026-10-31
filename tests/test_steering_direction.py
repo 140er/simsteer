@@ -52,7 +52,8 @@ def _plan(curvature, speed=22.0):
     plan[:, 3] = speed
     plan[:, 11] = np.asarray(T_IDXS) * speed * curvature
     plan[:, 14] = speed * curvature
-    return SimpleNamespace(plan=plan, desire_state=np.zeros(8))
+    return SimpleNamespace(plan=plan, desire_state=np.zeros(8),
+                           pose_std=None, road_transform=None, road_transform_std=None)
 
 
 def _probe_output(flow, sign):
