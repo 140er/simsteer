@@ -30,8 +30,11 @@ def load_flow(value, data_dir):
     # Uncalibrated Camera must invalidate Steering without dereferencing
     # malformed saved controls. Use the constructor so the real loader runs.
     flow = new_flow(lc=FakeLiveCalib())
+    if value["step"] == "steering":
+        flow.tick(Obs(now=.05, dt=.05, v=20.))
     flow.engage_block()
-    flow.tick(Obs(now=.05, dt=.05, v=20.))
+    if value["step"] != "steering":
+        flow.tick(Obs(now=.05, dt=.05, v=20.))
     assert flow.step is Step.FOV
     assert "using defaults" in take_state_warnings(data_dir)
 
