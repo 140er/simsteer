@@ -8,8 +8,9 @@ PINNED_SHA256 = {
     "vision_sha256": "ee29ee5bce84d1ce23e9ff381280de9b4e4d96d2934cd751740354884e112c66",
     "policy_sha256": "78477124cbf3ffe30fa951ebada8410b43c4242c6054584d656f1d329b067e15",
 }
-# Bump when adapter semantics change, including builds without source files.
-MODEL_ADAPTER_VERSION = 2
+# Bump for semantic changes to model inputs, decoding, shapes or constants.
+# Comments and formatting must not invalidate saved calibration Checks.
+ADAPTER_VERSION = 3
 
 
 def _sha256(path: Path) -> str:
@@ -21,20 +22,8 @@ def _sha256(path: Path) -> str:
 
 
 def pinned_model_identity() -> dict:
-    identity = {"source_revision": MODEL_SOURCE_REVISION,
-                "adapter_version": MODEL_ADAPTER_VERSION, **PINNED_SHA256}
-    # Source deployments also bind semantic adapter edits automatically.
-    # Only contents and stable module names enter the digest, never paths.
-    digest = hashlib.sha256()
-    for name in ("constants.py", "preprocess.py", "postprocess.py"):
-        path = Path(__file__).with_name(name)
-        if not path.is_file():
-            break
-        digest.update(name.encode())
-        digest.update(path.read_bytes())
-    else:
-        identity["adapter_sha256"] = digest.hexdigest()
-    return identity
+    return {"source_revision": MODEL_SOURCE_REVISION,
+            "adapter_version": ADAPTER_VERSION, **PINNED_SHA256}
 
 
 def actual_model_identity(vision: Path, policy: Path) -> dict:

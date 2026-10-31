@@ -14,9 +14,10 @@ from dataclasses import asdict, dataclass, field
 PASS_SCORE = 0.5
 SATURATION_AXIS = 0.9
 MAX_LANE_OFFSET_M = 1.8
-# At 20 Hz, opposite-sign offsets jumping this far indicate ego-lane
-# reassignment, rather than ordinary continuous motion within one lane.
+# At 20 Hz, this change across a short window indicates ego-lane
+# reassignment, including brief probability dips and smoothed transitions.
 LANE_REASSIGNMENT_JUMP_M = 2.0
+LANE_REASSIGNMENT_WINDOW_FRAMES = 5
 MAX_LOG_RATIO = 0.5
 STRAIGHT_YAW_RAD_S = 0.06
 STRAIGHT_MIN_SPEED_MPS = 8.0
@@ -89,6 +90,7 @@ class CheckStats:
     off_crossings: int = 0
     off_last: float = 0.0
     off_last_valid: bool = False
+    off_recent: list[float | None] = field(default_factory=list)
     ratio_total: int = 0
     ratio_n: int = 0
     ratio_log_sum: float = 0.0
@@ -103,14 +105,23 @@ class CheckStats:
 
     def add_offset(self, offset_m: float | None, *, lane_change: bool = False) -> None:
         if lane_change:
+            self.off_recent.clear()
             self.off_last_valid = False
             return
         self.off_total += 1
-        if not _finite(offset_m):
+        finite = _finite(offset_m)
+        crossing = finite and any(
+            previous is not None and offset_m * previous < 0
+            and abs(offset_m - previous) > LANE_REASSIGNMENT_JUMP_M
+            for previous in self.off_recent)
+        if crossing:
+            # One re-reference can span several frames; count it once.
+            self.off_recent.clear()
+        self.off_recent.append(offset_m if finite else None)
+        del self.off_recent[:-LANE_REASSIGNMENT_WINDOW_FRAMES]
+        if not finite:
             self.off_last_valid = False
             return
-        crossing = (self.off_last_valid and offset_m * self.off_last < 0
-                    and abs(offset_m - self.off_last) > LANE_REASSIGNMENT_JUMP_M)
         self.off_n += 1
         self.off_excursions += abs(offset_m) > MAX_LANE_OFFSET_M or crossing
         self.off_crossings += crossing

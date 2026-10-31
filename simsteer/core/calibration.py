@@ -24,11 +24,14 @@ in main.py.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
+
+from simsteer.core.finite import NonFiniteError, require_finite
 
 from simsteer.paths import load_with_fallback, state_path
 
@@ -237,22 +240,34 @@ class Calibration:
         if path is None:
             path = load_with_fallback("calibration", game)
         if path is not None and path.exists():
-            data = json.loads(path.read_text())
-            data.setdefault("simple_warp_version", 1)
-            if (data.get("simple_warp", True)
-                    and data["simple_warp_version"] != SIMPLE_WARP_VERSION):
-                # Keep the old version until CalibFlow clears the saved
-                # learner and Check too; a restart cannot skip migration.
-                data["pitch_deg"] = data["yaw_deg"] = 0.0
-            return cls(**{k: v for k, v in data.items()
-                          if k in cls.__dataclass_fields__})
+            try:
+                data = json.loads(path.read_text())
+                # Check before migration can replace an invalid saved pose.
+                require_finite("calibration.load", **data)
+                data.setdefault("simple_warp_version", 1)
+                if (data.get("simple_warp", True)
+                        and data["simple_warp_version"] != SIMPLE_WARP_VERSION):
+                    # Retain the version until the flow also invalidates the
+                    # old camera learner and scored check.
+                    data["pitch_deg"] = data["yaw_deg"] = 0.0
+                loaded = cls(**{k: v for k, v in data.items()
+                                if k in cls.__dataclass_fields__})
+                require_finite("calibration.load", **asdict(loaded))
+                return loaded
+            except (NonFiniteError, ValueError, TypeError):
+                logging.getLogger(__name__).warning("Invalid calibration; using defaults")
         return cls() if fov_h_deg is None else cls(fov_h_deg=fov_h_deg)
 
     def save(self, game: str | None = None,
              path: Path | None = None) -> None:
         if path is None:
             path = state_path("calibration", game)
-        path.write_text(json.dumps(asdict(self), indent=2))
+        try:
+            require_finite("calibration.save", **asdict(self))
+        except NonFiniteError:
+            logging.getLogger(__name__).warning("Not saving non-finite calibration")
+            return
+        path.write_text(json.dumps(asdict(self), indent=2, allow_nan=False))
 
     def update_for_frame(self, frame_shape: tuple[int, int]) -> None:
         """Sync image_w/image_h to the frame we're actually capturing."""

@@ -139,6 +139,7 @@ class Tuner:
         self.wizard, self.cal_routine, self.calib_flow = wizard, cal_routine, calib_flow
         self._startup_game = game or self.settings.game
         self._selected_game = self._startup_game
+        self._restart_request = None
         self._game_choices = {"Auto": "auto"}
         self._game_choices.update({p.display_name: p.id for p in registry().profiles})
         self._hud_state: HudState | None = None
@@ -670,6 +671,7 @@ class Tuner:
             self._root.after(POLL_MS, self._poll)
 
     def _refresh(self):
+        self._refresh_bind_status()
         self._sync_mode()
         self._sync_controls()
         self._refresh_restart()
@@ -863,8 +865,6 @@ class Tuner:
     def _save_and_restart(self):
         if not restart_required(self._startup_game, self._selected_game):
             return
-        import os
-        import subprocess
         import sys
 
         self.settings.save()
@@ -872,11 +872,11 @@ class Tuner:
         if not getattr(sys, "frozen", False):
             args += ["-m", "simsteer"]
         args += [*sys.argv[1:], "--game", self._selected_game]
-        try:
-            subprocess.Popen(args)
-            os._exit(0)
-        except OSError:
-            self._restart_button.configure(text="Retry")
+        self._restart_request = args
+
+    def take_restart_request(self):
+        args, self._restart_request = self._restart_request, None
+        return args
 
     def _on_device_change_seg(self, value):
         if self.device is None:
@@ -948,31 +948,15 @@ class Tuner:
             self._set_bind_status("Disengage with Insert")
             return
 
-        def run():
-            # Keep the selected backend stable if the toolbar changes device.
-            backend, is_wheel, raw = self.device.device, self.device.is_wheel, self.device.raw
-            for n in (4, 3, 2, 1):
-                if self.device.engaged or self.device.device is not backend:
-                    self._set_bind_status("Cancelled")
-                    return
-                self._set_bind_status(f"{label} in {n} s")
-                threading.Event().wait(1)
-            if self.device.engaged or self.device.device is not backend:
-                self._set_bind_status("Cancelled")
-                return
+        if self.device.request_bind(kind):
             self._set_bind_status(f"Binding {label}")
-            try:
-                if is_wheel:
-                    backend.wiggle(kind)
-                else:
-                    from tools.bind_helper import wiggle
+        else:
+            self._set_bind_status("Cancelled")
 
-                    wiggle(raw, kind)
-                self._set_bind_status("Done")
-            except Exception as exc:
-                self._set_bind_status(str(exc))
-
-        threading.Thread(target=run, daemon=True).start()
+    def _refresh_bind_status(self):
+        status = getattr(self.device, "binding_status", "")
+        if status and self._bind_status_label is not None:
+            self._bind_status_label.configure(text=status)
 
     def _set_bind_status(self, text):
         if self._root is not None:

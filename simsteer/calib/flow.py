@@ -337,7 +337,8 @@ class CalibFlow:
 
     def _invalidate_check(self, reason: str) -> None:
         old_controls = (self._check_context or {}).get("controls", {})
-        device_changed = old_controls.get("device_id") != self._context_provider().get("device_id")
+        device_changed = (old_controls.get("device_id") is not None
+                          and old_controls["device_id"] != self._context_provider().get("device_id"))
         self.redo_note = "Check again: " + reason
         self.result = {**evaluate(CheckStats(), self.check_policy).to_dict(),
                        "reason": self.redo_note}

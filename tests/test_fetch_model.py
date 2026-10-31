@@ -61,4 +61,4 @@ def test_pin_is_a_full_commit_and_sha256s():
     assert identity["vision_sha256"] == mod.MODELS["driving_vision.onnx"][1]
     assert identity["policy_sha256"] == mod.MODELS["driving_policy.onnx"][1]
     assert identity["adapter_version"]
-    assert len(identity["adapter_sha256"]) == 64
+    assert "adapter_sha256" not in identity  # Comments are not model semantics.

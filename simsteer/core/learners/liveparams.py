@@ -41,6 +41,7 @@ auto-migrated on load.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -48,6 +49,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+
+from simsteer.core.finite import NonFiniteError, require_finite
 
 from simsteer.paths import load_with_fallback, state_path
 
@@ -252,6 +255,7 @@ TRUSTED_MIN_EACH_TURN = 10
 TRUSTED_MIN_WHEEL = 0.003
 TRUSTED_SPEED_BIN_MPS = 3.0
 TRUSTED_MIN_SPEED_SPAN_MPS = 3.0
+TRUSTED_MIN_SPEED_BIN_SAMPLES = 10
 TRUST_COVERAGE_VERSION = 1
 
 # Auto-freeze: once we've accumulated this many samples the fit is
@@ -268,6 +272,7 @@ class _Persisted:
     samples: int = 0
     axis_sign: int | None = None
     coverage: dict[str, list[int]] = field(default_factory=dict)
+    coverage_speed_ranges: dict[str, list[float]] = field(default_factory=dict)
     coverage_speed_min: float | None = None
     coverage_speed_max: float | None = None
     legacy_fit: bool = False
@@ -314,6 +319,7 @@ class LiveParams:
         self.x = np.array([loaded.a, loaded.b, loaded.c], dtype=np.float64)
         self.axis_sign = loaded.axis_sign
         self.coverage = loaded.coverage
+        self.coverage_speed_ranges = loaded.coverage_speed_ranges
         self.coverage_speed_min = loaded.coverage_speed_min
         self.coverage_speed_max = loaded.coverage_speed_max
         self.legacy_fit = loaded.legacy_fit
@@ -533,12 +539,18 @@ class LiveParams:
 
     @property
     def coverage_speed_span(self) -> float:
-        if self.coverage_speed_min is not None and self.coverage_speed_max is not None:
-            return self.coverage_speed_max - self.coverage_speed_min
-        # Older coverage has bins only. Use their conservative lower bound,
-        # never a span inferred from crossing a single bin boundary.
-        bins = [int(k) for k in self.coverage]
-        return max(0, max(bins) - min(bins) - 1) * TRUSTED_SPEED_BIN_MPS if bins else 0.0
+        lows, highs = [], []
+        for key, counts in self.coverage.items():
+            if sum(counts) < TRUSTED_MIN_SPEED_BIN_SAMPLES:
+                continue
+            # Old bins have no per-bin extrema. Their inner edges give a
+            # conservative bound; a single old global outlier proves nothing.
+            low, high = self.coverage_speed_ranges.get(
+                key, [(int(key) + 1) * TRUSTED_SPEED_BIN_MPS,
+                      int(key) * TRUSTED_SPEED_BIN_MPS])
+            lows.append(low)
+            highs.append(high)
+        return max(0.0, max(highs) - min(lows)) if lows else 0.0
 
     @property
     def trust_progress(self) -> float:
@@ -596,6 +608,8 @@ class LiveParams:
         zero on degenerate data (e.g. lots of straight-line samples
         with no rack excitation). Sign of a is preserved — RLS still
         owns the sign discovery."""
+        self.validate_state()
+        require_finite("liveparams", target=target_wheel_rad, speed=v_ego)
         a, b, c = float(self.x[0]), float(self.x[1]), float(self.x[2])
         if 0.0 <= a < A_ABS_MIN_RUNTIME:
             a = A_ABS_MIN_RUNTIME
@@ -603,6 +617,7 @@ class LiveParams:
             a = -A_ABS_MIN_RUNTIME
         v2 = v_ego * v_ego
         axis = a * target_wheel_rad + b * target_wheel_rad * v2 + c
+        require_finite("liveparams", axis=axis)
         return float(axis)
 
     @property
@@ -639,6 +654,7 @@ class LiveParams:
                      - self.x[1] * wheel * v2) / wheel
         alpha = INTERVENTION_LEARN_RATE
         new_a = (1.0 - alpha) * self.x[0] + alpha * implied_a
+        require_finite("liveparams.intervention", coefficient=new_a)
         # Magnitude clamp (keep sign).
         sign_a = -1.0 if new_a < 0 else 1.0
         self.x[0] = sign_a * min(A_ABS_MAX, abs(new_a))
@@ -655,6 +671,9 @@ class LiveParams:
         gates without mutating the per-game profile. Only the keys
         present override; missing keys fall through to `self._gates`.
         ETS2's strict module-level defaults stay untouched."""
+        require_finite("liveparams.sample", axis=game_steer, speed=v_ego,
+                       wheel=wheel_angle_rad, command=commanded_axis, gates=gate_override)
+        self.validate_state()
         if game_steer is None:
             return
         # Per-call gate dict. Without an override this is just the
@@ -774,7 +793,7 @@ class LiveParams:
         forget = self.adaptive_forget()
         denom = forget + float(H @ self.P @ H)
         K = (self.P @ H) / denom
-        self.x = self.x + K * innovation
+        next_x = self.x + K * innovation
         # Standard RLS covariance update + Kalman process noise.
         # Without the `+ Q` term P shrinks monotonically and the
         # filter eventually stops responding to new information
@@ -782,7 +801,9 @@ class LiveParams:
         # keeps it alive — what openpilot's `paramsd` does via its
         # EKF process-noise matrix. `Q` here is the override-merged
         # version when a gate_override was passed in.
-        self.P = (self.P - np.outer(K, H @ self.P)) / forget + Q
+        next_P = (self.P - np.outer(K, H @ self.P)) / forget + Q
+        require_finite("liveparams.update", coefficients=next_x, covariance=next_P)
+        self.x, self.P = next_x, next_P
 
         # Bounds-clamp each parameter. `a` keeps its sign; `b` is
         # sign-locked to `a` (the stiffness term is always in the same
@@ -797,8 +818,11 @@ class LiveParams:
         self.samples += 1
         self.session_samples += 1
         if abs(wheel) >= TRUSTED_MIN_WHEEL:
-            counts = self.coverage.setdefault(str(int(v_lagged // TRUSTED_SPEED_BIN_MPS)), [0, 0])
+            key = str(int(v_lagged // TRUSTED_SPEED_BIN_MPS))
+            counts = self.coverage.setdefault(key, [0, 0])
             counts[int(wheel > 0)] += 1
+            bounds = self.coverage_speed_ranges.setdefault(key, [v_lagged, v_lagged])
+            bounds[0], bounds[1] = min(bounds[0], v_lagged), max(bounds[1], v_lagged)
             self.coverage_speed_min = (v_lagged if self.coverage_speed_min is None
                                        else min(self.coverage_speed_min, v_lagged))
             self.coverage_speed_max = (v_lagged if self.coverage_speed_max is None
@@ -866,6 +890,7 @@ class LiveParams:
         self.samples = 0
         self.session_samples = 0
         self.coverage = {}
+        self.coverage_speed_ranges = {}
         self.coverage_speed_min = self.coverage_speed_max = None
         self.legacy_fit = False
         self.end_validation()
@@ -965,7 +990,8 @@ class LiveParams:
             return _seeded()
         try:
             data = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
+            require_finite("liveparams.load", state=data)
+        except (json.JSONDecodeError, OSError, NonFiniteError):
             return _seeded()
         # New format: {"a", "b", "c", "samples"}.
         if "a" in data:
@@ -974,7 +1000,7 @@ class LiveParams:
                 b = float(data.get("b", B_INIT))
                 c = float(data.get("c", C_INIT))
                 samples = int(data.get("samples", 0))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, OverflowError):
                 return _seeded()
         else:
             # Legacy format: {"scale", "offset", "samples"}. Migrate:
@@ -1011,7 +1037,8 @@ class LiveParams:
         # Use the LARGER (ETS2) c-bound here as the "obviously garbage"
         # threshold — accept files that came from any profile, runtime
         # gate clamps them tighter on the next RLS step if needed.
-        in_bounds = (abs(a) <= A_ABS_MAX
+        in_bounds = (np.isfinite([a, b, c, samples]).all()
+                     and abs(a) <= A_ABS_MAX
                      and abs(b) <= B_ABS_MAX
                      and abs(c) <= _GATES_DEFAULT["c_abs_max"])
         if not in_bounds:
@@ -1028,11 +1055,25 @@ class LiveParams:
         speed_min, speed_max = data.get("coverage_speed_min"), data.get("coverage_speed_max")
         if not all(type(v) in (int, float) and np.isfinite(v) for v in (speed_min, speed_max)):
             speed_min = speed_max = None
+        ranges = data.get("coverage_speed_ranges", {})
+        if not isinstance(ranges, dict):
+            ranges = {}
+        ranges = {k: v for k, v in ranges.items()
+                  if k in coverage and isinstance(v, list) and len(v) == 2
+                  and all(type(n) in (int, float) and np.isfinite(n) for n in v)
+                  and int(k) * TRUSTED_SPEED_BIN_MPS <= v[0] <= v[1]
+                  < (int(k) + 1) * TRUSTED_SPEED_BIN_MPS}
         legacy_fit = data.get("legacy_fit", data.get("coverage_version") is None
                               and samples >= TRUSTED_MIN_SAMPLES and not coverage) is True
         return _Persisted(a=a, b=b, c=c, samples=samples, axis_sign=axis_sign,
-                          coverage=coverage, coverage_speed_min=speed_min,
+                          coverage=coverage, coverage_speed_ranges=ranges,
+                          coverage_speed_min=speed_min,
                           coverage_speed_max=speed_max, legacy_fit=legacy_fit)
+
+    def validate_state(self) -> None:
+        require_finite("liveparams.state", coefficients=self.x, covariance=self.P,
+                       axis=list(self._axis_buf), speed=list(self._v_buf),
+                       commands=list(self._commanded_buf), samples=self.samples)
 
     def save(self, path: Path | None = None) -> None:
         if path is None:
@@ -1043,6 +1084,7 @@ class LiveParams:
                 key = f"{self.game}_{self.device_kind}"
             path = state_path("liveparams", key)
         try:
+            self.validate_state()
             path.write_text(json.dumps({
                 "a": self.a_linear,
                 "b": self.b_quad,
@@ -1050,11 +1092,14 @@ class LiveParams:
                 "samples": self.samples,
                 "axis_sign": self.axis_sign,
                 "coverage": self.coverage,
+                "coverage_speed_ranges": self.coverage_speed_ranges,
                 "coverage_version": TRUST_COVERAGE_VERSION,
                 "coverage_speed_min": self.coverage_speed_min,
                 "coverage_speed_max": self.coverage_speed_max,
                 "legacy_fit": self.legacy_fit,
-            }, indent=2))
+            }, indent=2, allow_nan=False))
+        except NonFiniteError as exc:
+            logging.getLogger(__name__).warning("Not saving non-finite state: %s", exc)
         except OSError:
             pass
 
@@ -1088,6 +1133,7 @@ class LiveParams:
         self.x = np.array([loaded.a, loaded.b, loaded.c], dtype=np.float64)
         self.axis_sign = loaded.axis_sign
         self.coverage = loaded.coverage
+        self.coverage_speed_ranges = loaded.coverage_speed_ranges
         self.coverage_speed_min = loaded.coverage_speed_min
         self.coverage_speed_max = loaded.coverage_speed_max
         self.legacy_fit = loaded.legacy_fit

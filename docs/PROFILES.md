@@ -146,9 +146,12 @@ built-in default.
 
 A trusted fit needs at least 100 accepted samples, including 10 samples
 per turn with wheel magnitude at least 0.003 rad and a measured speed span
-of at least 3 m/s across those excited samples. At one speed, `wheel` and
-`wheel*v^2` are collinear, so
-sample count cannot identify the two steering coefficients independently.
+of at least 3 m/s across those excited samples. Each 3 m/s speed bin must
+contain at least 10 excited samples before its measured speed range can
+contribute to that span; one outlier cannot establish it. Older saved bins
+without per-bin ranges use conservative inner bin edges. At one speed,
+`wheel` and `wheel*v^2` are collinear, so sample count cannot identify the
+two steering coefficients independently.
 Steering progress includes coverage; the HUD names the missing turn or speed
 variation. Older mature fits without coverage can attempt Check, and keep
 normal engagement only if Check passes. A failed Check resets them for
@@ -168,7 +171,9 @@ independent-motion and steering-fit requirements.
 Check freezes the fit before collecting validation observations and resumes
 that snapshot after a restart. Training innovations do not count. Lane
 changes are excluded; offsets beyond 1.8 m count as excursions. Opposite-sign
-offset jumps over 2 m indicate ego-lane reassignment; an uncommanded crossing
+offset changes over 2 m within five frames indicate ego-lane reassignment,
+bridging brief missing observations and smoothed transitions. Commanded lane
+changes clear that window; an uncommanded crossing
 fails the lane measurement. Required
 measurements need their minimum sample count and at least 80% of their
 offered observations. Check also needs 120 engaged seconds and at least
@@ -181,9 +186,10 @@ the outcome changes and at most once per second otherwise.
 
 Saved certification is bound to the camera geometry, output device and id,
 controller settings, profile capabilities, model hashes, adapter identity
-and certification schema. Model startup hashes the loaded files. Source
-deployments also hash adapter sources; packaged semantic adapter changes
-must increment `MODEL_ADAPTER_VERSION`. A
+and certification schema. Model startup hashes the loaded files. Semantic
+changes to model inputs, decoding, tensor shapes or constants must increment
+`ADAPTER_VERSION` in `core/model_identity.py`, in source and packaged builds.
+Comments and formatting do not change that version or invalidate a Check. A
 detected output binding reversal revokes direction verification. Changed
 context requires an explicit Check again; missing evidence does not spend
 a failed-fit attempt. In perspective mode, camera-learning changes within
@@ -191,6 +197,7 @@ a failed-fit attempt. In perspective mode, camera-learning changes within
 larger cumulative changes require Check again. FOV, crop, warp and control
 settings still invalidate immediately. This includes the k/l turn-in keys.
 A changed output device id requires a new stopped direction verification.
+An old state without a saved device id does not imply a device change.
 Earlier saved passes become `INSUFFICIENT_EVIDENCE`, with the previous result
 preserved as `legacy_result`. Camera and direction progress remain available.
 `FAILED` blocks engagement and neutralizes AI output until calibration restarts.
