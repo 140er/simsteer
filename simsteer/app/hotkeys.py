@@ -50,11 +50,12 @@ HOTKEYS: list[Hotkey] = [
            "still calibrating; press R to start over.",
            "Driving", "global"),
     Hotkey("lane_change_left", "NumPad 4", "Lane change LEFT",
-           "Sustained desire pulse to the model. Hold-time tunable on "
-           "the Lane Change tab.",
+           "One model pulse per request. State window sets steering, "
+           "calibration and HUD lane-change timing.",
            "Driving", "global"),
     Hotkey("lane_change_right", "NumPad 6", "Lane change RIGHT",
-           "Sustained desire pulse to the model.",
+           "One model pulse per request. State window sets steering, "
+           "calibration and HUD lane-change timing.",
            "Driving", "global"),
     Hotkey("nav_queue_left", "Page Up", "NAV: queue LEFT maneuver",
            "Adds a left maneuver to the NAV queue; fires at the trigger "

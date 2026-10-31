@@ -183,14 +183,16 @@ old PID's habit of fighting LiveParams. The HUD `axis:` line shows
 ## Lane change
 
 Press **NumPad 4 / 6** (overlay or global) to trigger a left/right lane
-change. This feeds a sustained desire pulse to the model for
-**Hold duration** seconds; the model commits the maneuver on its own.
+change. Each request sends one rising-edge desire pulse to the model;
+the model decides when the maneuver ends. **State window** controls how
+long SimSteer treats the request as mid-lane-change for steering,
+calibration and HUD state. It does not extend the model input.
 There is no separate steering boost — that matches openpilot (lane
 changes are model-driven).
 
 | Knob | Notes |
 |---|---|
-| **Hold duration (s)** | How long the desire pulse is held. A single-frame pulse washes out of the model's 5 s context; ~2.5 s gives it enough to commit. Bump to 4–5 s if changes feel half-hearted. |
+| **State window (s)** | How long SimSteer keeps its lane-change state active for steering, calibration and HUD. Increasing it does not strengthen the model's lane change. |
 
 ---
 
@@ -247,5 +249,5 @@ consecutive blocks.
 | Persistent drift to one side | **Axis bias**, or let closed-loop trim settle. |
 | Oversteers / wobbles in lane | Lower **Steer max** or **Authority**; check LiveParams `a` isn't inflated. |
 | Truck stopped steering / wild oversteer after off-highway | LiveParams corrupted → **Reset RLS**, reconverge on highway. |
-| Lane change stalls mid-maneuver | Raise **Hold duration**. |
+| Lane-change state ends too soon | Raise **State window** to extend steering, calibration and HUD gating. |
 | Won't engage | Calibration not trusted yet (drive more), low FPS (DirectML), or no telemetry. |
