@@ -68,6 +68,20 @@ class Settings:
         # literal — share-state hazard. Resolve to a fresh empty list.
         if self.disabled_hotkeys is None:
             self.disabled_hotkeys = []
+        # Runtime overrides are deliberately outside the persisted dataclass.
+        self._runtime_overrides: dict = {}
+
+    def override(self, **values) -> None:
+        """Apply values for this run, retaining their persisted baseline."""
+        for name, value in values.items():
+            self._runtime_overrides.setdefault(name, getattr(self, name))
+            setattr(self, name, value)
+
+    def set_persistent(self, **values) -> None:
+        """An explicit user edit replaces any runtime override of that field."""
+        for name, value in values.items():
+            self._runtime_overrides.pop(name, None)
+            setattr(self, name, value)
 
     @classmethod
     def load(cls) -> "Settings":
@@ -113,7 +127,9 @@ class Settings:
         nice-to-have, not critical to the loop."""
         try:
             p = data_dir() / _SETTINGS_FILE
-            p.write_text(json.dumps(asdict(self), indent=2),
+            saved = asdict(self)
+            saved.update(self._runtime_overrides)
+            p.write_text(json.dumps(saved, indent=2),
                          encoding="utf-8")
         except OSError:
             pass

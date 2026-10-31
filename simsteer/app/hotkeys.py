@@ -79,15 +79,14 @@ HOTKEYS: list[Hotkey] = [
            "Shows/hides the small preview of what the model is "
            "actually seeing.",
            "View", "overlay"),
-    Hotkey("hud_mode", "H", "Toggle HUD: user / dev",
-           "User mode is the clean panel layout; dev mode is the "
-           "stack-of-debug-text dump.",
+    Hotkey("hud_mode", "H", "Developer mode",
+           "Toggle the HUD diagnostics and tuner workbench together.",
            "View", "overlay"),
 
     # Calibration
-    Hotkey("mirror_sign", "M", "Mirror lateral sign",
-           "Flip the steering / overlay convention if everything is "
-           "left-right inverted on a fresh install.",
+    Hotkey("mirror_sign", "M", "Mirror road overlay",
+           "Mirror the road projection. With wheel telemetry, steering "
+           "direction is measured automatically. Without it, also flip steering.",
            "Calibration", "overlay"),
     Hotkey("save_calib", "C", "Save calibration.json",
            "Persists the current camera pose + lateral_sign immediately.",
@@ -96,9 +95,13 @@ HOTKEYS: list[Hotkey] = [
            "Restores pitch / yaw / FOV / height to dataclass defaults.",
            "Calibration", "overlay", danger=True),
     Hotkey("recalibrate", "R", "Recalibrate",
-           "Wipe LiveCalib + LiveParams + first-drive flag and restart "
-           "the wizard. Force-disengages first.",
+           "Wipe the camera pose and steering fit and restart the "
+           "calibration at FOV. Force-disengages first.",
            "Calibration", "overlay", danger=True),
+    Hotkey("keep_fov", "Backspace", "Keep current FOV",
+           "During calibration, keep your FOV instead of the measured "
+           "one. INSERT accepts the measured one.",
+           "Calibration", "overlay"),
     Hotkey("fov_minus", "[", "FOV −1°",
            "Narrow capture FOV by 1°. FOV is static — set it to match "
            "your in-game horizontal FOV.",
@@ -154,6 +157,11 @@ HOTKEYS: list[Hotkey] = [
 # Map for O(1) lookup by id, built once at import.
 _BY_ID: dict[str, Hotkey] = {h.id: h for h in HOTKEYS}
 
+_DEVELOPER_ONLY = {
+    "mirror_sign", "save_calib", "reset_calib_defaults", "fov_minus", "fov_plus",
+    "pitch_minus", "pitch_plus", "height_minus", "height_plus", "input_inset",
+}
+
 # Map from key-display-name to id for some convenience reverse-lookups.
 KEY_TO_ID: dict[str, str] = {h.key: h.id for h in HOTKEYS}
 
@@ -167,6 +175,8 @@ def hk_enabled(hotkey_id: str, settings: "Settings | None") -> bool:
     None (called before Settings is wired) or the id is unknown."""
     if settings is None:
         return True
+    if hotkey_id in _DEVELOPER_ONLY and settings.hud_mode != "dev":
+        return False
     return hotkey_id not in (settings.disabled_hotkeys or [])
 
 

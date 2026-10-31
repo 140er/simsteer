@@ -79,6 +79,14 @@ class DrivingModel:
             maxlen=self.DESIRE_BUF_LEN,
         )
 
+    def vision_only(self, img: np.ndarray, big_img: np.ndarray) -> np.ndarray:
+        """Run the vision model alone and return its flat output. Vision is
+        stateless given the stacked frame pair, so this leaves the policy's
+        feature buffer untouched."""
+        out = self.vision.run(None, {"img": img.astype(np.uint8, copy=False),
+                                     "big_img": big_img.astype(np.uint8, copy=False)})
+        return out[0].astype(np.float32).reshape(-1)
+
     def step(self, img: np.ndarray, big_img: np.ndarray | None = None,
              desire: np.ndarray | None = None,
              traffic_convention: tuple[float, float] = (0.0, 1.0),

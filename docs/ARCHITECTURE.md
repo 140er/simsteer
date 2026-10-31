@@ -98,7 +98,9 @@ These exist because we drive a *game* off a *screen capture* with a
 - **Screen capture + game telemetry adapters** — comma reads a real
   camera and CAN; we read a window and a telemetry plugin/UDP/shared-mem.
 - **Virtual device output** — ViGEm pad / vJoy wheel.
-- **UX layer** — `wizard.py` (first-drive calibration), `preflight.py`
+- **Calibration**: `simsteer/calib/`, one flow per game and device
+  (FOV, Camera, Steering, a scored Check) with a status API for setup.
+- **UX layer** — `preflight.py`
   (driver/plugin checks), `settings.py`, `paths.py`, `hotkeys.py`,
   `audio.py`, `tuner.py`, `nav.py` (NOOP-style lane-change queue),
   `probe.py` (active steering perturbation to excite the rack fit during
@@ -114,7 +116,7 @@ slow learners.
 | Removed | Tuned | Failure | Replacement |
 |---|---|---|---|
 | `LiveLookahead` | `lookahead_s` from NCC of game_steer vs yaw | drifted; openpilot ships a fixed per-car delay anyway | static `lookahead_s` (= `steerActuatorDelay`) |
-| `LiveFov` | `fov_h_deg` from `vx_model / v_ego` | vx is a function of the warp's FOV → positive feedback → FOV ran to 44° when the real in-game FOV was ~120° | static manual FOV + a read-only HUD ratio to tune by hand |
+| `LiveFov` | `fov_h_deg` from `vx_model / v_ego` | vx is a function of the warp's FOV → positive feedback → FOV ran to 44° when the real in-game FOV was ~120°. The solve also had the ratio upside down: a FOV set too wide makes the model read slow, not fast | one measurement per calibration FOV step, at fixed candidate FOVs that never touch the applied value, accepted by the player (`simsteer/runtime/fov.py`) |
 | `LiveAuthority` | `steer_authority` from `lane_k / plan_k` | oscillated against LiveParams; latched wrong | static `steer_authority` |
 | `LiveAnticipation` | `curvature_anticipation_s` from yaw tracking error | oscillated against the rate limit + LiveParams | static `curvature_anticipation_s` slider |
 
@@ -123,6 +125,12 @@ the thing you're adjusting. Camera intrinsics, actuator delay, and gain
 are set once (openpilot treats them as per-car constants); only the rack
 fit and camera *pose* are learned online, because those have clean,
 independent observations (telemetry wheel angle, model pose vector).
+
+The pose is only independent when the warp applies all of it. The
+default simple warp shifts the horizon for pitch and ignores yaw, so
+LiveCalib's residual stays partly a function of what it wrote and the
+pose creeps. With that warp the calibration flow measures the pose once
+from zero in its Camera step and stops LiveCalib after it.
 
 ## Files at a glance
 

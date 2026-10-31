@@ -104,6 +104,13 @@ def yuv6_to_bgr(yuv6: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(yuv_i420, cv2.COLOR_YUV2BGR_I420)
 
 
+def model_views(bgr: np.ndarray,
+                calib: "Calibration | None") -> tuple[np.ndarray, np.ndarray]:
+    """One frame as the (narrow, wide) YUV6 pair the vision model stacks."""
+    narrow_bgr, wide_bgr = crop_for_model(bgr, calib)
+    return bgr_to_yuv6(narrow_bgr), bgr_to_yuv6(wide_bgr)
+
+
 class FrameQueue:
     """Holds the last 5 YUV6 frames per camera (narrow + wide) and emits
     the (1, 12, 128, 256) tensors the vision model wants — frames at
