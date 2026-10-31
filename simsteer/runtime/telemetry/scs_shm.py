@@ -49,6 +49,11 @@ OFF_TRUCK_WHEEL_STEERING = 1200   # float[16] radians, per wheel
 # 6th zone (vectors) starts at 1640. config_fv (228 bytes) -> truck_fv at 1868.
 # truck_fv layout: lv_acc(12) av_acc(12) acc(12) aa_acc(12) cabinAV(12) cabinAA(12)
 OFF_CABIN_AV_Y = 1920             # float rotations/s, cabin angular velocity Y
+# Revision 12 config_s starts at 2300: brand ID, brand display name,
+# truck ID, each a 64-byte NUL-terminated UTF-8 string.
+OFF_TRUCK_BRAND_ID = 2300
+OFF_TRUCK_ID = 2428
+STRING_SIZE = 64
 
 
 class ScsTelemetry:
@@ -116,6 +121,23 @@ class ScsTelemetry:
     def user_steer(self) -> float | None:
         """Raw input steering in [-1, +1] before in-game smoothing/sensitivity."""
         return self._read_float(OFF_TRUCK_USER_STEER)
+
+    def vehicle_id(self) -> str | None:
+        """Stable truck type from revision 12; retain it across pauses.
+
+        No player identifiers, registration plates or display names enter
+        the calibration context. Unknown layouts require confirmation.
+        """
+        if self._mm is None:
+            return None
+        try:
+            if struct.unpack_from("<I", self._mm, OFF_PLUGIN_REV)[0] != 12:
+                return None
+            parts = [bytes(self._mm[offset:offset + STRING_SIZE]).split(b"\0", 1)[0].decode("utf-8")
+                     for offset in (OFF_TRUCK_BRAND_ID, OFF_TRUCK_ID)]
+            return ":".join(parts) if all(parts) else None
+        except (struct.error, UnicodeError):
+            return None
 
     def wheel_angle_rad(self, wheelbase_m: float = 1.0) -> float | None:
         """Mean steering angle of the front (steering) wheels, in radians.

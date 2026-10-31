@@ -47,11 +47,12 @@ from simsteer.core.learners.livecalib import (
 from simsteer.core.learners.liveparams import TRUSTED_MIN_SAMPLES
 from simsteer.core.model_identity import pinned_model_identity
 from simsteer.paths import state_path
+from simsteer.state import atomic_save_json, read_json_object, state_warning
 from simsteer.runtime.fov import (
     CANDIDATE_OFFSETS, CANDIDATE_SAMPLES, ESTIMATE_SAMPLES, FovSolver,
 )
 
-CALIB_VERSION = 5
+CALIB_VERSION = 6
 # Perspective calibration continues to adapt. Compare to the certified pose,
 # not the previous frame, so accumulated drift still revokes the certificate.
 POSE_ANGLE_TOLERANCE_DEG = 0.5
@@ -60,9 +61,11 @@ FULL_CHECK_LOG_INTERVAL_S = 1.0
 
 
 def contexts_match(saved: dict | None, current: dict) -> bool:
-    if not saved:
+    if not isinstance(saved, dict) or not saved:
         return False
     old_camera, camera = saved.get("camera", {}), current.get("camera", {})
+    if not isinstance(old_camera, dict) or not isinstance(camera, dict):
+        return False
     if old_camera.get("simple_warp", True) or camera.get("simple_warp", True):
         return saved == current
     old_camera, camera = old_camera.copy(), camera.copy()
@@ -332,6 +335,9 @@ class CalibFlow:
 
     def confirm_check(self) -> None:
         """An explicit engage request acknowledges an invalidated check."""
+        if (self.step in (Step.CHECK, Step.DONE)
+                and not contexts_match(self._check_context, self._context())):
+            self._invalidate_check("calibration context changed")
         if self.step is Step.CHECK:
             self._check_requested = True
 
@@ -473,6 +479,9 @@ class CalibFlow:
         """Why engaging is not allowed yet, or "" when it is."""
         if self.step is Step.FAILED:
             return "calibration failed: R restarts"
+        if (self.step in (Step.CHECK, Step.DONE)
+                and not contexts_match(self._check_context, self._context())):
+            return "Calibration context changed: press INSERT to check again"
         if not self._check_requested:
             return "Check again: press INSERT"
         if self.step is Step.FOV:
@@ -932,21 +941,24 @@ class CalibFlow:
         self._last_save = self._now
         if not self._persist:
             return
-        try:
-            flow_path(self.game, self.device).write_text(
-                json.dumps(self.to_dict(), indent=2), encoding="utf-8")
-        except OSError:
-            pass
+        atomic_save_json(flow_path(self.game, self.device), self.to_dict())
 
     def _load(self) -> bool:
         if not self._persist:
             return False
         p = flow_path(self.game, self.device)
         try:
-            d = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            d = read_json_object(p)
+            return self._restore(d)
+        except FileNotFoundError:
             return False
-        if (d.get("version") not in (2, 3, 4, CALIB_VERSION) or d.get("game") != self.game
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            state_warning(p, "unreadable; using defaults")
+            self._reset_state()
+            return False
+
+    def _restore(self, d: dict) -> bool:
+        if (d.get("version") not in (2, 3, 4, 5, CALIB_VERSION) or d.get("game") != self.game
                 or d.get("device") != self.device):
             return False
         try:
@@ -970,8 +982,10 @@ class CalibFlow:
             self._check_context = d.get("check_context")
             self._check_model = d.get("check_model")
             self._check_requested = bool(d.get("check_requested", True))
+            if self.result is not None and not isinstance(self.result, dict):
+                raise ValueError("invalid Check result")
         except (KeyError, ValueError, TypeError):
-            return False
+            raise ValueError("invalid calibration progress") from None
         if (self.calib.simple_warp
                 and (self.calib.simple_warp_version != SIMPLE_WARP_VERSION
                      or d.get("simple_warp_version", 1) != SIMPLE_WARP_VERSION)):
@@ -980,13 +994,17 @@ class CalibFlow:
         if self.step is Step.FOV and self.fov_proposal is None:
             self._config_pending = self._fov_config is not None
         if self.step in (Step.CHECK, Step.DONE):
-            if (d.get("version") != CALIB_VERSION or not contexts_match(self._check_context, self._context())
+            controls = self._context_provider()
+            vehicle_unknown = "vehicle" in controls and controls["vehicle"] is None
+            if (vehicle_unknown or d.get("version") != CALIB_VERSION
+                    or not contexts_match(self._check_context, self._context())
                     or self._check_model is None
                     or (self.step is Step.DONE
                         and not certified_result(self.result, self._check_context))):
                 if self.result and self.legacy_result is None:
                     self.legacy_result = self.result
-                self._invalidate_check("saved evidence is outdated")
+                self._invalidate_check("vehicle identity unavailable; confirm this setup"
+                                       if vehicle_unknown else "saved evidence is outdated")
             else:
                 if self.step is Step.CHECK:
                     self.lp.begin_validation(self._check_model)

@@ -34,6 +34,10 @@ class Telemetry(Protocol):
     Every reader returns `None` from the value methods when the datum
     is momentarily unreadable (plugin handshake not complete, stale
     map), so the loop can fall back to a default rather than crash.
+
+    Readers may also expose `vehicle_id() -> str | None` for binding
+    saved calibration to a vehicle. Without it, a saved Check requires
+    confirmation at the next launch.
     """
 
     @property

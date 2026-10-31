@@ -56,7 +56,6 @@ Algorithm matches openpilot:
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import time
@@ -70,6 +69,7 @@ import numpy as np
 from simsteer.core.finite import NonFiniteError, require_finite
 
 from simsteer.paths import state_path
+from simsteer.state import atomic_save_json, read_json_object, state_warning
 from simsteer.core.warp import euler_from_rot, rot_from_euler
 
 if TYPE_CHECKING:
@@ -685,8 +685,7 @@ class LiveCalib:
                 "rejected": int(self.rejected),
                 "cal_status": int(self.cal_status),
             }
-            state_path("livecalib_state", game).write_text(
-                json.dumps(payload, indent=2, allow_nan=False))
+            atomic_save_json(state_path("livecalib_state", game), payload)
         except NonFiniteError as exc:
             logging.getLogger(__name__).warning("Not saving non-finite state: %s", exc)
         except OSError:
@@ -699,9 +698,10 @@ class LiveCalib:
         if not p.exists():
             return
         try:
-            data = json.loads(p.read_text())
+            data = read_json_object(p)
             require_finite("livecalib.load", state=data)
-        except (json.JSONDecodeError, OSError, NonFiniteError):
+        except (OSError, ValueError, TypeError, OverflowError):
+            state_warning(p, "unreadable; using defaults")
             return
         try:
             rpys = [np.asarray(r, dtype=np.float64) for r in data.get("rpys", [])]
@@ -723,6 +723,7 @@ class LiveCalib:
             if estimate is not None and estimate.shape != (3,):
                 return
         except (ValueError, TypeError, OverflowError):
+            state_warning(p, "unreadable; using defaults")
             return
         # Validate the whole snapshot before adopting any of it.
         self._rpys = deque(rpys, maxlen=INPUTS_WANTED)

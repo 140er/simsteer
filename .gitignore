@@ -29,11 +29,16 @@ logs/
 
 # Per-user calibration + controller tuning
 calibration.json
+calibration_*.json
 controller.json
+controller_*.json
+calibflow*.json
+settings.json
 # Per-user live-fitted state (regenerated from telemetry on each session)
 liveparams.json
 liveparams_*.json
 livecalib_state_*.json
+livecalib_state.json
 # First-drive wizard completion flags (per game)
 first_drive_done_*.flag
 

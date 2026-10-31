@@ -9,12 +9,12 @@ not running. A running session restarts through `CalibFlow.request_restart`.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 
 from simsteer.calib.flow import CALIB_VERSION, TITLES, Step, flow_path
 from simsteer.calib.score import certified_result
 from simsteer.paths import state_path
+from simsteer.state import read_json_object
 
 
 @dataclass(frozen=True)
@@ -41,16 +41,18 @@ class CalibStatus:
 
 def status(game: str, device: str) -> CalibStatus:
     try:
-        d = json.loads(flow_path(game, device).read_text(encoding="utf-8"))
+        d = read_json_object(flow_path(game, device))
     except (OSError, ValueError):
         d = {}
-    if d.get("version") in (2, 3, 4) and d.get("step") in ("done", "check"):
+    if d.get("version") in (2, 3, 4, 5) and d.get("step") in ("done", "check"):
         return CalibStatus(game, device, False, "check", None, None,
                            "check", "Check again")
     if d.get("version") != CALIB_VERSION:
         return CalibStatus(game, device, False, None, None, None, None, None)
     step = d.get("step")
     result = d.get("result") or {}
+    if not isinstance(result, dict):
+        result = {}
     passed = certified_result(result, d.get("check_context"))
     calibrated = step == Step.DONE.value and passed
     redo = None if passed else result.get("redo")

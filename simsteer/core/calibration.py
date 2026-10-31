@@ -16,14 +16,12 @@ pitch about +Y (positive pitch tilts the camera down).
 This is correct only when the road is flat and the camera is centered
 laterally. Both are reasonable for ETS2 highway cruising.
 
-The calibration is persisted to `calibration.json` at the project root so
-it survives restarts. Tune it live in the overlay with the keys defined
-in main.py.
+The calibration is persisted in the per-user data directory. Tune it live
+in the overlay with the keys defined in main.py.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 from dataclasses import asdict, dataclass
@@ -34,6 +32,7 @@ import numpy as np
 from simsteer.core.finite import NonFiniteError, require_finite
 
 from simsteer.paths import load_with_fallback, state_path
+from simsteer.state import atomic_save_json, dataclass_values, read_json_object, state_warning
 
 # Back-compat aliases: existing call sites and tools (tools/test_per_game_state.py)
 # import these names from pilot.calibration. The canonical implementations live
@@ -241,7 +240,7 @@ class Calibration:
             path = load_with_fallback("calibration", game)
         if path is not None and path.exists():
             try:
-                data = json.loads(path.read_text())
+                data = dataclass_values(cls, read_json_object(path))
                 # Check before migration can replace an invalid saved pose.
                 require_finite("calibration.load", **data)
                 data.setdefault("simple_warp_version", 1)
@@ -253,10 +252,21 @@ class Calibration:
                 loaded = cls(**{k: v for k, v in data.items()
                                 if k in cls.__dataclass_fields__})
                 require_finite("calibration.load", **asdict(loaded))
+                loaded.validate()
                 return loaded
-            except (NonFiniteError, ValueError, TypeError):
-                logging.getLogger(__name__).warning("Invalid calibration; using defaults")
+            except (OSError, ValueError, TypeError, OverflowError):
+                state_warning(path, "unreadable; using defaults")
         return cls() if fov_h_deg is None else cls(fov_h_deg=fov_h_deg)
+
+    def validate(self) -> None:
+        if not (0 < self.image_w <= 32768 and 0 < self.image_h <= 32768
+                and 0 < self.fov_h_deg < 180 and 0 < self.height_m <= 100
+                and -90 <= self.pitch_deg <= 90 and -180 <= self.yaw_deg <= 180
+                and self.lateral_sign in (-1, 1)
+                and 0 <= self.cx_frac <= 1 and 0 <= self.cy_frac <= 1
+                and 0 <= self.crop_top_pct <= 0.45 and 0 <= self.crop_bottom_pct <= 0.45
+                and self.simple_warp_version > 0):
+            raise ValueError("invalid camera geometry")
 
     def save(self, game: str | None = None,
              path: Path | None = None) -> None:
@@ -267,7 +277,7 @@ class Calibration:
         except NonFiniteError:
             logging.getLogger(__name__).warning("Not saving non-finite calibration")
             return
-        path.write_text(json.dumps(asdict(self), indent=2, allow_nan=False))
+        atomic_save_json(path, asdict(self))
 
     def update_for_frame(self, frame_shape: tuple[int, int]) -> None:
         """Sync image_w/image_h to the frame we're actually capturing."""

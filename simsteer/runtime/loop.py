@@ -59,6 +59,8 @@ from simsteer.core.model import DrivingModel
 from simsteer.core.postprocess import decode
 from simsteer.core.preprocess import FrameQueue, model_views, yuv6_to_bgr
 from simsteer.games.base import GameProfile, get_profile
+from simsteer.paths import data_dir
+from simsteer.state import take_state_warnings
 from simsteer.runtime.capture import Capture, CaptureConfig
 from simsteer.runtime.fov import FovSolver, model_vision
 from simsteer.runtime.faults import neutral_decoded
@@ -159,14 +161,14 @@ def run(settings: Settings, game: GameProfile | str, *,
     `headless` opens no window, no tuner and reads no keys.
 
     Pinned-game only for now: the live `GameDetector` + `SessionManager`
-    hot-swap arrives in Phase 2. Per-game state (calibration, controller
-    config, liveparams, livecalib) is read from the same files v1 uses,
-    so an existing v1 calibration carries over."""
+    hot-swap arrives in Phase 2. Per-game state is loaded from the
+    per-user data directory and validated before use."""
     profile = get_profile(game) if isinstance(game, str) else game
     if profile is None:
         print(f"unknown game: {game!r}")
         return 2
     game_id = profile.id
+    state_root = data_dir()
     if source is None:
         source = Capture(CaptureConfig(target_fps=20))
     if make_telemetry is None:
@@ -198,6 +200,13 @@ def run(settings: Settings, game: GameProfile | str, *,
     def passive_fit_allowed() -> bool:
         return profile.capabilities.passive_fit_safe or settings.passive_fit
 
+    pad: DeviceManager | None = None
+    if not settings.no_gamepad:
+        pad = DeviceManager(initial_kind=settings.device,
+                            vjoy_device_id=settings.vjoy_device)
+        if pad.kind is None:
+            print(f"device init failed: {pad.last_error} — overlay-only")
+
     vision = model_vision(model)
     flow = CalibFlow(
         game_id, settings.device, live_calib=live_calib,
@@ -210,16 +219,11 @@ def run(settings: Settings, game: GameProfile | str, *,
         certification_context=lambda: {
             "controller": asdict(ctrl_cfg), "device": settings.device,
             "device_id": settings.vjoy_device,
+            "binding": getattr(pad, "binding_identity", None),
+            "vehicle": getattr(tel, "vehicle_id", lambda: None)(),
             "capabilities": asdict(profile.capabilities)},
         make_fov_solver=lambda: FovSolver(vision, model_views),
         fov_config=profile_reader(profile.camera.fov_source))
-
-    pad: DeviceManager | None = None
-    if not settings.no_gamepad:
-        pad = DeviceManager(initial_kind=settings.device,
-                            vjoy_device_id=settings.vjoy_device)
-        if pad.kind is None:
-            print(f"device init failed: {pad.last_error} — overlay-only")
 
     # Tk owns its windows; publish presentation snapshots from this loop.
     tuner = None
@@ -363,6 +367,9 @@ def run(settings: Settings, game: GameProfile | str, *,
                         stop_output("Restarting")
                         break
                 frame_idx += 1
+                state_notice = take_state_warnings(state_root)
+                if state_notice:
+                    set_banner(state_notice, COL_ACCENT_RED, 10.0)
                 t_grab = time.perf_counter()
                 frame = cap.grab()
                 fresh_frame = frame is not None

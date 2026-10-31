@@ -292,7 +292,8 @@ def evaluate(stats: CheckStats, policy: CheckPolicy = CheckPolicy()) -> Verdict:
 
 def certified_result(result: dict | None, context: dict | None) -> bool:
     """Legacy booleans and scores alone are not saved certificates."""
-    if (not result or not context or result.get("status") != "PASS"
+    if (not isinstance(result, dict) or not isinstance(context, dict)
+            or not result or not context or result.get("status") != "PASS"
             or result.get("passed") is not True or result.get("missing") != []
             or result.get("context") != context):
         return False

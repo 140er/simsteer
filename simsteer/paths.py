@@ -6,8 +6,8 @@ an extraction directory that is wiped on exit. Writes there are lost. So:
   - Read-only assets (model .onnx files, bundled DLLs, docs) live in
     `bundle_dir()`. PyInstaller's `datas=[...]` ships things here.
   - Writable state (per-game calibration, liveparams, livecalib_state, profile
-    flags) lives in `data_dir()`, which is `%LOCALAPPDATA%\\SimSteer\\` when
-    frozen and the repo root when not.
+    flags) lives in `data_dir()`: `%LOCALAPPDATA%\\SimSteer\\` on Windows,
+    `$XDG_DATA_HOME/SimSteer` (or `~/.local/share/SimSteer`) elsewhere.
 
 Per project policy: NO seeding from bundle into data_dir on first launch.
 Each user calibrates fresh, every game.
@@ -45,23 +45,24 @@ def bundle_dir() -> Path:
 def data_dir() -> Path:
     """Writable state. Created on first call.
 
-    Frozen: `%LOCALAPPDATA%\\SimSteer\\`.
-    Dev:    the repo root (so existing JSONs at the project root still load).
-    `SIMSTEER_DATA_DIR`, when set, overrides both.
+    Source and bundled runs use the same per-user location. Repository
+    calibration files are never imported. `SIMSTEER_DATA_DIR` overrides
+    the location for isolated replays and explicit portable setups.
     """
     override = os.environ.get("SIMSTEER_DATA_DIR")
     if override:
         d = Path(override)
         d.mkdir(parents=True, exist_ok=True)
         return d
-    if is_frozen():
+    if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA")
         if not base:
             base = str(Path.home() / "AppData" / "Local")
-        d = Path(base) / _APP_NAME
-        d.mkdir(parents=True, exist_ok=True)
-        return d
-    return Path(__file__).resolve().parent.parent
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    d = Path(base) / _APP_NAME
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def state_path(base_name: str, game: str | None = None) -> Path:

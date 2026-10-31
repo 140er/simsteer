@@ -5,45 +5,19 @@ CLI flags still win for the current run (so a dev can `--device wheel`
 to override their saved setting), but anything the user picks in the
 tuner's Setup tab lands here and applies on the next launch.
 
-Lives at `%LOCALAPPDATA%\\SimSteer\\settings.json` when bundled, or at
-the repo root in dev mode (via `simsteer.paths.data_dir()`).
+Lives in the per-user data directory (via `simsteer.paths.data_dir()`).
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass, fields
-from types import UnionType
-from typing import Union, get_args, get_origin, get_type_hints
+from typing import get_type_hints
 
 from simsteer.paths import data_dir
+from simsteer.state import atomic_save_json, loaded_value as _loaded_value, read_json_object, state_warning
 
 
 _SETTINGS_FILE = "settings.json"
-
-
-def _loaded_value(value, expected):
-    """Validate JSON types without parsing strings or truncating fractions."""
-    if type(value) is expected:
-        return value
-    origin = get_origin(expected)
-    args = get_args(expected)
-    if origin in (Union, UnionType):
-        for member in args:
-            try:
-                return _loaded_value(value, member)
-            except (TypeError, ValueError, OverflowError):
-                continue
-    elif expected is float and type(value) is int:
-        return float(value)
-    elif expected is int and type(value) is float and value.is_integer():
-        return int(value)
-    elif origin is list and isinstance(value, list):
-        return [_loaded_value(item, args[0]) for item in value]
-    elif origin is dict and isinstance(value, dict):
-        return {_loaded_value(k, args[0]): _loaded_value(v, args[1])
-                for k, v in value.items()}
-    raise ValueError("incompatible setting type")
 
 
 @dataclass
@@ -115,10 +89,9 @@ class Settings:
         if not p.exists():
             return cls()
         try:
-            raw = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return cls()
-        if not isinstance(raw, dict):
+            raw = read_json_object(p)
+        except (OSError, ValueError):
+            state_warning(p, "unreadable; using defaults")
             return cls()
         if "passive_fit_ets2" in raw:
             raw.setdefault("passive_fit", raw.pop("passive_fit_ets2"))
@@ -133,19 +106,14 @@ class Settings:
                 kwargs[k] = _loaded_value(v, hints[k])
             except (TypeError, ValueError, OverflowError):
                 print(f"warning: invalid setting {k!r}; using default")
+                state_warning(p, "has invalid values; using defaults")
         return cls(**kwargs)
 
     def save(self) -> None:
-        """Write to disk. Failures are swallowed — settings are
-        nice-to-have, not critical to the loop."""
-        try:
-            p = data_dir() / _SETTINGS_FILE
-            saved = asdict(self)
-            saved.update(self._runtime_overrides)
-            p.write_text(json.dumps(saved, indent=2),
-                         encoding="utf-8")
-        except OSError:
-            pass
+        """Save a complete snapshot, preserving the last one on failure."""
+        saved = asdict(self)
+        saved.update(self._runtime_overrides)
+        atomic_save_json(data_dir() / _SETTINGS_FILE, saved)
 
     def path(self) -> str:
         """Filesystem path for display in the UI."""

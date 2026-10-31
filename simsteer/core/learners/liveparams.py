@@ -40,7 +40,6 @@ auto-migrated on load.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from collections import deque
@@ -53,6 +52,7 @@ import numpy as np
 from simsteer.core.finite import NonFiniteError, require_finite
 
 from simsteer.paths import load_with_fallback, state_path
+from simsteer.state import atomic_save_json, read_json_object, state_warning
 
 CONFIG_PATH = state_path("liveparams")
 
@@ -989,9 +989,10 @@ class LiveParams:
         if path is None or not path.exists():
             return _seeded()
         try:
-            data = json.loads(path.read_text())
+            data = read_json_object(path)
             require_finite("liveparams.load", state=data)
-        except (json.JSONDecodeError, OSError, NonFiniteError):
+        except (OSError, ValueError, TypeError, OverflowError):
+            state_warning(path, "unreadable; using defaults")
             return _seeded()
         # New format: {"a", "b", "c", "samples"}.
         if "a" in data:
@@ -1085,7 +1086,7 @@ class LiveParams:
             path = state_path("liveparams", key)
         try:
             self.validate_state()
-            path.write_text(json.dumps({
+            atomic_save_json(path, {
                 "a": self.a_linear,
                 "b": self.b_quad,
                 "c": self.c_bias,
@@ -1097,7 +1098,7 @@ class LiveParams:
                 "coverage_speed_min": self.coverage_speed_min,
                 "coverage_speed_max": self.coverage_speed_max,
                 "legacy_fit": self.legacy_fit,
-            }, indent=2, allow_nan=False))
+            })
         except NonFiniteError as exc:
             logging.getLogger(__name__).warning("Not saving non-finite state: %s", exc)
         except OSError:
