@@ -677,6 +677,7 @@ def test_native_display_extension_preserves_physical_mode_and_uses_primary_flag(
     import struct
     api, desktop = make_desktop()
     original = api.capture()
+    api.enable(r"ROOT\DISPLAY\0000")
     assert api.extend_primary(r"ROOT\DISPLAY\0000", original, 1920, 1080)["name"] == "virtual"
     ordered = [event for event in desktop.events if event in
                ("extend", "vdd-active", "physical-stage", "virtual-stage", "null-apply")]

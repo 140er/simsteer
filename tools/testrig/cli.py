@@ -7,8 +7,8 @@ import sys
 
 from . import RigError
 from .guard import require_free
-from .display import recover_leftover_displays
-from .display_api import NativeDisplay, device_instance
+from .display import primary_plan, recover_leftover_displays
+from .display_api import NativeDisplay
 from .session import Session
 from .state import lock
 from .windows import Windows
@@ -34,6 +34,7 @@ def parser():
     command.add_argument("--display", choices=("vdd",), help="extend desktop with VDD as primary")
     command.add_argument("--vdd-device", help="exact installed virtual display adapter PnP instance ID")
     command.add_argument("--overlay", action="store_true", default=None, help="black capture-excluded physical display cover")
+    command.add_argument("--enable-vdd", action="store_true", default=None, help="plan-primary only: enable a disabled VDD temporarily")
     command.add_argument("--max-seconds", type=int, help="display worker lifetime (default/max: 1800)")
     command.add_argument("--launch-cancelled", action="store_true", help="restore only: confirm an unresolved Steam launch was cancelled")
     return command
@@ -53,6 +54,8 @@ def main(argv=None, *, backend=None):
             command.error(f"--{name.replace('_', '-')} must be {low}–{high}")
     if args.launch_cancelled and args.action != "restore":
         command.error("--launch-cancelled is only valid with restore")
+    if args.enable_vdd and (args.game != "display" or args.action != "plan-primary"):
+        command.error("--enable-vdd is only valid with display plan-primary")
     if args.game == "ac" and args.xinput_slot is not None:
         command.error("--xinput-slot is supported by ETS2; AC uses its default X360 pad selection")
     if args.game == "guard" and args.action:
@@ -67,19 +70,24 @@ def main(argv=None, *, backend=None):
     if args.game == "display":
         if args.action != "plan-primary" or not args.vdd_device:
             command.error("display requires plan-primary and --vdd-device")
-        if set(options) - {"vdd_device", "width", "height"}:
-            command.error("plan-primary only accepts --vdd-device, --width and --height")
+        if set(options) - {"vdd_device", "width", "height", "enable_vdd"}:
+            command.error("plan-primary only accepts --vdd-device, --width, --height and --enable-vdd")
         try:
+            backend = backend or Windows()
+            root = args.state_dir
+            if root is None and os.environ.get("LOCALAPPDATA"):
+                root = Path(os.environ["LOCALAPPDATA"]) / "SimSteer/testrig"
+            if root is None:
+                raise RigError("LocalAppData is unavailable; specify a private --state-dir")
+            root = root.absolute()
+            for directory in recover_leftover_displays(root, backend, backend.snapshot()):
+                print("testrig: recovered display layout: " + directory, file=sys.stderr)
             api = NativeDisplay()
-            original = api.capture()
-            original["displays"] = [item for item in original["displays"]
-                if device_instance(item.get("adapter_path", "")) != args.vdd_device.casefold()]
-            if not original["displays"]:
-                raise RigError("Primary plan requires an active physical display")
-            result = api.plan_primary(args.vdd_device, original, args.width or 1920, args.height or 1080)
+            result = primary_plan(root, args.session, backend, api, args.vdd_device,
+                                  args.width or 1920, args.height or 1080, enable_vdd=bool(args.enable_vdd))
             print(json.dumps({"dry_run": True, "activation_flags": "0x84", **result}, indent=2))
             return 0
-        except (RigError, OSError, ValueError) as exc:
+        except (RigError, OSError, ValueError, KeyboardInterrupt) as exc:
             print(f"testrig: {exc}", file=sys.stderr)
             return 2
     if args.action == "plan-primary":

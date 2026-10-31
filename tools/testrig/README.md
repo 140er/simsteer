@@ -194,9 +194,35 @@ performed, and no existing cloud profile is copied.
 
 ## Virtual display and physical cover
 
-The VDD must already be installed and disabled. Specify its exact virtual display
-adapter instance ID; the tool rejects physical adapters and already enabled
-devices. The caller needs permission to enable/disable that device.
+The VDD must already be installed and normally stays disabled between tests.
+Specify its exact virtual display adapter instance ID; the tool rejects physical
+adapters. The caller needs permission to enable/disable that device. Run the guard
+first, then preview the proposed primary layout before starting a game:
+
+```powershell
+python -m tools.testrig guard
+python -m tools.testrig display plan-primary --enable-vdd --session preview-01 --vdd-device "<virtual adapter instance ID>" --width 1920 --height 1080
+```
+
+`--enable-vdd` requires device problem code 22 (disabled) under the command lock.
+The preview records the original active topology and its enable/restore intents
+before enabling only that VDD. It waits up to 10 seconds for the CCD source to
+appear, computes the plan, restores the saved paths/modes byte-identically, then
+disables the VDD. Cleanup attempts both restore and disable after any failure,
+including an enable call that changed the device before failing. The plan prints
+only after cleanup verifies; a restore or disable failure exits nonzero and keeps
+the receipt for recovery. The preview never applies extend or the planned primary
+layout, starts a game, or shows a cover.
+
+Without `--enable-vdd`, an already enabled VDD can be queried without changing its
+device state or applying a layout. A disabled VDD gives an explicit rerun message;
+it need not be manually enabled. With `--enable-vdd`, an already enabled device is
+refused and left alone. Keep the plan JSON private. It includes supplied paths,
+modes, positions and an active-preservation result for each physical target.
+
+After a successful preview, use a new game session. `prepare` records the test
+configuration; `start` enables the disabled VDD for the session, and cleanup
+disables it again:
 
 ```powershell
 python -m tools.testrig ac prepare --session display-01 --display vdd --vdd-device "<virtual adapter instance ID>" --width 1920 --height 1080
@@ -221,7 +247,9 @@ The display worker performs this sequence:
    is primary at (0,0) and every physical display's size and x,y position match.
    Only an activation timeout or SET_PRIMARY failure permits the supplied CCD
    fallback: fresh active paths, validate (0x60), then apply (0xA0), with neither
-   ALLOW_CHANGES nor SAVE_TO_DATABASE. All physical targets remain in that plan.
+   ALLOW_CHANGES nor SAVE_TO_DATABASE. Before validation, the plan checks every
+   saved physical target is still present and active; a missing, replaced or
+   inactive target refuses the fallback before any supplied apply.
 4. Cover only the physical displays with opaque, nonactivating black windows using
    `WDA_EXCLUDEFROMCAPTURE`. The physical monitors remain powered on and awake.
 5. Start the temporary windowed configuration at the requested VDD resolution,
@@ -240,14 +268,12 @@ Windows 10 build 19041 or later. The worker verifies affinity, but the live runn
 must still verify capture shows the actual game on the intended output. Do not
 assume an existing capture selection follows a new primary display automatically.
 
-For a read-only preview, use `python -m tools.testrig display plan-primary
---vdd-device '<PnP instance>' --width 1920 --height 1080`. It queries the current
-topology and prints the proposed supplied paths, modes and positions without
-enabling a device, applying settings, recovering sessions or launching a game.
-The VDD must already be enumerable; an unavailable or ambiguous target is reported
-instead of guessed. Keep the JSON private. The session receipt's `display_calls`
-records API names, symbolic/numeric results, flags, DEVMODE fields, positions,
-resolution and frequency, and the supplied paths/modes for diagnosis.
+The session receipt's `display_calls` records API names, symbolic/numeric results,
+flags, DEVMODE fields, positions, resolution and frequency, and supplied paths/modes
+for diagnosis. Unresolvable inactive combinations are skipped without accumulating
+lookup errors; active-path failures remain explicit. Temporary extend and fallback
+calls do not save to the display database; the existing original-topology restore
+uses `0x2A0` (supplied, apply, save).
 
 An independent session worker also runs when no display option is selected. It
 holds its startup parent's process handle and watches the simulation using process
@@ -265,10 +291,18 @@ A killed worker or OS failure can prevent
 cleanup code from running; `restore` uses the saved receipt to recover. Do not
 delete its state until topology, VDD disable and file restoration all verify.
 
-Before `status`, `guard`, `prepare` or `start`, the CLI scans the selected state
-root for incomplete VDD receipts from an earlier Windows boot. It restores those
-display layouts first, disables the recorded VDD, and reports the recovery. A
-failure refuses the command. A session with a live recorded worker or owned process
+Before `status`, `guard`, `prepare`, `start` or `display plan-primary`, the CLI scans
+the selected state root for incomplete VDD receipts. Interrupted previews have a
+receipt under `plan-primary/<session>/display-state.json` and recover after a kill
+on the same boot as well as after reboot or power loss. The next command restores
+the saved topology, disables the recorded VDD, and reports recovery before
+proceeding. A live preview caller or outstanding device-operation child is left
+alone; unresolved cleanup refuses the command. Use the same `--state-dir` when
+retrying and keep the receipt until recovery verifies. A killed process cannot
+clean up immediately; recovery requires a subsequent command.
+
+Game-session recovery is automatic only for an earlier Windows boot. A session
+with a live recorded worker or owned process
 is always left alone, comparing PID, creation time and path, including a second
 check under the command lock before recovery. Boot identity uses the boot counter
 when available. The fallback requires a boot-time change exceeding five minutes

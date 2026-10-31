@@ -7,9 +7,10 @@ import subprocess
 import sys
 import time
 import ntpath
+import uuid
 
 from . import RigError
-from .display_api import BlackOverlay, NativeDisplay
+from .display_api import BlackOverlay, NativeDisplay, device_instance
 from .guard import same_process
 from .state import atomic_json, read_json
 from .state import Journal, lock, reject_links, monitor_covers, valid_time
@@ -27,7 +28,9 @@ class DisplayLifecycle:
         self.row.setdefault("warnings", [])
         self.api.display_calls = self.row.setdefault("display_calls", [])
 
-    def start(self):
+    def start(self, *, plan_only=False):
+        if plan_only:
+            self.row["plan_only"] = True
         try:
             if self.options["display"] or self.options["overlay"]:
                 self.row["original"] = self.api.capture()
@@ -43,6 +46,12 @@ class DisplayLifecycle:
                 self.row.update(enable_intent=True, topology_intent=True)
                 self.save(self.row)
                 self.api.enable(instance)
+                if plan_only:
+                    self.api.wait_virtual(instance)
+                    self.row["plan"] = self.api.plan_primary(instance, self.row["original"],
+                                                           self.options["width"], self.options["height"])
+                    self.save(self.row)
+                    return self.row["plan"]
                 self.row["virtual"] = self.api.extend_primary(instance, self.row["original"],
                                                               self.options["width"], self.options["height"])
                 self.save(self.row)
@@ -53,8 +62,13 @@ class DisplayLifecycle:
             self.save(self.row)
         except BaseException as exc:
             self.row["errors"].append(str(exc))
-            self.close()
+            if not plan_only:
+                self.close()
             raise
+        finally:
+            if plan_only:
+                self.close()
+                require_plan_cleanup(self.row)
 
     def close(self):
         self.row["ready"] = False
@@ -85,7 +99,7 @@ class DisplayLifecycle:
                         self.row["warnings"].append("physical primary fallback: " + str(fallback))
                 else:
                     self.row["errors"].append(label + ": " + str(exc))
-        if not self.row["topology_restored"] and self.row["original"]:
+        if not self.row["topology_restored"] and self.row["original"] and not self.row.get("plan_only"):
             try:
                 self.api.restore_physical(self.row["original"])
                 self.row["topology_restored"] = True
@@ -95,6 +109,45 @@ class DisplayLifecycle:
             except BaseException as exc:
                 self.row["errors"].append("physical topology recovery: " + str(exc))
         self.save(self.row)
+
+
+def require_plan_cleanup(receipt):
+    if not all(receipt.get(key) for key in ("topology_restored", "vdd_disabled", "overlay_closed")):
+        raise RigError("plan-primary cleanup could not be verified: " +
+                       "; ".join(receipt.get("errors", []) + receipt.get("warnings", [])))
+
+
+def primary_plan(root, session, backend, api, instance, width, height, *, enable_vdd=False):
+    """Preview only; temporary device enablement uses the session receipt/cleanup."""
+    with lock(root):
+        state = api.device_state(instance)
+        if not enable_vdd:
+            if state == 22:
+                raise RigError("VDD is disabled; rerun with --enable-vdd to enable it for this dry run")
+            original = api.capture()
+            original["displays"] = [item for item in original["displays"]
+                if device_instance(item.get("adapter_path", "")) != instance.casefold()]
+            if not original["displays"]:
+                raise RigError("Primary plan requires an active physical display")
+            return api.plan_primary(instance, original, width, height)
+        if state != 22:
+            raise RigError("VDD must be disabled before the dry run; an already enabled device is refused")
+        path = root / "plan-primary" / session / "display-state.json"
+        reject_links(path)
+        if path.exists():
+            require_plan_cleanup(read_json(path))  # never overwrite an unresolved intent
+        snapshot = backend.snapshot()
+        if (not isinstance(snapshot.get("errors"), list) or snapshot["errors"]
+                or not isinstance(snapshot.get("processes"), list)):
+            raise RigError("Cannot establish plan-primary supervisor identity; process inventory is unreadable")
+        caller = next((row for row in snapshot["processes"] if row["pid"] == os.getpid()), None)
+        if not caller or not caller.get("created") or not caller.get("path"):
+            raise RigError("Cannot establish plan-primary supervisor identity")
+        options = {"display": "vdd", "overlay": False, "vdd_device": instance, "width": width, "height": height}
+        lifecycle = DisplayLifecycle(api, BlackOverlay(), lambda row: atomic_json(path, row), options, str(uuid.uuid4()))
+        lifecycle.row.update(options=options, display_worker=caller,
+                             **{key: snapshot.get(key) for key in ("boot_id", "boot_time", "boot_uptime", "boot_observed_at")})
+        return lifecycle.start(plan_only=True)
 
 
 def start_worker(journal, options, backend):
@@ -257,7 +310,8 @@ def worker(directory):
         if reason == "deadline":
             lifecycle.row["warnings"].append("Session deadline expired")
     except BaseException as exc:
-        lifecycle.row["errors"].append(str(exc))
+        if not lifecycle.row["errors"] or lifecycle.row["errors"][-1] != str(exc):
+            lifecycle.row["errors"].append(str(exc))
         # An unreadable/dead input monitor cannot authorize rolling back a
         # rewrite whose author is unknown.
         lifecycle.row["owner_input_seen"] = True
@@ -338,8 +392,8 @@ def previous_boot(data, snapshot):
 
 
 def recover_leftover_displays(root, backend, snapshot):
-    """Before a new command, recover incomplete display intents from older boots."""
-    if not root or not root.exists() or not snapshot.get("boot_id"):
+    """Recover old-boot sessions and interrupted dry runs; leave live owners alone."""
+    if not root or not root.exists():
         return []
     pending = []
     for game in ("ac", "ets2"):
@@ -352,7 +406,8 @@ def recover_leftover_displays(root, backend, snapshot):
             if not directory.is_dir() or not (directory / "display-state.json").exists():
                 continue
             journal = Journal(directory)
-            if not journal.data or session_alive(journal.data, snapshot) or not previous_boot(journal.data, snapshot):
+            if (not snapshot.get("boot_id") or not journal.data or session_alive(journal.data, snapshot)
+                    or not previous_boot(journal.data, snapshot)):
                 continue
             receipt = read_json(directory / "display-state.json")
             if receipt.get("session") != journal.data["id"]:
@@ -360,8 +415,21 @@ def recover_leftover_displays(root, backend, snapshot):
             if receipt.get("enable_intent") and not all(receipt.get(key) for key in
                     ("topology_restored", "vdd_disabled", "overlay_closed")):
                 pending.append(directory)
+    plans = []
+    parent = root / "plan-primary"
+    reject_links(parent)
+    if parent.exists():
+        for directory in parent.iterdir():
+            path = directory / "display-state.json"
+            reject_links(path)
+            if not directory.is_dir() or not path.exists():
+                continue
+            receipt = read_json(path)
+            if receipt.get("plan_only") and not all(receipt.get(key) for key in
+                    ("topology_restored", "vdd_disabled", "overlay_closed")):
+                plans.append(directory)
     recovered = []
-    if pending:
+    if pending or plans:
         with lock(root):
             for directory in pending:
                 journal = Journal(directory)
@@ -371,6 +439,25 @@ def recover_leftover_displays(root, backend, snapshot):
                 backend.stop_display(journal)
                 journal.data.setdefault("warnings", []).append("Recovered an incomplete display layout from a previous boot")
                 journal.save()
+                recovered.append(str(directory))
+            for directory in plans:
+                path = directory / "display-state.json"
+                receipt, current = read_json(path), backend.snapshot()
+                if (not isinstance(current.get("errors"), list) or current["errors"]
+                        or not isinstance(current.get("processes"), list)):
+                    raise RigError("Cannot recover plan-primary: process inventory is unreadable")
+                if session_alive(receipt, current):
+                    continue
+                worker = receipt.get("display_worker")
+                if not worker or not worker.get("path") or not worker.get("created"):
+                    raise RigError("Cannot recover plan-primary without its supervisor identity")
+                if any(row.get("parent") == worker["pid"] and row.get("name", "").lower() == "powershell.exe"
+                       and row.get("born", 0) >= worker.get("born", 0) for row in current["processes"]):
+                    raise RigError("Display PowerShell operation is still running; retain state and retry recovery")
+                lifecycle = DisplayLifecycle(NativeDisplay(), BlackOverlay(), lambda row: atomic_json(path, row),
+                                             receipt["options"], receipt["session"], receipt)
+                lifecycle.close()
+                require_plan_cleanup(lifecycle.row)
                 recovered.append(str(directory))
     return recovered
 
