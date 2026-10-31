@@ -3,6 +3,7 @@
 import base64
 import ctypes as C
 from ctypes import wintypes as W
+import json
 import struct
 import time
 
@@ -18,6 +19,10 @@ def device_instance(path):
     """Convert a CCD adapter interface path to its PnP instance, not hardware ID."""
     value = path.removeprefix("\\\\?\\").removeprefix("\\??\\")
     return value.split("#{", 1)[0].replace("#", "\\").casefold()
+
+
+class ActivationTimeout(RigError):
+    """The requested source remained absent from the active desktop."""
 
 
 class NativeDisplay:
@@ -77,7 +82,7 @@ class NativeDisplay:
             paths, modes = W.UINT(), W.UINT()
             status = self.user.GetDisplayConfigBufferSizes(flags, C.byref(paths), C.byref(modes))
             if status:
-                raise RigError(f"Cannot size the original display topology (Windows error {status})")
+                self._result("GetDisplayConfigBufferSizes", status, "Cannot size the original display topology", flags=hex(flags))
             if not paths.value or not modes.value:
                 if flags == 2:
                     raise RigError("Invalid/empty original display topology")
@@ -90,7 +95,8 @@ class NativeDisplay:
             if status == 122:  # ERROR_INSUFFICIENT_BUFFER
                 continue
             if status:
-                raise RigError(f"Cannot record display topology (Windows error {status})")
+                self._result("QueryDisplayConfig", status, "Cannot record display topology", flags=hex(flags),
+                             path_count=paths.value, mode_count=modes.value)
             return {"path_count": paths.value, "mode_count": modes.value,
                     "paths": encoded(bytes(path_data)[:paths.value * 72]),
                     "modes": encoded(bytes(mode_data)[:modes.value * 64])}
@@ -103,7 +109,8 @@ class NativeDisplay:
         struct.pack_into("<I", data, 16, identifier)
         status = self.user.DisplayConfigGetDeviceInfo(data)
         if status:
-            raise RigError(f"Cannot identify CCD display device (Windows error {status})")
+            self._result("DisplayConfigGetDeviceInfo", status, "Cannot identify CCD display device",
+                         kind=kind, identifier=identifier, adapter=bytes(luid).hex(), size=size)
         return bytes(data)[offset:].decode("utf-16-le").split("\0", 1)[0]
 
     def sources(self, *, active_only=False):
@@ -171,8 +178,132 @@ class NativeDisplay:
 
     def change(self, name, mode, flags):
         status = self.user.ChangeDisplaySettingsExW(name, mode, None, flags, None)
+        inputs = {"device": name, "flags": hex(flags)}
+        if mode is not None:
+            inputs.update(dmFields=hex(struct.unpack_from("<I", mode, 72)[0]),
+                          position=list(struct.unpack_from("<ii", mode, 76)),
+                          size=list(struct.unpack_from("<II", mode, 172)),
+                          bits_per_pixel=struct.unpack_from("<I", mode, 168)[0],
+                          frequency=struct.unpack_from("<I", mode, 184)[0], devmode=encoded(mode))
+        self._result("ChangeDisplaySettingsExW", status, "CDS stage" if name else "CDS apply", **inputs)
+
+    def _result(self, api, status, operation, **inputs):
+        names = ({0: "DISP_CHANGE_SUCCESSFUL", 1: "DISP_CHANGE_RESTART", -1: "DISP_CHANGE_FAILED",
+                  -2: "DISP_CHANGE_BADMODE", -3: "DISP_CHANGE_NOTUPDATED", -4: "DISP_CHANGE_BADFLAGS",
+                  -5: "DISP_CHANGE_BADPARAM", -6: "DISP_CHANGE_BADDUALVIEW"} if api == "ChangeDisplaySettingsExW" else
+                 {0: "ERROR_SUCCESS", 5: "ERROR_ACCESS_DENIED", 31: "ERROR_GEN_FAILURE", 50: "ERROR_NOT_SUPPORTED",
+                  87: "ERROR_INVALID_PARAMETER", 122: "ERROR_INSUFFICIENT_BUFFER", 1610: "ERROR_BAD_CONFIGURATION"})
+        symbol = names.get(status, "UNKNOWN_RETURN_CODE")
+        row = {"api": api, "return_code": status, "return_name": symbol, "operation": operation, "inputs": inputs}
+        self.__dict__.setdefault("display_calls", []).append(row)
         if status:
-            raise RigError(f"Display mode change failed for {name} (result {status})")
+            summary = {key: value for key, value in inputs.items() if key not in ("paths", "modes", "devmode")}
+            code = "result" if api == "ChangeDisplaySettingsExW" else "Windows error"
+            raise RigError(f"{operation}: {api} {symbol} ({code} {status}); inputs={json.dumps(summary, sort_keys=True)}")
+
+    def _set_config(self, config, flags, operation):
+        config = config or {"path_count": 0, "mode_count": 0, "paths": "", "modes": "", "layout": {}}
+        paths, modes = base64.b64decode(config["paths"]), base64.b64decode(config["modes"])
+        path_data = C.create_string_buffer(paths, len(paths)) if paths else None
+        mode_data = C.create_string_buffer(modes, len(modes)) if modes else None
+        status = self.user.SetDisplayConfig(config["path_count"], path_data, config["mode_count"], mode_data, flags)
+        self._result("SetDisplayConfig", status, operation, flags=hex(flags), **config)
+
+    def wait_active_virtual(self, instance, *, clock=time.monotonic, pause=time.sleep, flags="0x84"):
+        deadline, detail = clock() + 10, "VDD absent from QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS)"
+        while True:
+            try:
+                matches = {row["name"] for row in self.sources(active_only=True)
+                           if device_instance(row["adapter_path"]) == instance.casefold()}
+            except RigError as exc:
+                detail, matches = str(exc), set()
+            if len(matches) > 1:
+                raise RigError("QueryDisplayConfig(active) returned multiple active VDD sources; refusing primary switch")
+            if matches:
+                return next(iter(matches))
+            remaining = deadline - clock()
+            if remaining <= 0:
+                self._result("SetDisplayConfig", 0, "VDD activation timed out after 10s",
+                             flags=flags, device=instance, last_query=detail)
+                raise ActivationTimeout(f"VDD activation timed out after 10s; SetDisplayConfig ERROR_SUCCESS (Windows error 0); "
+                                        f"flags={flags}, device={instance}; {detail}")
+            pause(min(0.2, remaining))
+
+    def plan_primary(self, instance, original, width, height):
+        """Query a supplied configuration; never apply or enable a device here."""
+        physical = {item["name"]: item for item in self.physical_displays(original)}
+        offset = max(item["x"] + item["width"] for item in physical.values())
+        query = self.query(2)  # fresh active paths, including every physical target
+        raw = base64.b64decode(query["paths"])
+        paths = [bytearray(raw[index * 72:(index + 1) * 72]) for index in range(query["path_count"])]
+        modes = bytearray(base64.b64decode(query["modes"]))
+
+        def identity(path):
+            source = struct.unpack_from("<I", path, 8)[0]
+            return (self.device_info(1, path[:8], source, 84, 20),
+                    device_instance(self.device_info(4, path[:8], 0, 276, 20)))
+
+        if not any(identity(path)[1] == instance.casefold() for path in paths):
+            inventory = self.query(1)
+            all_paths = base64.b64decode(inventory["paths"])
+            candidates = {}
+            for index in range(inventory["path_count"]):
+                path = bytearray(all_paths[index * 72:(index + 1) * 72])
+                try:
+                    virtual = identity(path)[1] == instance.casefold()
+                except RigError:
+                    continue  # disconnected source combinations need not resolve
+                if virtual and struct.unpack_from("<I", path, 60)[0]:
+                    candidates[bytes(path[:12] + path[20:32])] = path
+            if len(candidates) != 1:
+                raise RigError(f"QueryDisplayConfig(all, flags=0x1, return 0): expected one available VDD path for {instance}; "
+                               f"found {len(candidates)}")
+            path = next(iter(candidates.values()))
+            mode = bytearray(64)
+            struct.pack_into("<II", mode, 0, 1, struct.unpack_from("<I", path, 8)[0])
+            mode[8:16] = path[:8]
+            struct.pack_into("<IIIii", mode, 16, width, height, 4, 0, 0)  # SOURCE, 32 BPP
+            struct.pack_into("<I", path, 12, len(modes) // 64)
+            struct.pack_into("<I", path, 68, struct.unpack_from("<I", path, 68)[0] | 1)
+            modes.extend(mode)
+            paths.append(path)
+        layout, virtual_paths = {}, []
+        for path in paths:
+            name, adapter = identity(path)
+            index = struct.unpack_from("<I", path, 12)[0]
+            start = index * 64
+            if (start + 64 > len(modes) or struct.unpack_from("<II", modes, start) !=
+                    (1, struct.unpack_from("<I", path, 8)[0]) or modes[start + 8:start + 16] != path[:8]):
+                raise RigError(f"QueryDisplayConfig(active, return 0): invalid source mode {index} for {name}")
+            if adapter == instance.casefold():
+                struct.pack_into("<II", modes, start + 16, width, height)
+                x, y = 0, 0
+                # Supply the source size; let best-mode logic choose missing
+                # target timing, without allowing changes to supplied modes.
+                struct.pack_into("<I", path, 32, 0xffffffff)
+                struct.pack_into("<III", path, 48, 0, 0, 0)
+                virtual_paths.append(path)
+            else:
+                if name not in physical:
+                    raise RigError(f"QueryDisplayConfig(active, return 0): unexpected active source {name}; primary plan refused")
+                saved = physical[name]
+                x, y = saved["x"] - offset, saved["y"]
+            struct.pack_into("<ii", modes, start + 28, x, y)
+            layout[name] = [x, y, *struct.unpack_from("<II", modes, start + 16)]
+        ordered = virtual_paths + [path for path in paths if path not in virtual_paths]
+        if len(ordered) * 72 + len(modes) > 1024 * 1024:
+            raise RigError(f"Supplied display inventory exceeds 1 MiB ({len(ordered)} paths, {len(modes) // 64} modes)")
+        return {"path_count": len(ordered), "mode_count": len(modes) // 64,
+                "paths": encoded(b"".join(ordered)), "modes": encoded(modes), "layout": layout}
+
+    def _supplied_primary(self, instance, original, width, height, reason):
+        try:
+            config = self.plan_primary(instance, original, width, height)
+            self._set_config(config, 0x60, "supplied primary validate")
+            self._set_config(config, 0xa0, "supplied primary apply")
+            return self.wait_active_virtual(instance, flags="0xa0")
+        except RigError as exc:
+            raise RigError(f"{reason}; supplied primary fallback: {exc}") from exc
 
     def wait_virtual(self, instance, *, clock=time.monotonic, pause=time.sleep):
         deadline = clock() + 10
@@ -196,6 +327,14 @@ class NativeDisplay:
         physical = self.physical_displays(original)
         if virtual in {item["name"] for item in physical}:
             raise RigError("The VDD was already active in the original topology")
+        self._set_config(None, 0x84, "extend activation")  # no SUPPLIED or SAVE
+        try:
+            virtual = self.wait_active_virtual(instance)
+        except ActivationTimeout as exc:
+            virtual = self._supplied_primary(instance, original, width, height, str(exc))
+            self._verify_primary(virtual, self.physical_displays(original), width, height)
+            return {"name": virtual, "width": width, "height": height}
+        physical = self.physical_displays(original)
         selected = None
         for index in range(512):
             mode = self.mode(virtual, index)
@@ -205,7 +344,8 @@ class NativeDisplay:
                 selected = mode
                 break
         if selected is None:
-            raise RigError(f"VDD has no {width}x{height} mode; choose a supported test resolution")
+            raise RigError(f"EnumDisplaySettingsExW: no VDD {width}x{height} mode; device={virtual}, "
+                           f"index={index}, return={int(mode is not None)}; choose a supported test resolution")
         offset = max(item["x"] + item["width"] for item in physical)
         # Translate every physical display together. Their modes remain enabled
         # and their arrangement is preserved to the left of the new primary.
@@ -217,17 +357,30 @@ class NativeDisplay:
             self.change(item["name"], mode, 0x10000001)  # UPDATEREGISTRY | NORESET
         struct.pack_into("<I", selected, 72, 0x20 | 0x40000 | 0x80000 | 0x100000 | 0x400000)
         struct.pack_into("<ii", selected, 76, 0, 0)
-        self.change(virtual, selected, 0x10000011)  # also CDS_SET_PRIMARY
-        self.change(None, None, 0)
+        try:
+            self.change(virtual, selected, 0x10000011)  # also CDS_SET_PRIMARY
+        except RigError as exc:
+            virtual = self._supplied_primary(instance, original, width, height, str(exc))
+            physical = self.physical_displays(original)
+        else:
+            self.change(None, None, 0)
+        self._verify_primary(virtual, physical, width, height)
+        return {"name": virtual, "width": width, "height": height}
+
+    def _verify_primary(self, virtual, physical, width, height):
         current = self.active()
         by_name = {item["name"]: item for item in current}
-        if not by_name.get(virtual, {}).get("primary"):
-            raise RigError("VDD primary display could not be verified")
+        expected = {virtual: (0, 0, width, height, True)}
+        offset = max(item["x"] + item["width"] for item in physical)
         for item in physical:
-            actual = by_name.get(item["name"])
-            if not actual or actual["primary"] or (actual["width"], actual["height"]) != (item["width"], item["height"]):
-                raise RigError("A physical display did not remain enabled as a secondary")
-        return {"name": virtual, "width": width, "height": height}
+            expected[item["name"]] = (item["x"] - offset, item["y"], item["width"], item["height"], False)
+        for name, wanted in expected.items():
+            actual = by_name.get(name, {})
+            observed = tuple(actual.get(key) for key in ("x", "y", "width", "height", "primary"))
+            if observed != wanted:
+                last = self.display_calls[-1]
+                raise RigError(f"{last['api']} {last['return_name']} (result {last['return_code']}): layout/position verification "
+                               f"failed for {name}; expected={wanted}, actual={observed}; inputs={last['inputs'].get('flags')}")
 
     def physical_rectangles(self, original):
         wanted = {item["name"] for item in self.physical_displays(original)}
@@ -243,8 +396,9 @@ class NativeDisplay:
         path_data, mode_data = C.create_string_buffer(paths, len(paths)), C.create_string_buffer(modes, len(modes))
         status = self.user.SetDisplayConfig(original["path_count"], path_data, original["mode_count"], mode_data,
                                            0x20 | 0x80 | 0x200)  # supplied | apply | save database
-        if status:
-            raise RigError(f"Cannot restore original display topology (Windows error {status})")
+        self._result("SetDisplayConfig", status, "Cannot restore original display topology", flags="0x2a0",
+                     path_count=original["path_count"], mode_count=original["mode_count"],
+                     paths=original["paths"], modes=original["modes"])
         current = self.active()
         expected = {(item["name"], item["x"], item["y"], item["width"], item["height"], item["primary"])
                     for item in original["displays"]}

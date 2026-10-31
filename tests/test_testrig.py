@@ -673,34 +673,22 @@ def test_dead_display_worker_recovery_uses_saved_topology(rig, monkeypatch):
 
 
 def test_native_display_extension_preserves_physical_mode_and_uses_primary_flag():
-    import ctypes
+    from test_testrig_primary import make_desktop
     import struct
-    def mode(width, height):
-        data = ctypes.create_string_buffer(220)
-        struct.pack_into("<H", data, 68, 220)
-        struct.pack_into("<III", data, 168, 32, width, height)
-        struct.pack_into("<I", data, 184, 60)
-        return data
-    original = {"primary": "physical", "displays": [{"name": "physical", "x": 0, "y": 0,
-        "width": 2560, "height": 1440, "primary": True, "mode": encoded(mode(2560, 1440))}]}
-    api = NativeDisplay.__new__(NativeDisplay)
-    api.sources = lambda: [{"name": "virtual", "adapter_path": r"\\?\ROOT#DISPLAY#0000#{5b45201d-f2f2-4f3b-85bb-30ff1f953599}"}]
-    api.physical_displays = lambda layout: layout["displays"]
-    api.mode = lambda name, index: mode(1920, 1080)
-    queued, active = [], []
-    def change(name, data, flags):
-        queued.append((name, bytes(data) if data is not None else None, flags))
-        if name:
-            active.append({"name": name, "primary": bool(flags & 0x10),
-                "x": struct.unpack_from("<i", data, 76)[0], "y": struct.unpack_from("<i", data, 80)[0],
-                "width": struct.unpack_from("<I", data, 172)[0], "height": struct.unpack_from("<I", data, 176)[0]})
-    api.change, api.active = change, lambda: active
+    api, desktop = make_desktop()
+    original = api.capture()
     assert api.extend_primary(r"ROOT\DISPLAY\0000", original, 1920, 1080)["name"] == "virtual"
-    assert [item[0] for item in queued] == ["physical", "virtual", None]
-    assert queued[0][2] == 0x10000001 and queued[1][2] == 0x10000011
-    assert struct.unpack_from("<I", queued[0][1], 72)[0] == 0x20  # position only
-    assert active[0] == {"name": "physical", "primary": False, "x": -2560, "y": 0, "width": 2560, "height": 1440}
-    assert active[1]["primary"] and active[1]["x"] == 0
+    ordered = [event for event in desktop.events if event in
+               ("extend", "vdd-active", "physical-stage", "virtual-stage", "null-apply")]
+    assert ordered == ["extend", "vdd-active", "physical-stage", "virtual-stage", "null-apply"]
+    physical, physical_flags = desktop.staged["physical"]
+    virtual, virtual_flags = desktop.staged["virtual"]
+    assert physical_flags == 0x10000001 and virtual_flags == 0x10000011
+    assert struct.unpack_from("<I", physical, 72)[0] == 0x20
+    assert struct.unpack_from("<I", virtual, 72)[0] == 0x5c0020
+    assert struct.unpack_from("<ii", physical, 76) == (-2560, 0)
+    assert struct.unpack_from("<ii", virtual, 76) == (0, 0)
+    assert struct.unpack_from("<II", virtual, 172) == (1920, 1080)
 
 
 def test_native_display_restore_supplies_saved_paths_modes_and_verifies_primary():

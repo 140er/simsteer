@@ -8,6 +8,7 @@ import sys
 from . import RigError
 from .guard import require_free
 from .display import recover_leftover_displays
+from .display_api import NativeDisplay, device_instance
 from .session import Session
 from .state import lock
 from .windows import Windows
@@ -15,8 +16,8 @@ from .windows import Windows
 
 def parser():
     command = argparse.ArgumentParser(description="Guarded, disposable Windows game test sessions")
-    command.add_argument("game", choices=("guard", "ac", "ets2"))
-    command.add_argument("action", nargs="?", choices=("guard", "prepare", "start", "ready", "stop", "restore", "status"))
+    command.add_argument("game", choices=("guard", "ac", "ets2", "display"))
+    command.add_argument("action", nargs="?", choices=("guard", "prepare", "start", "ready", "stop", "restore", "status", "plan-primary"))
     command.add_argument("--session", default="default", help="unique name for this test run")
     command.add_argument("--state-dir", type=Path, help="private state/backup root (default: LocalAppData)")
     command.add_argument("--timeout", type=int, default=180, help="readiness deadline, 1–600 seconds")
@@ -63,6 +64,26 @@ def main(argv=None, *, backend=None):
     for key in ("profile_source", "telemetry_plugin"):
         if key in options:
             options[key] = str(options[key].absolute())
+    if args.game == "display":
+        if args.action != "plan-primary" or not args.vdd_device:
+            command.error("display requires plan-primary and --vdd-device")
+        if set(options) - {"vdd_device", "width", "height"}:
+            command.error("plan-primary only accepts --vdd-device, --width and --height")
+        try:
+            api = NativeDisplay()
+            original = api.capture()
+            original["displays"] = [item for item in original["displays"]
+                if device_instance(item.get("adapter_path", "")) != args.vdd_device.casefold()]
+            if not original["displays"]:
+                raise RigError("Primary plan requires an active physical display")
+            result = api.plan_primary(args.vdd_device, original, args.width or 1920, args.height or 1080)
+            print(json.dumps({"dry_run": True, "activation_flags": "0x84", **result}, indent=2))
+            return 0
+        except (RigError, OSError, ValueError) as exc:
+            print(f"testrig: {exc}", file=sys.stderr)
+            return 2
+    if args.action == "plan-primary":
+        command.error("plan-primary is only valid with display")
     if args.game == "guard" or args.action == "guard":
         if set(options) - {"idle_seconds"}:
             command.error("guard only accepts --idle-seconds as a configuration option")

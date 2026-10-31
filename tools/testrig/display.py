@@ -25,6 +25,7 @@ class DisplayLifecycle:
                                "original": None, "enable_intent": False, "topology_intent": False,
                                "overlay_closed": False, "vdd_disabled": False, "topology_restored": False}
         self.row.setdefault("warnings", [])
+        self.api.display_calls = self.row.setdefault("display_calls", [])
 
     def start(self):
         try:

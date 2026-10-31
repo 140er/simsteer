@@ -213,9 +213,15 @@ The display worker performs this sequence:
    rather than the hardware ID returned by `EnumDisplayDevices`. Multiple matching
    outputs are refused. Wait up to 10 seconds for the adapter's asynchronous CCD
    source to appear; an unavailable source fails with a bounded error.
-3. Extend the desktop, retaining every physical display at its existing resolution
-   and relative position, and use `ChangeDisplaySettingsEx(CDS_SET_PRIMARY)` to put
-   the VDD at the origin as primary. Verify physical displays remain secondary.
+3. Apply `SetDisplayConfig(SDC_APPLY|SDC_TOPOLOGY_EXTEND)` without saving, and wait
+   up to 10 seconds for the VDD to appear in the active CCD paths before staging
+   any mode change. Keep every physical display at its existing resolution and
+   relative position, to the left of the VDD. Stage the physical positions and
+   `ChangeDisplaySettingsEx(CDS_SET_PRIMARY)`, then one NULL apply. Verify the VDD
+   is primary at (0,0) and every physical display's size and x,y position match.
+   Only an activation timeout or SET_PRIMARY failure permits the supplied CCD
+   fallback: fresh active paths, validate (0x60), then apply (0xA0), with neither
+   ALLOW_CHANGES nor SAVE_TO_DATABASE. All physical targets remain in that plan.
 4. Cover only the physical displays with opaque, nonactivating black windows using
    `WDA_EXCLUDEFROMCAPTURE`. The physical monitors remain powered on and awake.
 5. Start the temporary windowed configuration at the requested VDD resolution,
@@ -233,6 +239,15 @@ existing physical displays without changing topology. Overlay exclusion requires
 Windows 10 build 19041 or later. The worker verifies affinity, but the live runner
 must still verify capture shows the actual game on the intended output. Do not
 assume an existing capture selection follows a new primary display automatically.
+
+For a read-only preview, use `python -m tools.testrig display plan-primary
+--vdd-device '<PnP instance>' --width 1920 --height 1080`. It queries the current
+topology and prints the proposed supplied paths, modes and positions without
+enabling a device, applying settings, recovering sessions or launching a game.
+The VDD must already be enumerable; an unavailable or ambiguous target is reported
+instead of guessed. Keep the JSON private. The session receipt's `display_calls`
+records API names, symbolic/numeric results, flags, DEVMODE fields, positions,
+resolution and frequency, and the supplied paths/modes for diagnosis.
 
 An independent session worker also runs when no display option is selected. It
 holds its startup parent's process handle and watches the simulation using process
