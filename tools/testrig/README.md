@@ -61,7 +61,17 @@ Steam-installed tools such as Wallpaper Engine do not block merely by being
 resident. Owned game helper ancestry is recognized too. Active-output checks use
 visible OBS output controls/current OBS logs, Steam streaming logs/helpers,
 Sunshine client connections, compatible Parsec logs, and visible sharing controls
-where available. Idle OBS is allowed. Capture coverage is:
+where available. Idle OBS is allowed.
+
+Steam Remote Play log events must belong to the running Steam process. Older
+events are ignored; the latest `Client version` marker provides the boundary if
+process birth is unavailable. Explicit stream starts activate the log signal;
+a later session end/stop clears it. Audio diagnostics and disabled game-recording
+messages do not start a stream. Unparseable timestamps need a current streaming
+process or visible output control to corroborate them. Streaming helpers and other
+positive capture signals still refuse independently.
+
+Capture coverage is:
 
 | Tool | Signals read |
 | --- | --- |

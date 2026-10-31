@@ -11,7 +11,7 @@ import time
 import uuid
 
 from . import RigError
-from .capture import capture_activity, output_log_active
+from .capture import capture_activity, output_log_active, steam_stream_active
 
 
 def require_windows():
@@ -261,11 +261,15 @@ class Windows:
             name, pid = process["name"].lower(), process["pid"]
             text = " ".join(row["title"] + " " + row["text"] for row in windows if row["pid"] == pid).lower()
             if name == "steam.exe":
+                indicators = any(value in text for value in ("stop streaming", "stop remote play"))
+                helpers = any(row["name"].lower() in ("streaming_client.exe", "steam_streaming.exe") for row in processes)
                 for root in self.steam_paths():
                     log = root / "logs/streaming_log.txt"
-                    if log.exists() and log.stat().st_mtime >= process.get("born", 0):
-                        records.append({"pid": pid, "active": output_log_active(tail(log), "streaming"),
-                                        "kind": "Steam Remote Play streaming"})
+                    if log.exists():
+                        records.append({"pid": pid, "active": steam_stream_active(tail(log), process.get("born"),
+                                        corroborated=indicators or helpers), "kind": "Steam Remote Play streaming"})
+                if indicators:
+                    records.append({"pid": pid, "active": True, "kind": "Steam Remote Play streaming controls"})
             elif name in ("streaming_client.exe", "steam_streaming.exe"):
                 records.append({"pid": pid, "active": True, "kind": "Steam Remote Play streaming"})
             elif name in ("sunshine.exe", "parsecd.exe"):

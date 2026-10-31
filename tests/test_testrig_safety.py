@@ -16,6 +16,7 @@ from tools.testrig.activity import real_input
 from tools.testrig.display import watch_session, recover_session, DisplayLifecycle
 from tools.testrig.display_api import NativeDisplay, device_instance, encoded
 from tools.testrig.windows import output_log_active, connection_log_active, Windows
+from tools.testrig.capture import steam_stream_active
 from tools.testrig.cli import main
 from test_testrig import FakeDisplay
 import ctypes
@@ -419,6 +420,108 @@ def test_streaming_service_activity_uses_connections_not_presence(tmp_path):
     log.write_text("Sunshine version: test\nCLIENT CONNECTED\n")
     assert backend.activity(rows, [])[0][0]["active"]
     assert connection_log_active("CLIENT CONNECTED\nCLIENT CONNECTED\nCLIENT DISCONNECTED")
+
+
+# Historical Remote Play lines, misleading audio diagnostics, newer client
+# markers, and game-recording messages sharing a recently modified log file.
+# Peer addresses and client build numbers are synthetic.
+STEAM_STREAM_HISTORY = """[2026-10-05 19:08:33] Client version: 100
+[2026-10-28 13:19:53] Client version: 101
+[2026-10-28 13:31:49] Client version: 101
+[2026-10-28 13:31:56][110.114268] Streaming started to frame at peer, audio channels = 2, MTU = 1468
+[2026-10-28 13:31:56][110.185979] Audio source [Speakers (Steam Streaming Speakers)]: init=0, adjustment=0, through=0, last_start=0
+[2026-10-28 13:32:56][170.189830] Audio source [Speakers (Steam Streaming Speakers)]: init=171946967, adjustment=0, through=1705737, last_start=1705257
+[2026-10-28 13:33:56][230.190297] Audio source [Speakers (Steam Streaming Speakers)]: init=171946967, adjustment=0, through=5765185, last_start=5764705
+[2026-10-28 13:34:56][290.196211] Audio source [Speakers (Steam Streaming Speakers)]: init=171946967, adjustment=0, through=6828478, last_start=6827998
+[2026-10-29 12:45:06] Client version: 101
+[2026-10-30 22:30:41] Client version: 101
+[2026-10-31 12:06:16] Client version: 101
+[2026-10-31 13:20:00][5863.809808] Game Recording - would start recording game 244210, but recording for this game is disabled
+[2026-10-31 13:31:10][6533.806755] Game Recording - game stopped [gameid=244210]
+"""
+CURRENT_STEAM_STREAM = "[2026-10-31 13:31:56][6600.0] Streaming started to frame at peer\n"
+
+
+def steam_birth():
+    # Steam's log clock is local; process birth is an epoch timestamp.
+    return datetime(2026, 10, 31, 12, 6, 16).timestamp()
+
+
+def steam_guard(tmp_path, contents, *, born=None, windows=(), helpers=()):
+    log = tmp_path / "logs/streaming_log.txt"
+    log.parent.mkdir(exist_ok=True)
+    log.write_text(contents)
+    os.utime(log, (steam_birth() + 7200, steam_birth() + 7200))
+    process = {"pid": 1, "name": "steam.exe", "born": born}
+    rows = [process, *helpers]
+    backend = Windows.__new__(Windows)
+    backend.steam_paths = lambda: [tmp_path]
+    activity, warnings = backend.activity(rows, windows)
+    return snapshot(rows, activity=activity, warnings=warnings)
+
+
+def test_stale_steam_stream_history_with_fresh_log_mtime_is_clear(tmp_path):
+    assert output_log_active(STEAM_STREAM_HISTORY, "streaming")  # the old false positive
+    observed = steam_guard(tmp_path, STEAM_STREAM_HISTORY, born=steam_birth())
+    assert not any(row["active"] for row in observed["activity"])
+    require_free(observed)
+
+
+def test_steam_process_birth_filters_old_stream_without_a_new_client_marker():
+    older = STEAM_STREAM_HISTORY.split("[2026-10-29")[0]
+    assert not steam_stream_active(older, steam_birth())
+
+
+def test_current_steam_stream_still_refuses(tmp_path):
+    observed = steam_guard(tmp_path, STEAM_STREAM_HISTORY + CURRENT_STEAM_STREAM, born=steam_birth())
+    with pytest.raises(RigError, match="Steam Remote Play"):
+        require_free(observed)
+
+
+@pytest.mark.parametrize("end", ["Session ended", "Streaming stopped", "Stopped streaming", "Streaming session ended", "Ending streaming session"])
+def test_current_steam_session_end_is_clear_and_audio_cannot_restart_it(tmp_path, end):
+    log = STEAM_STREAM_HISTORY + CURRENT_STEAM_STREAM + f"[2026-10-31 13:34:56][6780.0] {end}\n"
+    log += "[2026-10-31 13:34:57][6781.0] Audio source [Steam Streaming Speakers]: last_start=6780000\n"
+    require_free(steam_guard(tmp_path, log, born=steam_birth()))
+
+
+@pytest.mark.parametrize("born", [None, 0, float("nan")])
+def test_steam_last_client_marker_is_the_fallback_boundary(born):
+    assert not steam_stream_active(STEAM_STREAM_HISTORY, born)
+    assert steam_stream_active(STEAM_STREAM_HISTORY + CURRENT_STEAM_STREAM, born)
+
+
+def test_steam_client_restart_resets_stream_state_and_game_exit_does_not():
+    current = STEAM_STREAM_HISTORY + CURRENT_STEAM_STREAM
+    assert steam_stream_active(current + "[2026-10-31 13:32:00] Game Recording - game stopped [gameid=244210]\n", steam_birth())
+    assert not steam_stream_active(current + "[2026-10-31 13:40:00] Client version: 102\n", steam_birth())
+    ended = current + "[2026-10-31 13:34:56] Session ended\n"
+    assert steam_stream_active(ended + "[2026-10-31 13:35:00] Streaming started to frame at peer\n", steam_birth())
+
+
+def test_steam_log_second_precision_does_not_discard_a_current_start():
+    start = "[2026-10-31 12:06:16] Streaming started to frame at peer\n"
+    assert steam_stream_active(start, steam_birth() + 0.75)
+
+
+def test_steam_unparseable_timestamps_need_current_indicators(tmp_path):
+    log = "[invalid timestamp][1.2] Streaming started to frame at peer\n"
+    assert not steam_stream_active(log, steam_birth())
+    assert steam_stream_active(log, steam_birth(), corroborated=True)
+    require_free(steam_guard(tmp_path, log, born=steam_birth()))
+    with pytest.raises(RigError, match="Steam Remote Play"):
+        require_free(steam_guard(tmp_path, log, born=steam_birth(), windows=[
+            {"pid": 1, "title": "Steam", "text": "Stop Streaming"}]))
+
+
+def test_steam_log_without_any_client_boundary_needs_corroboration():
+    assert not steam_stream_active(CURRENT_STEAM_STREAM)
+
+
+def test_steam_helpers_still_refuse_even_when_the_log_is_stale(tmp_path):
+    with pytest.raises(RigError, match="Steam Remote Play"):
+        require_free(steam_guard(tmp_path, STEAM_STREAM_HISTORY, born=steam_birth(), helpers=[
+            {"pid": 2, "name": "streaming_client.exe"}]))
 
 
 def test_owner_replaced_managed_file_with_directory_is_untouched(rig):

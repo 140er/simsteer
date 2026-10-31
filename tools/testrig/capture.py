@@ -3,6 +3,8 @@
 import configparser
 import json
 from itertools import islice
+from datetime import datetime
+import math
 import os
 from pathlib import Path
 import re
@@ -24,6 +26,45 @@ def output_log_active(text, kind):
         if re.search(rf"(?:{kind}.*(?:stop|end)|(?:stop|end).*{kind})", line):
             active = False
         elif re.search(rf"(?:{kind}.*(?:start|begin)|(?:start|begin).*{kind})", line):
+            active = True
+    return active
+
+
+def steam_stream_active(text, born=None, *, corroborated=False):
+    """Attribute Remote Play events to this Steam client, not the log's mtime."""
+    rows = []
+    boundary = -1
+    for line in text.splitlines():
+        stamp = None
+        match = re.match(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)\]", line)
+        if match:
+            try:
+                # Steam writes local wall time; CIM process birth is epoch time.
+                stamp = datetime.fromisoformat(match[1]).timestamp()
+            except (ValueError, OSError, OverflowError):
+                pass
+        message = re.sub(r"^(?:\[[^\]]*\]\s*)*", "", line).strip().lower()
+        if message.startswith("client version:"):
+            boundary = len(rows)
+        rows.append((stamp, message))
+    cutoffs = []
+    if isinstance(born, (int, float)) and not isinstance(born, bool) and math.isfinite(born) and born > 0:
+        cutoffs.append(math.floor(born))  # the log timestamps have second precision
+    if boundary >= 0 and rows[boundary][0] is not None:
+        cutoffs.append(rows[boundary][0])
+    cutoff = max(cutoffs) if cutoffs else None
+    active = False
+    for stamp, message in rows[boundary + 1:]:
+        if stamp is None:
+            if not corroborated:
+                continue
+        elif (cutoff is None and boundary < 0 and not corroborated) or (cutoff is not None and stamp < cutoff):
+            continue
+        if re.match(r"^(?:stream(?:ing)?(?: session)? (?:stopped|ended|closed|finished)|"
+                    r"(?:stopping|ending|stopped|ended) (?:the )?stream(?:ing)?(?: session)?|"
+                    r"(?:session|remote play session) (?:ended|stopped|closed|finished))\b", message):
+            active = False
+        elif re.match(r"^(?:streaming started\b|starting streaming(?: session)?\b)", message):
             active = True
     return active
 
