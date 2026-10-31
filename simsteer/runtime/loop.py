@@ -90,9 +90,6 @@ DISENGAGED_RECENTER_EVERY_N = 20
 WARMUP_FRAMES = 20
 # Until the frame queue holds distinct frames the model sees no motion.
 FRAME_QUEUE_FILL = 5
-# Telemetry detection is a one-shot handshake; retry this often (frames)
-# while unavailable so it recovers without a restart.
-TELEMETRY_RETRY_EVERY_N = 40
 
 # Per-key hotkey-id lookups for the calib-tweak keys (gate against the
 # disabled-hotkeys registry before calling the overlay handler).
@@ -222,8 +219,9 @@ def run(settings: Settings, game: GameProfile | str, *,
 
     print(f"vision: {getattr(model, 'active_provider', '?')}   "
           f"policy: {getattr(model, 'policy_provider', '?')}")
+    tel_was_ok = tel.available
     print(f"game: {profile.display_name}   telemetry: "
-          f"{'available' if tel.available else 'NOT detected'}")
+          f"{'available' if tel_was_ok else 'NOT detected'}")
     print(f"calibration: {flow.step.value}  camera {live_calib.status_label}  "
           f"(FOV={calib.fov_h_deg:.1f} pitch={calib.pitch_deg:+.1f} "
           f"h={calib.height_m:.2f})")
@@ -343,19 +341,18 @@ def run(settings: Settings, game: GameProfile | str, *,
                         f"SimSteer {__version__} — {profile.display_name}")
                     window_open = True
 
-                # Recover telemetry if it wasn't live at launch.
-                if (not tel.available
-                        and frame_idx % TELEMETRY_RETRY_EVERY_N == 0):
-                    tel.close()
-                    tel = make_telemetry()
-
                 # --- Telemetry reads ---
+                tel_ok = tel.available
+                if tel_ok != tel_was_ok:
+                    print(f"telemetry: {'connected' if tel_ok else 'lost'}")
+                    tel_was_ok = tel_ok
                 v_real = tel.speed_mps()
                 v_ego = v_real if v_real is not None else ctrl_cfg.default_speed
                 actual_yaw = tel.yaw_rate_rad_s()
                 wheel_angle = tel.wheel_angle_rad(ctrl_cfg.wheelbase_m)
                 game_steer = tel.game_steer()
                 user_steer = getattr(tel, "user_steer", lambda: None)()
+                t_tel_wall = time.time()
 
                 # --- Compose desire (nav + manual lane-change), step model ---
                 img_narrow, img_wide = fq.push(frame, calib)
@@ -648,7 +645,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                         "throttle": round(float(throttle_out), 4),
                         "brake": round(float(brake_out), 4),
                         "engaged": engaged_now,
-                        "telemetry": "ok" if tel.available else "lost",
+                        "telemetry": "ok" if tel_ok else "lost",
                         "camera_learning": camera_learning,
                         "camera_rejection": camera_rejection,
                         "actual_speed_mps": v_real,
@@ -671,6 +668,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                     if log_timing:
                         # The FOV step's extra vision runs are model time.
                         row.update(
+                            tel_wall=round(t_tel_wall, 4),
                             cap_ms=round((t_warp - t_grab) * 1e3, 3),
                             warp_ms=round((t_model - t_warp) * 1e3, 3),
                             model_ms=round((t_ctrl - t_model + fov_vision_s) * 1e3, 3),

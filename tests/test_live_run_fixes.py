@@ -178,11 +178,16 @@ def test_item1_transport_failure_neutralizes_and_releases(monkeypatch, fail_at, 
 
 
 def scs_yaw(turns):
-    tel = ScsTelemetry.__new__(ScsTelemetry)
-    tel._mm = None if turns is None else bytearray(OFF_CABIN_AV_Y + 4)
+    page = None if turns is None else bytearray(OFF_CABIN_AV_Y + 4)
     if turns is not None:
-        struct.pack_into("<f", tel._mm, OFF_CABIN_AV_Y, turns)
-    return tel.yaw_rate_rad_s()
+        page[0] = 1
+        struct.pack_into("<Q", page, 8, 1000)
+        struct.pack_into("<f", page, OFF_CABIN_AV_Y, turns)
+    tel = ScsTelemetry(opener=lambda *_: page)
+    try:
+        return tel.yaw_rate_rad_s()
+    finally:
+        tel.close()
 
 
 @pytest.mark.parametrize("turns", [0.01, -0.01, 0.0, None])
@@ -195,9 +200,14 @@ def test_item2_scs_yaw_is_radians_per_second(turns):
 
 
 def test_item2_truncated_mapping_has_no_yaw():
-    tel = ScsTelemetry.__new__(ScsTelemetry)
-    tel._mm = bytearray(OFF_CABIN_AV_Y)
-    assert tel.yaw_rate_rad_s() is None
+    page = bytearray(OFF_CABIN_AV_Y)
+    page[0] = 1
+    struct.pack_into("<Q", page, 8, 1000)
+    tel = ScsTelemetry(opener=lambda *_: page)
+    try:
+        assert tel.yaw_rate_rad_s() is None
+    finally:
+        tel.close()
 
 
 def test_item2_scs_yaw_crosses_camera_and_fov_thresholds():

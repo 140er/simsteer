@@ -17,8 +17,9 @@ from simsteer.ui.tuner import Tuner
 
 @pytest.mark.parametrize("launch", ["cli", "replay"])
 @pytest.mark.parametrize("save", ["H", "developer", "game", "flag", "save_all"])
+@pytest.mark.parametrize("game_id", ["ets2", "fh5"])
 def test_cli_overrides_are_not_persisted_by_ui_saves(
-    tmp_path, monkeypatch, launch, save
+    tmp_path, monkeypatch, launch, save, game_id
 ):
     import simsteer.runtime.loop as loop
     from test_replay import _make_clip
@@ -26,8 +27,9 @@ def test_cli_overrides_are_not_persisted_by_ui_saves(
     baseline = Settings(game="ats", max_width=1234, vjoy_device=2)
     expected = asdict(baseline)
     baseline.save()
-    args = ["--game", "ets2"]
+    args = ["--game", game_id]
     if launch == "cli":
+        expected["last_game"] = game_id
         args += ["--force-engage", "--passive-fit", "--no-gamepad", "--no-tuner",
                  "--device", "wheel", "--vjoy-device", "3", "--max-width", "900"]
     else:
@@ -41,9 +43,10 @@ def test_cli_overrides_are_not_persisted_by_ui_saves(
 
     def run(settings, game, **kwargs):
         calls.append(True)
-        assert game.id == "ets2"
+        assert game.id == game_id
         assert settings.no_gamepad
         if launch == "cli":
+            assert settings.last_game == game_id
             assert settings.force_engage and settings.passive_fit and settings.no_tuner
             assert (settings.device, settings.vjoy_device, settings.max_width) == ("wheel", 3, 900)
         else:
@@ -57,8 +60,8 @@ def test_cli_overrides_are_not_persisted_by_ui_saves(
             tuner._set_developer(True)
             expected["hud_mode"] = "dev"
         elif save == "game":
-            tuner._on_game_change(next(k for k, v in tuner._game_choices.items() if v == "ets2"))
-            expected["game"] = "ets2"
+            tuner._on_game_change(next(k for k, v in tuner._game_choices.items() if v == game_id))
+            expected["game"] = game_id
         elif save == "flag":
             tuner._on_probe_toggle(False)
             expected["no_probe"] = True

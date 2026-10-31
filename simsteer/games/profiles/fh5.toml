@@ -1,0 +1,40 @@
+# Forza Horizon 5. docs/PROFILES.md describes every key.
+id = "fh5"
+display_name = "Forza Horizon 5"
+process_names = ["ForzaHorizon5.exe"]
+steam_app_id = 1551360
+tested = true
+
+[telemetry]
+kind = "forza_udp"
+# Settings > HUD and Gameplay > Data Out IP Port. The forza_port setting
+# overrides it.
+port = 7777
+
+[controller]
+# Forza has no wheel angle, so the adapter derives one from yaw rate with
+# this wheelbase and the controller inverts it with the same value. It
+# scales the fit, not the steering; 4.0 keeps the seeds below valid.
+wheelbase_m = 4.0
+lookahead_s = 0.3
+
+[camera]
+hint = "Bumper or cockpit view"
+
+[capabilities]
+longitudinal = true
+speed_source = "telemetry"
+synth_wheel_angle = true
+passive_fit_safe = true
+
+[liveparams.gates]
+profile = "loose"
+
+[liveparams.gamepad]
+seed = [3.0, 0.0010, 0.0]
+
+[liveparams.wheel]
+seed = [3.0, 0.0010, 0.0]
+
+[[setup]]
+check = "forza_data_out"

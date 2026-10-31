@@ -126,6 +126,33 @@ def test_telemetry_gap_reported_and_run_continues(tmp_path, fake_model):
     assert states[1.0] == "ok"
 
 
+def test_loop_keeps_the_reader_when_telemetry_is_unavailable(tmp_path):
+    from simsteer.app.settings import Settings
+    from simsteer.runtime.loop import run
+    from simsteer.runtime.telemetry import NoTelemetry
+
+    class Reader(NoTelemetry):
+        closes = 0
+
+        def close(self):
+            self.closes += 1
+
+    opened = []
+
+    def make_reader():
+        tel = Reader()
+        opened.append(tel)
+        return tel
+
+    clip = _make_clip(tmp_path / "clip", frames=90)
+    clock = ReplayClock()
+    assert run(Settings(no_tuner=True, no_gamepad=True), "ets2",
+               source=ReplaySource(clip, clock), make_telemetry=make_reader,
+               clock=clock, model=FakeModel(), headless=True) == 0
+    assert len(opened) == 1
+    assert opened[0].closes == 1
+
+
 def test_telemetry_unavailable_past_last_sample(clip):
     clock = ReplayClock()
     tel = ReplayTelemetry(clip, clock)
