@@ -9,6 +9,7 @@ import struct
 import subprocess
 import time
 import uuid
+import re
 
 from . import RigError
 
@@ -150,6 +151,7 @@ class Windows:
             free(result)
 
     def snapshot(self):
+        desktop_pixels()
         user, kernel = dll("user32"), dll("kernel32")
         session = W.DWORD()
         get_session = signature(kernel, "ProcessIdToSessionId", [W.DWORD, C.POINTER(W.DWORD)], W.BOOL)
@@ -171,6 +173,10 @@ class Windows:
                 process["created"] = str(int(process["created"]) // 10)
                 process["born"] = int(process["created"]) / 1_000_000 - 11644473600
         result["idle_seconds"] = ((tick() & 0xffffffff) - info.time & 0xffffffff) / 1000
+        windows = self.windows()
+        foreground = signature(user, "GetForegroundWindow", [], W.HWND)()
+        result["foreground"] = next((row for row in windows if row["hwnd"] == foreground), {})
+        result["activity"], result["warnings"] = self.activity(result["processes"], windows)
         return result
 
     def windows(self):
@@ -181,6 +187,13 @@ class Windows:
         signature(user, "IsWindowVisible", [W.HWND], W.BOOL)
         signature(user, "GetWindowThreadProcessId", [W.HWND, C.POINTER(W.DWORD)], W.DWORD)
         signature(user, "GetWindowTextW", [W.HWND, W.LPWSTR, C.c_int], C.c_int)
+        signature(user, "GetClassNameW", [W.HWND, W.LPWSTR, C.c_int], C.c_int)
+        signature(user, "GetWindow", [W.HWND, W.UINT], W.HWND)
+        signature(user, "GetWindowRect", [W.HWND, C.POINTER(W.RECT)], W.BOOL)
+        signature(user, "MonitorFromWindow", [W.HWND, W.DWORD], W.HANDLE)
+        class MonitorInfo(C.Structure):
+            _fields_ = [("size", W.DWORD), ("monitor", W.RECT), ("work", W.RECT), ("flags", W.DWORD)]
+        signature(user, "GetMonitorInfoW", [W.HANDLE, C.POINTER(MonitorInfo)], W.BOOL)
         send = signature(user, "SendMessageTimeoutW",
                          [W.HWND, W.UINT, W.WPARAM, W.LPARAM, W.UINT, W.UINT, C.POINTER(C.c_size_t)], W.LPARAM)
         rows = []
@@ -192,11 +205,21 @@ class Windows:
             text, pid = C.create_unicode_buffer(2048), W.DWORD()
             user.GetWindowTextW(hwnd, text, len(text))
             user.GetWindowThreadProcessId(hwnd, C.byref(pid))
-            row = {"hwnd": int(hwnd), "pid": pid.value, "title": text.value, "text": ""}
+            kind, rect, info = C.create_unicode_buffer(256), W.RECT(), MonitorInfo()
+            user.GetClassNameW(hwnd, kind, len(kind))
+            info.size = C.sizeof(info)
+            fullscreen = False
+            if user.GetWindowRect(hwnd, C.byref(rect)) and user.GetMonitorInfoW(user.MonitorFromWindow(hwnd, 2), C.byref(info)):
+                fullscreen = (rect.left <= info.monitor.left and rect.top <= info.monitor.top and
+                              rect.right >= info.monitor.right and rect.bottom >= info.monitor.bottom)
+            row = {"hwnd": int(hwnd), "pid": pid.value, "title": text.value, "text": "", "class": kind.value,
+                   "fullscreen": fullscreen, "owner": int(user.GetWindow(hwnd, 4) or 0)}
             child_text = []
 
             @callback_type
             def child(handle, _):
+                if not user.IsWindowVisible(handle):
+                    return True
                 if len(child_text) >= 40:
                     return False
                 buf, value = C.create_unicode_buffer(1024), C.c_size_t()
@@ -205,7 +228,7 @@ class Windows:
                 return True
 
             # Read modal controls, not browser content or arbitrary owner windows.
-            if any(word in text.value.lower() for word in ("steam", "assetto", "truck", "security", "firewall", "license", "eula")):
+            if any(word in text.value.lower() for word in ("steam", "assetto", "truck", "security", "firewall", "license", "eula", "obs", "discord", "teams", "streamlabs", "sunshine", "parsec", "nvidia")):
                 user.EnumChildWindows(hwnd, child, 0)
             row["text"] = " ".join(child_text)
             rows.append(row)
@@ -214,6 +237,56 @@ class Windows:
         if not user.EnumWindows(window, 0):
             raise RigError("Cannot enumerate desktop windows")
         return rows
+
+    def activity(self, processes, windows):
+        """Read visible output controls and current-session logs, never credentials."""
+        records, warnings = [], []
+        for process in processes:
+            name, pid = process["name"].lower(), process["pid"]
+            text = " ".join(row["title"] + " " + row["text"] for row in windows if row["pid"] == pid).lower()
+            if name in ("obs.exe", "obs32.exe", "obs64.exe", "streamlabs obs.exe", "streamlabs desktop.exe"):
+                active = any(value in text for value in ("stop recording", "pause recording", "stop streaming"))
+                appdata = os.environ.get("APPDATA")
+                found = False
+                if appdata and name.startswith("obs"):
+                    logs = list((Path(appdata) / "obs-studio/logs").glob("*.txt"))
+                    if logs:
+                        log = max(logs, key=lambda path: path.stat().st_mtime)
+                        if log.stat().st_mtime >= process.get("born", 0):
+                            contents = tail(log)
+                            active |= output_log_active(contents, "recording") or output_log_active(contents, "streaming")
+                            found = True
+                if not active and not found:
+                    warnings.append("OBS output activity is not observable; verify recording/streaming is stopped")
+                records.append({"pid": pid, "active": active, "kind": "OBS recording/streaming"})
+            elif name == "steam.exe":
+                for root in self.steam_paths():
+                    log = root / "logs/streaming_log.txt"
+                    if log.exists() and log.stat().st_mtime >= process.get("born", 0):
+                        records.append({"pid": pid, "active": output_log_active(tail(log), "streaming"),
+                                        "kind": "Steam Remote Play streaming"})
+            elif name in ("streaming_client.exe", "steam_streaming.exe"):
+                records.append({"pid": pid, "active": True, "kind": "Steam Remote Play streaming"})
+            elif name in ("sunshine.exe", "parsecd.exe", "nvidia share.exe", "nvidia overlay.exe"):
+                active = any(value in text for value in ("stop recording", "stop streaming", "stop broadcasting", "stop hosting"))
+                logs = []
+                if name == "sunshine.exe" and process.get("path"):
+                    logs = [Path(process["path"]).parent / "config/sunshine.log"]
+                elif name == "parsecd.exe":
+                    logs = [Path(value) / "Parsec/log.txt" for key in ("APPDATA", "PROGRAMDATA")
+                            if (value := os.environ.get(key))]
+                for log in logs:
+                    if log.exists() and log.stat().st_mtime >= process.get("born", 0):
+                        contents = tail(log)
+                        active |= (connection_log_active(contents) if name == "sunshine.exe" else
+                                   output_log_active(contents, "streaming"))
+                records.append({"pid": pid, "active": active, "kind": "desktop recording/streaming"})
+            elif name in ("discord.exe", "ms-teams.exe", "teams.exe"):
+                active = any(value in text for value in ("stop sharing", "stop streaming", "you are sharing", "you're sharing", "go live — streaming"))
+                records.append({"pid": pid, "active": active, "kind": "screen sharing"})
+                if not active:
+                    warnings.append("Chat screen-sharing activity may be hidden; verify sharing is stopped")
+        return records, warnings
 
     def launch_uri(self, uri):
         try:
@@ -330,3 +403,34 @@ class Windows:
     sleep = staticmethod(time.sleep)
     monotonic = staticmethod(time.monotonic)
     wall_time = staticmethod(time.time)
+
+
+def tail(path):
+    try:
+        with path.open("rb") as stream:
+            stream.seek(max(0, path.stat().st_size - 256 * 1024))
+            return stream.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def output_log_active(text, kind):
+    active = False
+    for line in text.lower().splitlines():
+        if re.search(rf"(?:{kind}.*(?:stop|end)|(?:stop|end).*{kind})", line):
+            active = False
+        elif re.search(rf"(?:{kind}.*(?:start|begin)|(?:start|begin).*{kind})", line):
+            active = True
+    return active
+
+
+def connection_log_active(text):
+    clients = 0
+    for line in text.lower().splitlines():
+        if "sunshine version" in line:
+            clients = 0
+        elif "client connected" in line:
+            clients += 1
+        elif "client disconnected" in line:
+            clients = max(0, clients - 1)
+    return clients > 0

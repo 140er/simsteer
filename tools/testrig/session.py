@@ -4,12 +4,13 @@ import ntpath
 import os
 from pathlib import Path
 import uuid
+import sys
 
 from . import RigError
 from .discovery import GAMES, Installation, discover
 from .games import ADAPTERS, expected_paths
 from .guard import blocking_prompt, require_free, same_process, utc_now
-from .state import Journal, fingerprint, read_json, remove
+from .state import Journal, read_json
 
 
 DEFAULTS = {"track": "magione", "car": "lotus_elise_sc", "layout": "", "hfov": 120.0,
@@ -27,6 +28,7 @@ class Session:
         self.game, self.backend = game, backend
         self.journal = Journal(Path(directory))
         self.adapter = ADAPTERS[game]
+        self.warnings = set()
         if self.data and self.data["game"] != game:
             raise RigError("This session belongs to a different game; choose another --session")
 
@@ -47,6 +49,10 @@ class Session:
         row = {key: self.data.get(key) for key in ("id", "game", "phase", "error", "owned")}
         row["state_file"] = str(self.journal.path)
         row["backups"] = len(self.data.get("backups", []))
+        row["restoration"] = self.journal.report()
+        row["warnings"] = self.data.get("warnings", [])
+        if self.journal.recovery:
+            row["recovery"] = self.journal.recovery
         receipt = self.journal.directory / "display-state.json"
         if receipt.exists():
             row["display"] = read_json(receipt)
@@ -67,10 +73,23 @@ class Session:
             if self.data["options"].get(key) != value:
                 raise RigError(f"Session option {key} differs from its saved value; restore and use a new --session")
 
+    def guard(self, snapshot, *, check_idle=True):
+        notes = require_free(snapshot, self.data["owned"] if self.data else (),
+                             self.data["options"]["idle_seconds"] if self.data else self.pending_idle,
+                             check_idle=check_idle)
+        for note in notes:
+            if note not in self.warnings:
+                print("testrig: warning: " + note, file=sys.stderr)
+                self.warnings.add(note)
+        if self.data:
+            self.data["warnings"] = sorted(set(self.data.get("warnings", [])) | self.warnings)
+
     def prepare(self, supplied):
         if self.data:
             self.check_options(supplied)
-            if self.data["phase"] in ("prepared", "starting", "running", "stopped", "restored"):
+            if self.data["phase"] in ("stopped", "restored"):
+                raise RigError("Session finished; use a new --session")
+            if self.data["phase"] in ("prepared", "starting", "running"):
                 return self.status()
             raise RigError("Interrupted preparation; run restore before creating another session")
         options = DEFAULTS | supplied
@@ -84,14 +103,15 @@ class Session:
                 raise RigError("--vdd-device must select one exact instance ID without wildcards")
             options["overlay"] = True
         snapshot = self.backend.snapshot()
-        require_free(snapshot, idle_seconds=options["idle_seconds"])
+        self.pending_idle = options["idle_seconds"]
+        self.guard(snapshot)
         installed = discover(self.game, self.backend)
         if options.get("profile_source"):
             source = Path(options["profile_source"]).absolute()
             if self.journal.directory == source or self.journal.directory in source.parents:
                 raise RigError("The ETS2 source profile must be outside this session directory")
         self.adapter.validate(installed, options)
-        self.journal.data = {"version": 1, "id": uuid.uuid4().hex, "game": self.game,
+        self.journal.data = {"version": Journal.VERSION, "id": uuid.uuid4().hex, "game": self.game,
                              "phase": "backing-up", "created_at": utc_now(), "options": options,
                              "installation": installed.as_dict(), "owned": [], "backups": []}
         self.ensure_steam(snapshot)
@@ -99,11 +119,11 @@ class Session:
         self.journal.backup(self.adapter.targets(installed, options))
         # Backups can take time. Repeat the owner/restart gate before any edits.
         snapshot = self.backend.snapshot()
-        require_free(snapshot, idle_seconds=options["idle_seconds"])
+        self.guard(snapshot)
         self.ensure_steam(snapshot)
         self.data["phase"] = "preparing"
         self.save()
-        self.adapter.prepare(installed, self.journal.directory, options)
+        self.adapter.prepare(installed, self.journal.directory, options, self.journal)
         self.data["phase"] = "prepared"
         self.save()
         return self.status()
@@ -117,18 +137,22 @@ class Session:
         changed = False
         # Repeat to attach a launcher and its child even if CIM returned children first.
         for _ in range(3):
-            parents = {item["pid"] for item in self.data["owned"]}
+            owned_parents = {item["pid"]: item for item in self.data["owned"]
+                             if any(same_process(item, row) for row in rows)}
+            parents = set(owned_parents)
             parents.update(item["pid"] for item in launch["steam"]
                            if any(same_process(item, row) for row in rows))
             if launch.get("direct_parent"):
                 parents.add(launch["direct_parent"])
             for process in rows:
-                if norm(process.get("path") or "") not in expected:
+                parent = owned_parents.get(process.get("parent"))
+                helper = bool(parent and process.get("born", 0) >= parent.get("born", 0))
+                if not helper and norm(process.get("path") or "") not in expected:
                     continue
                 if any(same_process(process, item) for item in self.data["owned"] + launch["baseline"]):
                     continue
-                if (not process.get("created") or process.get("parent") not in parents or
-                        not launch["began"] <= process.get("born", 0) <= launch["until"]):
+                if (not process.get("created") or not process.get("path") or process.get("parent") not in parents or
+                        not (helper or launch["began"] <= process.get("born", 0) <= launch["until"])):
                     continue
                 self.data["owned"].append(process.copy())
                 changed = True
@@ -146,17 +170,17 @@ class Session:
             raise RigError("Session is not prepared; restore it and use a new --session")
         options = self.data["options"]
         snapshot = self.backend.snapshot()
-        require_free(snapshot, idle_seconds=options["idle_seconds"])
+        self.guard(snapshot)
         self.ensure_steam(snapshot)
         self.data["phase"] = "starting"
         self.data["display_requested"] = bool(options["display"] or options["overlay"])
+        self.data["worker_requested"] = True
         self.save()
-        if self.data["display_requested"]:
-            self.backend.start_display(self.journal, options)
+        self.backend.start_display(self.journal, options)
         # The topology/overlay operation may have taken seconds. Check directly
         # before asking Steam to launch, with no delayed task or automatic retry.
         snapshot = self.backend.snapshot()
-        require_free(snapshot, idle_seconds=options["idle_seconds"])
+        self.guard(snapshot)
         self.ensure_steam(snapshot)
         began = self.backend.wall_time()
         self.data["launch"] = {
@@ -171,10 +195,11 @@ class Session:
         return self.ready(timeout)
 
     def check_display(self):
-        if self.data.get("display_requested"):
+        if self.data.get("worker_requested"):
             receipt = read_json(self.journal.directory / "display-state.json")
             if receipt.get("session") != self.data["id"] or not receipt.get("ready"):
-                raise RigError("Session display worker is not ready: " + "; ".join(receipt.get("errors", [])))
+                detail = "; ".join(receipt.get("errors", []) + receipt.get("warnings", []))
+                raise RigError("Session worker is not ready: " + (detail or receipt.get("stop_reason") or "worker exited"))
 
     def ready(self, timeout):
         if not self.data or self.data["phase"] not in ("starting", "running"):
@@ -187,14 +212,15 @@ class Session:
             self.adopt(snapshot)
             owned = [row for row in snapshot["processes"]
                      if any(same_process(row, item) for item in self.data["owned"])]
-            require_free(snapshot, self.data["owned"], self.data["options"]["idle_seconds"], check_idle=False)
+            self.guard(snapshot, check_idle=False)
             windows = self.backend.windows()
             prompt = blocking_prompt(windows)
             if prompt:
                 raise RigError(prompt)
             self.check_display()
             for process in owned:
-                self.adapter.verify_process(process, self.installed, self.journal.directory, self.backend)
+                if norm(process["path"]) in {norm(path) for path in expected_paths(self.game, self.installed)}:
+                    self.adapter.verify_process(process, self.installed, self.journal.directory, self.backend)
             runner = norm(self.installed.game / GAMES[self.game].runner)
             running = [row for row in owned if norm(row["path"]) == runner]
             visible = any(window["pid"] in {row["pid"] for row in running} for window in windows)
@@ -212,7 +238,7 @@ class Session:
                 launcher_ids = {row["pid"] for row in owned}
                 if any(window["pid"] in launcher_ids for window in windows):
                     # Direct simulation start is the established AC practice path.
-                    require_free(snapshot, self.data["owned"], self.data["options"]["idle_seconds"])
+                    self.guard(snapshot)
                     self.data["launch"].update(direct_requested=True, direct_parent=os.getpid())
                     self.save()
                     self.backend.launch_ac(self.installed.game / "acs.exe")
@@ -239,7 +265,7 @@ class Session:
         if not self.data or self.data["phase"] == "restored":
             return self.status()
         errors = []
-        if self.data.get("display_requested"):
+        if self.data.get("worker_requested"):
             (self.journal.directory / "display-stop").touch()
         try:
             snapshot = self.backend.snapshot()
@@ -260,7 +286,7 @@ class Session:
         except Exception as exc:
             errors.append(str(exc))
         finally:
-            if self.data.get("display_requested"):
+            if self.data.get("worker_requested"):
                 try:
                     self.backend.stop_display(self.journal)
                 except Exception as exc:
@@ -279,7 +305,7 @@ class Session:
         # restore remains an explicit recovery alias after a crash.
         return self.restore()
 
-    def restore(self):
+    def _restore(self):
         if not self.data or self.data["phase"] == "restored":
             return self.status()
         stop_error = None
@@ -298,29 +324,32 @@ class Session:
                            "use restore --launch-cancelled after confirming no launch can still start")
         self.data["phase"] = "restoring"
         self.save()
-        if self.data.get("backups_complete"):
-            # Steam may finish syncing after the game exits. Bound the check and
-            # leave recovery explicit when another writer is still changing files.
-            before = [fingerprint(Path(row["path"])) for row in self.data["backups"]]
+        if self.data.get("backups"):
             self.backend.sleep(2)
-            after = [fingerprint(Path(row["path"])) for row in self.data["backups"]]
-            if before != after:
-                raise RigError("Game/Steam files are still changing; wait for sync to finish and retry restore")
             self.journal.restore()
             self.backend.sleep(2)
             self.journal.verify_restored()
-        # Generated home is wholly session-owned, never a source/owner profile.
-        home = self.journal.directory / "ets2-home"
-        if home.exists():
-            remove(home)
         if stop_error:
             self.data["phase"] = "cleanup-required"
             self.save()
             raise stop_error
+        self.journal.purge_backups()
         self.data["phase"] = "restored"
         self.data.pop("error", None)
         self.save()
         return self.status()
+
+    def restore(self):
+        try:
+            return self._restore()
+        except (OSError, RigError) as exc:
+            if self.data:
+                self.data.update(phase="cleanup-required", error=str(exc))
+                try:
+                    self.save()
+                except OSError:
+                    pass
+            raise RigError(f"Restore requires cleanup: {exc}") from exc
 
     def failure_cleanup(self, error):
         if not self.data or self.data["phase"] == "restored":

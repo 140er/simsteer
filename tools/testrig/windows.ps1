@@ -25,6 +25,7 @@ if ($Action -ne 'inventory') {
 }
 $errors = [System.Collections.Generic.List[string]]::new()
 $signals = [System.Collections.Generic.List[string]]::new()
+$warnings = [System.Collections.Generic.List[string]]::new()
 $tasks = @()
 try {
     foreach ($item in @(
@@ -35,7 +36,7 @@ try {
     }
     $manager = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
     if (@($manager.PendingFileRenameOperations | Where-Object { $_ }).Count) {
-        $signals.Add('PendingFileRenameOperations')
+        $warnings.Add('PendingFileRenameOperations is set; restart may be needed after installation')
     }
     foreach ($path in @('HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy\Settings',
                         'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings',
@@ -73,7 +74,7 @@ $processes = @(Get-CimInstance Win32_Process | ForEach-Object {
     processes = $processes
     restart = @{
         checked_at = [DateTime]::UtcNow.ToString('o')
-        signals = @($signals); tasks = $tasks; errors = @($errors)
+        signals = @($signals); warnings = @($warnings); tasks = $tasks; errors = @($errors)
     }
     errors = @()
 } | ConvertTo-Json -Depth 6 -Compress

@@ -6,11 +6,14 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import ntpath
 
 from . import RigError
 from .display_api import BlackOverlay, NativeDisplay
 from .guard import same_process
 from .state import atomic_json, read_json
+from .state import Journal
+from .discovery import GAMES
 from .windows import ProcessHandle, Windows
 
 
@@ -21,10 +24,12 @@ class DisplayLifecycle:
         self.row = receipt or {"session": session, "ready": False, "errors": [],
                                "original": None, "enable_intent": False, "topology_intent": False,
                                "overlay_closed": False, "vdd_disabled": False, "topology_restored": False}
+        self.row.setdefault("warnings", [])
 
     def start(self):
         try:
-            self.row["original"] = self.api.capture()
+            if self.options["display"] or self.options["overlay"]:
+                self.row["original"] = self.api.capture()
             self.save(self.row)  # original paths/modes/primary BEFORE enabling VDD
             if self.options["overlay"]:
                 self.overlay.keep_awake()
@@ -71,18 +76,23 @@ class DisplayLifecycle:
                 operation()
                 self.row[label] = True
             except BaseException as exc:
-                self.row["errors"].append(label + ": " + str(exc))
                 if label == "topology_restored":
+                    self.row["warnings"].append(label + ": " + str(exc))
                     try:
                         self.api.physical_primary(self.row["original"])
                     except BaseException as fallback:
-                        self.row["errors"].append("physical primary fallback: " + str(fallback))
+                        self.row["warnings"].append("physical primary fallback: " + str(fallback))
+                else:
+                    self.row["errors"].append(label + ": " + str(exc))
         if not self.row["topology_restored"] and self.row["original"]:
             try:
-                self.api.restore(self.row["original"])
+                self.api.restore_physical(self.row["original"])
                 self.row["topology_restored"] = True
+                self.row["topology_fallback"] = True
+                self.row["warnings"].append("Saved display IDs unavailable; verified physical modes/primary restored; " +
+                                            ("VDD disabled" if self.row["vdd_disabled"] else "VDD disable still requires recovery"))
             except BaseException as exc:
-                self.row["errors"].append("topology retry: " + str(exc))
+                self.row["errors"].append("physical topology recovery: " + str(exc))
         self.save(self.row)
 
 
@@ -168,8 +178,47 @@ def stop_worker(journal, backend):
         raise RigError("Display cleanup could not be verified: " + "; ".join(receipt["errors"]))
 
 
+def watch_session(directory, state, parent, lifecycle, activity, *, open_process=ProcessHandle,
+                  clock=time.monotonic, pause=time.sleep):
+    """GUI loop uses lightweight handles, never PowerShell/CIM inventory."""
+    handles = {}
+    start = clock()
+    try:
+        while clock() - start < state["options"]["max_seconds"]:
+            if state["options"]["overlay"]:
+                lifecycle.overlay.pump()
+            if activity.active():
+                return "owner-input", True
+            current = read_json(directory / "state.json")
+            if current["id"] != state["id"]:
+                return "session-changed", False
+            if (directory / "display-stop").exists():
+                return "explicit-stop", True
+            if current["phase"] in ("stopped", "restoring", "restored", "cleanup-required"):
+                return "cleanup", False
+            if current["phase"] == "running":
+                executable = ntpath.normcase(str(Path(current["installation"]["game"]) / GAMES[current["game"]].runner))
+                runners = [row for row in current["owned"] if ntpath.normcase(row["path"]) == executable]
+                active = False
+                for row in runners:
+                    key = (row["pid"], row["created"], row["path"])
+                    if key not in handles:
+                        handles[key] = open_process(row)
+                    active |= handles[key].alive()
+                if not active:
+                    return "game-exited", True
+            elif not parent.alive():
+                return "startup-caller-exited", True
+            pause(0.1)
+        return "deadline", True
+    finally:
+        for handle in handles.values():
+            handle.close()
+
+
 def worker(directory):
-    state = read_json(directory / "state.json")
+    from .activity import OwnerInput
+    state = Journal(directory).data
     backend = Windows()
     parent = ProcessHandle(state["display_parent"])
     receipt = directory / "display-state.json"
@@ -178,35 +227,18 @@ def worker(directory):
     start = time.monotonic()
     recover = False
     supervisor_alive = True
+    activity = None
     try:
         while not (directory / "display-go").exists():
             if not parent.alive() or (directory / "display-stop").exists() or time.monotonic() - start > 30:
                 raise RigError("Display startup was cancelled before the mutation handshake")
             time.sleep(0.1)
+        activity = OwnerInput()
         lifecycle.start()
-        last_check = 0
-        while time.monotonic() - start < state["options"]["max_seconds"]:
-            current = read_json(directory / "state.json")
-            if current["id"] != state["id"] or (directory / "display-stop").exists():
-                break
-            if current["phase"] in ("stopped", "restoring", "restored", "cleanup-required"):
-                break
-            if not parent.alive():
-                if current["phase"] != "running":
-                    recover = True
-                    break  # startup crashed: restore immediately
-                if time.monotonic() - last_check >= 2:
-                    rows = backend.snapshot()["processes"]
-                    if not any(same_process(owned, row) for owned in current["owned"] for row in rows):
-                        recover = True
-                        break
-                    last_check = time.monotonic()
-            if state["options"]["overlay"]:
-                lifecycle.overlay.pump()
-            time.sleep(0.1)
-        else:
-            lifecycle.row["errors"].append("Display session deadline expired; stop and restore the game")
-            recover = True
+        reason, recover = watch_session(directory, state, parent, lifecycle, activity)
+        lifecycle.row["stop_reason"] = reason
+        if reason == "deadline":
+            lifecycle.row["warnings"].append("Session deadline expired")
     except BaseException as exc:
         lifecycle.row["errors"].append(str(exc))
         recover = True
@@ -216,6 +248,8 @@ def worker(directory):
             lifecycle.close()
         finally:
             parent.close()
+            if activity:
+                activity.close()
     if recover and not supervisor_alive:
         recover_session(directory, backend, lifecycle)
     return int(bool(lifecycle.row["errors"]))
@@ -227,12 +261,18 @@ def recover_session(directory, backend, lifecycle):
     from .state import lock
     try:
         with lock(directory.parents[1]):
-            state = read_json(directory / "state.json")
+            state = Journal(directory).data
             if state["id"] != lifecycle.row["session"]:
                 raise RigError("Session changed before autonomous display-failure recovery")
             session = Session(state["game"], directory, backend)
             session.restore()
     except Exception as exc:
+        if "Another test-rig command is running" in str(exc):
+            # start/ready/stop holds the command lock and observes our closed
+            # receipt; that caller performs recovery once this worker exits.
+            lifecycle.row["warnings"].append("Cleanup is being handled by the active test-rig command")
+            lifecycle.save(lifecycle.row)
+            return
         lifecycle.row["errors"].append("Game/config recovery requires restore: " + str(exc))
         lifecycle.save(lifecycle.row)
 

@@ -1,11 +1,11 @@
 """Game-specific disposable configuration. No account or driver operations."""
 
 import configparser
+import io
 import math
 import ntpath
 from pathlib import Path
 import re
-import shutil
 import subprocess
 from urllib.parse import quote
 import zipfile
@@ -21,31 +21,32 @@ def component(value, label, *, empty=False):
     raise RigError(f"Invalid {label}; use a single directory name")
 
 
-def ini(path, changes):
+def ini(path, changes, journal, *, seed=None, replace=False):
     parser = configparser.ConfigParser(interpolation=None, strict=False)
     parser.optionxform = str
-    if path.exists():
-        parser.read_string(path.read_text(encoding="utf-8-sig"))
+    source = path if path.exists() else seed
+    if not replace and source and source.exists():
+        parser.read_string(source.read_text(encoding="utf-8-sig"))
     for section, key, value in changes:
         if not parser.has_section(section):
             parser.add_section(section)
         parser.set(section, key, str(value))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as stream:
-        parser.write(stream, space_around_delimiters=False)
+    stream = io.StringIO()
+    parser.write(stream, space_around_delimiters=False)
+    journal.write(path, stream.getvalue().encode("utf-8"))
 
 
-def uset(path, values):
+def uset(path, values, journal):
     text = path.read_text(encoding="utf-8-sig") if path.exists() else ""
     for key, value in values.items():
         pattern = rf"(?m)^uset {re.escape(key)} .*?$"
         line = f'uset {key} "{value}"'
         text = re.sub(pattern, lambda _: line, text) if re.search(pattern, text) else text + "\n" + line + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    journal.write(path, text.encode("utf-8"))
 
 
 class AssettoCorsa:
+    files = ("controls.ini", "video.ini", "camera_onboard.ini", "camera_manager.ini", "assists.ini", "race.ini")
     def validate(self, installed, options):
         track, car = component(options["track"], "track"), component(options["car"], "car")
         layout = component(options["layout"], "layout", empty=True)
@@ -55,15 +56,13 @@ class AssettoCorsa:
         car_path = installed.game / "content/cars" / car
         if not car_path.is_dir() or not (installed.game / "AssettoCorsa.exe").is_file():
             raise RigError("AC car or Steam launcher is not installed")
-        fingerprint(installed.game / "cfg")
 
     def targets(self, installed, options):
-        return [installed.documents, installed.game / "cfg", installed.userdata]
+        return [folder / name for folder in (installed.documents / "cfg", installed.game / "cfg")
+                for name in self.files]
 
-    def prepare(self, installed, directory, options):
+    def prepare(self, installed, directory, options, journal):
         cfg = installed.documents / "cfg"
-        if not cfg.exists():
-            shutil.copytree(installed.game / "cfg", cfg)
         controls = [
             ("HEADER", "INPUT_METHOD", "X360"), ("STEER", "JOY", -1),
             ("STEER", "AXLE", -1), ("STEER", "FF_GAIN", 0),
@@ -76,15 +75,16 @@ class AssettoCorsa:
                                         (options["width"] / options["height"])))
         # AC reads some defaults from the install tree; both trees are backed up.
         for folder in (cfg, installed.game / "cfg"):
-            ini(folder / "controls.ini", controls)
+            seed = lambda name: installed.game / "cfg" / name
+            ini(folder / "controls.ini", controls, journal, seed=seed("controls.ini"))
             ini(folder / "video.ini", [("VIDEO", "FULLSCREEN", 0),
                 ("VIDEO", "WIDTH", options["width"]), ("VIDEO", "HEIGHT", options["height"]),
-                ("VIDEO", "VSYNC", 1)])
-            ini(folder / "camera_onboard.ini", [("MODE", "FOV", vfov)])
-            ini(folder / "camera_manager.ini", [("LAST_CAMERA", "DRIVABLE_MODE", 0)])
+                ("VIDEO", "VSYNC", 1)], journal, seed=seed("video.ini"))
+            ini(folder / "camera_onboard.ini", [("MODE", "FOV", vfov)], journal, seed=seed("camera_onboard.ini"))
+            ini(folder / "camera_manager.ini", [("LAST_CAMERA", "DRIVABLE_MODE", 0)], journal, seed=seed("camera_manager.ini"))
             ini(folder / "assists.ini", [("ASSISTS", key, value) for key, value in
                 (("AUTO_SHIFTER", 1), ("AUTO_CLUTCH", 1), ("AUTO_BLIP", 1),
-                 ("AUTO_BRAKE", 0), ("DAMAGE", 0), ("FUEL_RATE", 0))])
+                 ("AUTO_BRAKE", 0), ("DAMAGE", 0), ("FUEL_RATE", 0))], journal, seed=seed("assists.ini"))
         skins = installed.game / "content/cars" / options["car"] / "skins"
         choices = sorted(item.name for item in skins.iterdir() if item.is_dir()) if skins.exists() else []
         if not choices:
@@ -106,9 +106,8 @@ class AssettoCorsa:
         # Replace, rather than merge, so a user's SESSION_1 or online parameters
         # cannot leak into this practice run.
         for folder in (cfg, installed.game / "cfg"):
-            (folder / "race.ini").unlink(missing_ok=True)
             ini(folder / "race.ini", [(section, key, value) for section, values in race.items()
-                                      for key, value in values.items()])
+                                      for key, value in values.items()], journal, replace=True)
 
     def launch_uri(self, installed, directory):
         return "steam://rungameid/244210"
@@ -168,27 +167,26 @@ class EuroTruckSimulator:
             raise RigError("ETS2 SCS telemetry plugin is missing; supply a trusted --telemetry-plugin DLL")
 
     def targets(self, installed, options):
-        targets = [installed.documents, installed.userdata]
+        targets = []
         if options.get("telemetry_plugin"):
-            plugins = installed.game / "bin/win_x64/plugins"
-            targets.append(plugins if not plugins.exists() else plugins / "scs-telemetry.dll")
+            targets.append(installed.game / "bin/win_x64/plugins/scs-telemetry.dll")
         return targets
 
-    def prepare(self, installed, directory, options):
+    def prepare(self, installed, directory, options, journal):
         home = directory / "ets2-home"
         if home.exists():
             raise RigError("ETS2 test home already exists; restore the interrupted session before preparing again")
-        home.mkdir()
         profile = home / "profiles" / self.name.encode("utf-8").hex().upper()
         source = Path(options["profile_source"])
         source_hashes = fingerprint(source)
         # Copy only game data from an explicit seed; never copy global Steam or
         # online configuration, cloud profiles, mods or credential stores.
-        profile.mkdir(parents=True)
-        shutil.copytree(source / "save", profile / "save")
+        for file in sorted((source / "save").rglob("*")):
+            if file.is_file():
+                journal.write(profile / file.relative_to(source), file.read_bytes())
         for name in ("controls.sii", "config.cfg", "config_local.cfg"):
             if (source / name).is_file():
-                shutil.copy2(source / name, profile / name)
+                journal.write(profile / name, (source / name).read_bytes())
         text = profile_text(source)
         text = re.sub(r'(?m)^(\s*profile_name\s*:)\s*.*$', rf'\1 "{self.name}"', text)
         text = re.sub(r'(?m)^\s*(?:active_mods|active_packages)(?:\[\d+\])?\s*:.*\n?', '', text)
@@ -198,7 +196,7 @@ class EuroTruckSimulator:
             raise RigError("ETS2 seed has invalid profile metadata")
         text = (text[:end] + '\n is_local: true\n steam_cloud: false\n active_mods: 1\n'
                 ' active_mods[0]: "mod_package.comma_wide_cam|Comma Wide Cam (bumper 120deg/y+1m)"\n' + text[end:])
-        (profile / "profile.sii").write_text(text, encoding="utf-8")
+        journal.write(profile / "profile.sii", text.encode("utf-8"))
         controls = (profile / "controls.sii").read_text(encoding="utf-8-sig")
         changes = {"device joy": f'device joy `xinput.xinput_gamepad_{options["xinput_slot"] + 1}`',
                    "constant c_steer_dz": "constant c_steer_dz 0.000000",
@@ -213,18 +211,16 @@ class EuroTruckSimulator:
             controls, count = re.subn(pattern, lambda match: match[1] + value + '"', controls)
             if count != 1:
                 raise RigError(f"ETS2 seed controls must contain exactly one {key} entry")
-        (profile / "controls.sii").write_text(controls, encoding="utf-8")
-        uset(profile / "config.cfg", {"g_park_brake_init": 1})
-        uset(profile / "config_local.cfg", {"g_trans": 1})
+        journal.write(profile / "controls.sii", controls.encode("utf-8"))
+        uset(profile / "config.cfg", {"g_park_brake_init": 1}, journal)
+        uset(profile / "config_local.cfg", {"g_trans": 1}, journal)
         uset(home / "config.cfg", {"r_fullscreen": 0, "r_mode_width": options["width"],
              "r_mode_height": options["height"], "r_vsync": 1, "g_start_in_truck": 1,
-             "g_last_seen_profile": self.name, "g_save_format": 2, "g_online_loading_screens": 0})
-        (home / "mod").mkdir()
-        shutil.copy2(self.camera, home / "mod/comma_wide_cam.scs")
+             "g_last_seen_profile": self.name, "g_save_format": 2, "g_online_loading_screens": 0}, journal)
+        journal.write(home / "mod/comma_wide_cam.scs", self.camera.read_bytes())
         if options.get("telemetry_plugin"):
             plugin = installed.game / "bin/win_x64/plugins/scs-telemetry.dll"
-            plugin.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(options["telemetry_plugin"], plugin)
+            journal.write(plugin, Path(options["telemetry_plugin"]).read_bytes())
         if fingerprint(source) != source_hashes:
             raise RigError("ETS2 source profile changed while copying; preparation refused")
 

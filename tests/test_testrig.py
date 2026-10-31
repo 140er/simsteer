@@ -82,6 +82,13 @@ class FakeDisplay:
         self.step("physical-primary-fallback")
         self.topology["primary"] = original["primary"]
 
+    def restore_physical(self, original):
+        self.step("restore-physical")
+        self.topology = deepcopy(original)
+
+    def pump(self):
+        self.step("overlay-pump")
+
     def start(self, rectangles):
         assert rectangles == [(-2560, 0, 2560, 1440)]
         self.covered = True
@@ -278,20 +285,18 @@ def test_discovery_missing_game_and_signed_out_steam(rig):
         discover("ac", backend)
 
 
-def test_backup_restore_bytes_absence_empty_dirs_and_crash_retry(tmp_path):
-    original, absent, file = tmp_path / "original", tmp_path / "absent", tmp_path / "single"
-    (original / "empty").mkdir(parents=True)
-    (original / "bytes").write_bytes(b"\x00\xfforiginal\r\n")
+def test_backup_restore_files_absence_and_crash_retry(tmp_path):
+    original, absent, file = tmp_path / "original", tmp_path / "created", tmp_path / "single"
+    original.write_bytes(b"\x00\xfforiginal\r\n")
     file.write_bytes(b"single\xff")
     journal = Journal(tmp_path / "session")
-    journal.data = {"version": 1, "backups": []}
+    journal.data = {"version": Journal.VERSION, "backups": []}
     journal.backup([original, absent, file])
     expected = [fingerprint(path) for path in (original, absent, file)]
-    (original / "bytes").write_text("changed")
-    (original / "new").write_text("new")
-    absent.mkdir()
-    (absent / "generated").write_text("temporary")
-    file.unlink()  # as if restoration crashed after removing a target
+    for path in (original, absent, file):
+        journal.write(path, b"session change")
+    # First file already restored, as if a crash occurred before progress saved.
+    original.write_bytes(b"\x00\xfforiginal\r\n")
     recovered = Journal(journal.directory)
     recovered.restore()
     recovered.restore()
@@ -302,7 +307,7 @@ def test_corrupt_backup_never_deletes_live_data(tmp_path):
     original = tmp_path / "owner"
     original.write_bytes(b"baseline")
     journal = Journal(tmp_path / "session")
-    journal.data = {"version": 1}
+    journal.data = {"version": Journal.VERSION}
     journal.backup([original])
     original.write_bytes(b"still here")
     Path(journal.data["backups"][0]["stored"]).write_bytes(b"corrupt")
@@ -319,7 +324,7 @@ def test_backup_rejects_links_and_session_overlap(tmp_path):
     with pytest.raises(RigError, match="symlink"):
         fingerprint(link)
     journal = Journal(tmp_path / "state")
-    journal.data = {"version": 1}
+    journal.data = {"version": Journal.VERSION}
     with pytest.raises(RigError, match="outside"):
         journal.backup([tmp_path])
 
@@ -333,7 +338,7 @@ def test_lock_releases_and_refuses_concurrent_mutations(tmp_path):
         pass
 
 
-@pytest.mark.parametrize("name", ["obs64.exe", "vrserver.exe", "ForzaHorizon5.exe", "Le Mans Ultimate.exe"])
+@pytest.mark.parametrize("name", ["vrserver.exe", "ForzaHorizon5.exe", "Le Mans Ultimate.exe"])
 def test_guard_busy_software(name):
     with pytest.raises(RigError, match="gaming"):
         require_free(snapshot([{"pid": 1, "name": name}]))
@@ -341,9 +346,9 @@ def test_guard_busy_software(name):
 
 def test_guard_unknown_steam_game_and_reused_pid():
     row = {"pid": 1, "created": "a", "name": "unknown.exe", "path": r"D:\SteamLibrary\steamapps\common\NewGame\unknown.exe"}
-    require_free(snapshot([row]), owned=[row])
+    require_free(snapshot([row], foreground={"pid": 1, "fullscreen": True}), owned=[row])
     with pytest.raises(RigError, match="gaming"):
-        require_free(snapshot([row]), owned=[{**row, "created": "old"}])
+        require_free(snapshot([row], foreground={"pid": 1, "fullscreen": True}), owned=[{**row, "created": "old"}])
 
 
 @pytest.mark.parametrize("idle", [None, -1, 0, 119, float("nan"), float("inf")])
@@ -352,14 +357,14 @@ def test_guard_active_or_unknown_user(idle):
         require_free(snapshot(idle_seconds=idle))
 
 
-@pytest.mark.parametrize("signal", ["RebootRequired", "RebootPending", "PendingFileRenameOperations", "UpdateOrchestrator RebootDeadline"])
+@pytest.mark.parametrize("signal", ["RebootRequired", "RebootPending", "UpdateOrchestrator RebootDeadline"])
 def test_restart_signals_refuse(signal):
     with pytest.raises(RigError, match=signal):
         require_free(snapshot(restart=restart(signals=[signal])))
 
 
 def test_restart_tasks_staleness_missing_and_denied():
-    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
     task = {"name": "Reboot", "state": "Ready", "next_run": future}
     assert restart_reasons(restart(tasks=[task])) == ["UpdateOrchestrator/Reboot"]
     assert restart_reasons(restart(tasks=[{**task, "state": "Disabled"}])) == []
@@ -397,7 +402,7 @@ def test_ac_complete_idempotent_session_and_byte_restore(rig):
     session.stop()
     assert backend.killed == [21, 20]
     session.restore()
-    assert [fingerprint(path) for path in (backend.document_game, backend.gamepath / "cfg", backend.userdata)] == baseline
+    assert [fingerprint(path).get("files") for path in (backend.document_game, backend.gamepath / "cfg", backend.userdata)] == [item.get("files") for item in baseline]
     (backend.document_game / "owner.bin").write_bytes(b"later owner edit")
     session.restore()  # a completed session must never roll back later owner edits
     assert (backend.document_game / "owner.bin").read_bytes() == b"later owner edit"
@@ -489,7 +494,7 @@ def test_guard_rechecked_before_launch_and_display_failure_restores_config(rig):
     session.failure_cleanup(caught.value)
     assert not backend.display.enabled and not backend.display.covered
     assert backend.display.topology == backend.display.original
-    assert fingerprint(backend.document_game) == baseline
+    assert fingerprint(backend.document_game)["files"] == baseline["files"]
     assert backend.uris == []
 
 
@@ -498,7 +503,7 @@ def test_owner_activity_rechecked_after_display_setup(rig):
     real_start = backend.start_display
     def display_then_busy(journal, options):
         real_start(journal, options)
-        backend.busy = {"pid": 500, "name": "obs64.exe"}
+        backend.busy = {"pid": 500, "name": "ForzaHorizon5.exe"}
     backend.start_display = display_then_busy
     with pytest.raises(RigError, match="gaming") as caught:
         session.start({"display": "vdd", "vdd_device": "virtual"}, 5)
@@ -526,21 +531,21 @@ def test_display_failure_after_start_recovers_game_and_config(rig):
     backend.display_lifecycle.close()
     recover_session(backend.directory, backend, backend.display_lifecycle)
     assert backend.killed == [21, 20]
-    assert fingerprint(backend.document_game) == baseline
+    assert fingerprint(backend.document_game)["files"] == baseline["files"]
     assert Session("ac", backend.directory, backend).data["phase"] == "restored"
 
 
 def test_prepare_failure_after_config_write_rolls_back(rig, monkeypatch):
     session, backend = rig
     baseline = fingerprint(backend.document_game)
-    def failed_prepare(installed, directory, options):
-        (installed.documents / "owner.bin").write_bytes(b"changed")
+    def failed_prepare(installed, directory, options, journal):
+        journal.write(installed.documents / "cfg/controls.ini", b"changed")
         raise RigError("config failure")
     monkeypatch.setattr(session.adapter, "prepare", failed_prepare)
     with pytest.raises(RigError, match="config failure") as caught:
         session.prepare({})
     session.failure_cleanup(caught.value)
-    assert fingerprint(backend.document_game) == baseline
+    assert fingerprint(backend.document_game)["files"] == baseline["files"]
 
 
 def test_ets2_local_profile_only_camera_controls_and_cleanup(tmp_path):
@@ -562,7 +567,9 @@ def test_ets2_local_profile_only_camera_controls_and_cleanup(tmp_path):
     assert unquote(backend.uris[0]).startswith('steam://rungameid/227300//-nointro -homedir ')
     assert '-profile "SimSteer Test"' in unquote(backend.uris[0])
     session.restore()
-    assert not home.exists()
+    assert home.exists()  # directories and untracked game logs are retained
+    assert not (profile / "profile.sii").exists()
+    assert not (home / "mod/comma_wide_cam.scs").exists()
     assert fingerprint(seed) == baseline
 
 
@@ -592,7 +599,7 @@ def test_ets2_rejects_ignored_homedir_and_stops_owned_launch(tmp_path):
         session.start({"profile_source": str(seed)}, 5)
     session.failure_cleanup(caught.value)
     assert backend.killed == [20]
-    assert not (backend.directory / "ets2-home").exists()
+    assert not list((backend.directory / "ets2-home").rglob("profile.sii"))
 
 
 def test_display_success_order_saved_original_and_idempotence():
@@ -634,7 +641,7 @@ def test_display_cleanup_failure_does_not_skip_other_steps(failure):
     api.failure = failure
     lifecycle.close()
     assert {"restore-topology", "disable", "overlay-close"}.issubset(api.events)
-    assert lifecycle.row["errors"]
+    assert lifecycle.row["errors"] or lifecycle.row["warnings"]
     assert not lifecycle.row["ready"]
     api.failure = None
     lifecycle.close()
@@ -669,7 +676,8 @@ def test_native_display_extension_preserves_physical_mode_and_uses_primary_flag(
     original = {"primary": "physical", "displays": [{"name": "physical", "x": 0, "y": 0,
         "width": 2560, "height": 1440, "primary": True, "mode": encoded(mode(2560, 1440))}]}
     api = NativeDisplay.__new__(NativeDisplay)
-    api.devices = lambda: [{"name": "virtual", "instance": "virtual"}]
+    api.sources = lambda: [{"name": "virtual", "adapter_path": r"\\?\ROOT#DISPLAY#0000#{5b45201d-f2f2-4f3b-85bb-30ff1f953599}"}]
+    api.physical_displays = lambda layout: layout["displays"]
     api.mode = lambda name, index: mode(1920, 1080)
     queued, active = [], []
     def change(name, data, flags):
@@ -679,7 +687,7 @@ def test_native_display_extension_preserves_physical_mode_and_uses_primary_flag(
                 "x": struct.unpack_from("<i", data, 76)[0], "y": struct.unpack_from("<i", data, 80)[0],
                 "width": struct.unpack_from("<I", data, 172)[0], "height": struct.unpack_from("<I", data, 176)[0]})
     api.change, api.active = change, lambda: active
-    assert api.extend_primary("virtual", original, 1920, 1080)["name"] == "virtual"
+    assert api.extend_primary(r"ROOT\DISPLAY\0000", original, 1920, 1080)["name"] == "virtual"
     assert [item[0] for item in queued] == ["physical", "virtual", None]
     assert queued[0][2] == 0x10000001 and queued[1][2] == 0x10000011
     assert struct.unpack_from("<I", queued[0][1], 72)[0] == 0x20  # position only

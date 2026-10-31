@@ -15,7 +15,7 @@ from .windows import Windows
 def parser():
     command = argparse.ArgumentParser(description="Guarded, disposable Windows game test sessions")
     command.add_argument("game", choices=("guard", "ac", "ets2"))
-    command.add_argument("action", nargs="?", choices=("prepare", "start", "ready", "stop", "restore", "status"))
+    command.add_argument("action", nargs="?", choices=("guard", "prepare", "start", "ready", "stop", "restore", "status"))
     command.add_argument("--session", default="default", help="unique name for this test run")
     command.add_argument("--state-dir", type=Path, help="private state/backup root (default: LocalAppData)")
     command.add_argument("--timeout", type=int, default=180, help="readiness deadline, 1–600 seconds")
@@ -62,7 +62,7 @@ def main(argv=None, *, backend=None):
     for key in ("profile_source", "telemetry_plugin"):
         if key in options:
             options[key] = str(options[key].absolute())
-    if args.game == "guard":
+    if args.game == "guard" or args.action == "guard":
         if set(options) - {"idle_seconds"}:
             command.error("guard only accepts --idle-seconds as a configuration option")
     elif args.action not in ("prepare", "start") and options:
@@ -70,9 +70,11 @@ def main(argv=None, *, backend=None):
     session = None
     try:
         backend = backend or Windows()
-        if args.game == "guard":
-            require_free(backend.snapshot(), idle_seconds=args.idle_seconds or 120)
-            print(json.dumps({"guard": "clear"}))
+        if args.game == "guard" or args.action == "guard":
+            warnings = require_free(backend.snapshot(), idle_seconds=args.idle_seconds or 120)
+            for note in warnings:
+                print("testrig: warning: " + note, file=sys.stderr)
+            print(json.dumps({"guard": "clear", "warnings": warnings}))
             return 0
         root = args.state_dir
         if root is None:
@@ -81,6 +83,10 @@ def main(argv=None, *, backend=None):
                 raise RigError("LocalAppData is unavailable; specify a private --state-dir")
             root = Path(local) / "SimSteer/testrig"
         root = root.absolute()
+        if args.action == "status":
+            result = Session(args.game, root / args.game / args.session, backend).status(live=True)
+            print(json.dumps(result, indent=2))
+            return 0
         with lock(root):
             session = Session(args.game, root / args.game / args.session, backend)
             try:
@@ -103,6 +109,8 @@ def main(argv=None, *, backend=None):
         print(json.dumps(result, indent=2))
         return 0
     except (RigError, OSError, ValueError, KeyboardInterrupt) as exc:
+        if args.action == "status":
+            print(json.dumps({"phase": "recovery-required", "recovery": str(exc)}))
         print(f"testrig: {exc or 'interrupted'}", file=sys.stderr)
         for note in getattr(exc, "__notes__", []):
             print(note, file=sys.stderr)
