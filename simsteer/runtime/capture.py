@@ -8,8 +8,11 @@ restrict to a specific window region, pass `region=(x1, y1, x2, y2)`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ctypes
+import math
 from queue import Empty, Full, Queue
 from threading import Event, Thread
+import sys
 import time
 from typing import TYPE_CHECKING
 
@@ -47,6 +50,7 @@ class Capture:
         self._reader = None
         self._previous = None
         self._unchanged = 0
+        self._timer = None
 
     def __enter__(self) -> "Capture":
         self.start()
@@ -60,9 +64,18 @@ class Capture:
             return
         # Imported here so the loop and replay import on hosts without dxcam.
         import dxcam
-        self._cam = dxcam.create(output_color=self.cfg.output_color)
-        self._cam.start(region=self.cfg.region, target_fps=self.cfg.target_fps,
-                        video_mode=True)
+        if sys.platform == "win32":
+            timer = ctypes.WinDLL("winmm")
+            if timer.timeBeginPeriod(1) != 0:
+                raise OSError("could not request capture timer resolution")
+            self._timer = timer
+        try:
+            self._cam = dxcam.create(output_color=self.cfg.output_color)
+            self._cam.start(region=self.cfg.region, target_fps=self.cfg.target_fps,
+                            video_mode=True)
+        except Exception:
+            self.stop()
+            raise
         self._stop = Event()
         self._frames = Queue(maxsize=1)
         self._previous, self._unchanged = None, 0
@@ -70,6 +83,8 @@ class Capture:
         self._reader.start()
 
     def _read(self, cam, frames, stop):
+        period = 1. / self.cfg.target_fps
+        next_due = time.monotonic()
         while not stop.is_set():
             try:
                 frame = cam.get_latest_frame()
@@ -84,20 +99,28 @@ class Capture:
                 except Empty:
                     pass
                 frames.put_nowait(sample)
-            # Some capture versions return a repeated frame immediately.
-            # Pace these reads so a static image cannot spin the worker.
-            if stop.wait(1. / self.cfg.target_fps):
+            # Charge read/copy time to this tick. Keep the deadline phase
+            # even when a wait rounds up, and skip missed ticks when late.
+            next_due += period
+            now = time.monotonic()
+            if now > next_due:
+                next_due += math.ceil((now - next_due) / period) * period
+            if stop.wait(max(0., next_due - now)):
                 break
 
     def stop(self) -> None:
-        if self._cam is None:
-            return
         self._stop.set()
-        self._cam.stop()
-        if self._reader is not None:
-            self._reader.join(timeout=self.cfg.wait_s)
-        self._cam = None
-        self._previous = None
+        try:
+            if self._cam is not None:
+                self._cam.stop()
+            if self._reader is not None:
+                self._reader.join(timeout=self.cfg.wait_s)
+        finally:
+            self._cam = None
+            self._previous = None
+            if self._timer is not None:
+                self._timer.timeEndPeriod(1)
+                self._timer = None
 
     def grab(self) -> np.ndarray | None:
         assert self._cam is not None, "call start() first"
@@ -107,10 +130,14 @@ class Capture:
             return None
         if frame is None or time.monotonic() - captured_at > self.cfg.max_age_s:
             return None
-        if self._previous is not None and np.array_equal(frame, self._previous):
+        h, w = frame.shape[:2]
+        small = frame[::max(1, math.ceil(h / 32)), ::max(1, math.ceil(w / 64))]
+        if self._previous is not None and np.array_equal(small, self._previous):
             self._unchanged += 1
         else:
-            self._previous = frame.copy()
+            # The reader already owns frame. Retain only a small sample for
+            # freshness so neither a full copy nor a full compare is needed.
+            self._previous = small.copy()
             self._unchanged = 0
         if self._unchanged >= self.cfg.unchanged_ticks:
             return None

@@ -96,16 +96,19 @@ def test_nonfinite_device_command_neutralizes_every_channel(bad, channel, backen
 
 def drive(monkeypatch, *, fault=None, frames=4, key=None, no_frames=False,
           mode="player", force=True, source=None, on_grab=None, speed=20.,
-          telemetry_source=None, tuner_factory=None):
+          telemetry_source=None, tuner_factory=None, keys_at=None):
     import simsteer.runtime.loop as loop
     import simsteer.runtime.output.base as devices
 
     st = SimpleNamespace(i=-1, t=0., checkpoints=[], polls=0, capture_closed=False, telemetry_closed=False)
+    st.sounds = []
+    st.manual = loop.ManualInputs()
+    monkeypatch.setattr(loop, "ManualInputs", lambda: st.manual)
     pad = gamepad()
     monkeypatch.setattr(devices, "Gamepad", lambda: pad)
     manager = devices.DeviceManager()
     monkeypatch.setattr(loop, "DeviceManager", lambda **kw: manager)
-    monkeypatch.setattr(loop.audio, "play", lambda *a: None)
+    monkeypatch.setattr(loop.audio, "play", st.sounds.append)
 
     class Flow(loop.CalibFlow):
         def __init__(self, *args, **kwargs):
@@ -154,6 +157,8 @@ def drive(monkeypatch, *, fault=None, frames=4, key=None, no_frames=False,
                 (vision if fault == "vision" else policy)[11] = np.nan
             if st.i == 1 and fault == "decode_overflow":
                 vision[93] = 1000.
+            if st.i >= 1 and fault == "persistent":
+                vision[11] = np.nan
             return vision, policy
 
     def value(name, normal):
@@ -178,6 +183,8 @@ def drive(monkeypatch, *, fault=None, frames=4, key=None, no_frames=False,
     class Keys:
         def poll(self):
             st.polls += 1
+            if keys_at is not None:
+                return keys_at.get(st.i, [])
             if key and st.i == 1:
                 return [key]
             return []
@@ -219,14 +226,17 @@ def drive(monkeypatch, *, fault=None, frames=4, key=None, no_frames=False,
     if tuner_factory:
         monkeypatch.setattr(loop, "Tuner", lambda *a, **kw: tuner_factory(st, manager))
         monkeypatch.setattr(loop, "FrameQueue", lambda: SimpleNamespace(
-            push=lambda *a: (None, None), last_yuv=None))
+            push=lambda *a: (None, None), last_yuv=None,
+            last_yuv_narrow=None, last_yuv_wide=None))
         monkeypatch.setattr(loop, "_setup_window_or_exit", lambda *a: None)
         monkeypatch.setattr(loop.cv2, "setWindowTitle", lambda *a: None)
         monkeypatch.setattr(loop.cv2, "destroyAllWindows", lambda: None)
         monkeypatch.setattr(loop, "draw_overlay", lambda frame, *a, **kw: frame)
         monkeypatch.setattr(loop, "show_scaled", lambda *a: None)
         monkeypatch.setattr(loop, "HudRenderer", lambda: SimpleNamespace(draw=lambda *a, **kw: None))
-    loop.run(Settings(no_tuner=not tuner_factory, no_probe=True, force_engage=force, hud_mode=mode),
+        monkeypatch.setattr(loop, "draw_developer_panel", lambda *a: None)
+    st.settings = Settings(no_tuner=not tuner_factory, no_probe=True, force_engage=force, hud_mode=mode)
+    loop.run(st.settings,
              "ets2", source=Source(), make_telemetry=lambda: tel,
              clock=SimpleNamespace(now=lambda: st.t), model=Model(), keys=Keys(), headless=not tuner_factory)
     return st, pad, manager

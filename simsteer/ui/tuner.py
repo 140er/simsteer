@@ -671,6 +671,7 @@ class Tuner:
             self._root.after(POLL_MS, self._poll)
 
     def _refresh(self):
+        self._refresh_bind_status()
         self._sync_mode()
         self._sync_controls()
         self._refresh_restart()
@@ -946,8 +947,15 @@ class Tuner:
             self._set_bind_status("Disengage with Insert")
             return
 
-        self.device.request_bind(kind)
-        self._set_bind_status(f"Binding {label}")
+        if self.device.request_bind(kind):
+            self._set_bind_status(f"Binding {label}")
+        else:
+            self._set_bind_status("Cancelled")
+
+    def _refresh_bind_status(self):
+        status = getattr(self.device, "binding_status", "")
+        if status and self._bind_status_label is not None:
+            self._bind_status_label.configure(text=status)
 
     def _set_bind_status(self, text):
         if self._root is not None:

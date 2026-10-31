@@ -212,15 +212,17 @@ threshold).
 Manual sliders for steer / throttle / brake, each with an override
 toggle.
 
-> **Manual override always fires when its toggle is on — including while
-> DISENGAGED.** This is per-axis: you can drive steering manually while
-> leaving throttle/brake to your keyboard/wheel, engaged or not. Useful
-> for testing the output path, forcing a specific axis, or driving the
-> car by slider. Non-overridden axes stay centered so the AI doesn't
-> ghost-drive.
+Manual override works per axis, including while disengaged, when capture
+and telemetry are healthy and all control data is finite. Source loss
+neutralizes output while preserving slider values and selections; manual
+output resumes when those gates recover. Non-overridden axes stay centered
+while disengaged.
 
 The **bind helper** wiggles a chosen input so a game's controller-binding
-wizard can detect it. Disengage first.
+wizard can detect it. Stop and disengage first. Binding works in paused
+menus and on static screens, including when speed telemetry is unavailable.
+Known motion, engagement or a manual override cancels it. The tuner shows
+the countdown, completion or cancellation.
 
 ---
 

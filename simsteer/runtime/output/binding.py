@@ -12,9 +12,11 @@ class Binding:
         self.request = None
         self.started = None
         self.button = None
+        self.status = ""
 
-    def cancel(self, manager):
+    def cancel(self, manager, status="Cancelled"):
         if self.request is not None:
+            self.status = status
             backend = self.request[1]
             if self.button is not None:
                 if manager.is_wheel:
@@ -29,8 +31,8 @@ class Binding:
             return False
         kind, backend = self.request
         if (manager.engaged or manager.device is not backend or manual_override
-                or speed is None or not math.isfinite(speed)
-                or abs(speed) >= OutputDirection.STOP_SPEED_MPS):
+                or (speed is not None and (not math.isfinite(speed)
+                    or abs(speed) >= OutputDirection.STOP_SPEED_MPS))):
             self.cancel(manager)
             return False
         if self.started is None:
@@ -38,12 +40,14 @@ class Binding:
             backend.center()
         elapsed = now - self.started - 4.
         if elapsed < 0:
+            self.status = f"Binding in {math.ceil(-elapsed)} s"
             return True
+        self.status = "Binding"
         button = kind.startswith("button_")
         pedal = "trigger" in kind or kind in ("throttle", "brake")
         duration = 1.2 if pedal else 1. if button else 2.3
         if elapsed >= duration:
-            self.cancel(manager)
+            self.cancel(manager, "Done")
             return True
         value = 1. if elapsed < 1. or pedal or button else 0. if elapsed < 1.3 else -1.
         if manager.is_wheel:

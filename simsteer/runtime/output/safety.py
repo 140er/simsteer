@@ -1,5 +1,10 @@
 """Exit neutralization and serialized binding requests for the output manager.
 
+Every device writer must hold the manager's output lock. Public output
+methods and binding ticks do so already; a future relay thread must submit
+through write_output(), including neutral/handback writes. Direct backend
+or raw-device writes outside that lock are forbidden.
+
 This is a minimum stop path; it does not supply a general command watchdog.
 """
 
@@ -30,7 +35,7 @@ class OutputSafety:
         self._binding = Binding()
         self._console_handler = None
         self._console_registered = False
-        atexit.register(self.close)
+        atexit.register(self.shutdown_output)
         # WINFUNCTYPE exists only on Windows. Keep the callback alive until
         # it has been unregistered; ctypes callbacks otherwise get collected.
         if hasattr(ctypes, "WINFUNCTYPE"):
@@ -44,12 +49,14 @@ class OutputSafety:
 
     def _console_stop(self, event):
         if event in (0, 1, 2, 5, 6):  # interrupt, break, close, logoff, shutdown
-            self.close()
+            self.shutdown_output()
         # Preserve normal interrupt/exit processing after neutralization.
         return False
 
-    def close(self):
+    def shutdown_output(self):
         with self._output_lock:
+            if self._closed:
+                return
             self._closed = True
             try:
                 self._binding.cancel(self)
@@ -57,8 +64,11 @@ class OutputSafety:
                 try:
                     if self.device is not None:
                         self.device.disengage()
+                        close = getattr(self.device, "close", None)
+                        if close is not None:
+                            close()
                 finally:
-                    atexit.unregister(self.close)
+                    atexit.unregister(self.shutdown_output)
                     if self._console_registered:
                         self._kernel.SetConsoleCtrlHandler(self._console_handler, False)
                         self._console_registered = False
@@ -71,7 +81,22 @@ class OutputSafety:
             return False
         self._binding.cancel(self)
         self._binding.request = (kind, self.device)
+        self._binding.status = "Binding in 4 s"
         return True
+
+    @property
+    def binding_active(self):
+        return self._binding.request is not None
+
+    @property
+    def binding_status(self):
+        return self._binding.status
+
+    @output_locked
+    def write_output(self, writer):
+        """Run a device writer under the same lock and shutdown latch."""
+        if self.device is not None:
+            return writer(self.device)
 
     @output_locked
     def cancel_bind(self):

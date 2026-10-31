@@ -60,6 +60,7 @@ from simsteer.core.preprocess import FrameQueue, model_views, yuv6_to_bgr
 from simsteer.games.base import GameProfile, get_profile
 from simsteer.runtime.capture import Capture, CaptureConfig
 from simsteer.runtime.fov import FovSolver, model_vision
+from simsteer.runtime.faults import neutral_decoded
 from simsteer.runtime.output.base import DeviceManager
 from simsteer.runtime.replay import LiveClock
 from simsteer.runtime.telemetry import Telemetry
@@ -256,8 +257,15 @@ def run(settings: Settings, game: GameProfile | str, *,
     was_measuring = False
     last_fault = ""
     restart_args = None
+    current_fault = ""
+    last_stop_banner = float("-inf")
+    healthy_since = None
+    display_decoded = neutral_decoded()
+    last_frame = np.zeros((360, 640, 3), dtype=np.uint8)
 
     def engage_check() -> tuple[bool, str]:
+        if current_fault:
+            return False, current_fault
         if not flow.ai_steering_ready:
             return False, flow.engage_block()
         if pad is None or pad.kind is None:
@@ -284,34 +292,43 @@ def run(settings: Settings, game: GameProfile | str, *,
     def hk(hk_id: str) -> bool:
         return _hk_enabled(hk_id, settings)
 
-    def stop_output(reason: str | NonFiniteError) -> None:
+    def stop_output(reason: str | NonFiniteError = "", *, user_stop=False,
+                    preserve_bind=False) -> None:
+        # All loop disengagement paths share this handback hook. A device
+        # backend may supply insert_disengage() for explicit driver takeover.
         nonlocal last_fault, last_device_axis, was_measuring
-        if pad is not None:
-            pad.disengage()
+        nonlocal was_engaged_last_frame, last_stop_banner, healthy_since
+        was_engaged = bool(pad and (pad.engaged or was_engaged_last_frame))
+        keep_bind = (preserve_bind and pad is not None and not pad.engaged
+                     and getattr(pad, "binding_active", False))
+        if pad is not None and not keep_bind:
+            handback = (getattr(pad, "insert_disengage", pad.disengage)
+                        if user_stop and was_engaged else pad.disengage)
+            handback()
         if flow.output_direction.active:
             flow.output_direction.cancel("Output stopped")
-        manual.steer_override = manual.long_override = False
-        manual.steer = manual.throttle = manual.brake = 0.0
         lat_ctrl.reset()
         long_ctrl.reset()
         probe.reset()
         last_device_axis = None
         was_measuring = False
+        if was_engaged:
+            audio.play("disengage")
+            now = clock.now()
+            if user_stop or now - last_stop_banner >= .25:
+                message = "invalid data" if isinstance(reason, NonFiniteError) else reason
+                set_banner("Disengaged" if user_stop else "Stopped: " + message,
+                           COL_ACCENT_BLUE, 3.0)
+                last_stop_banner = now
+        was_engaged_last_frame = False
         source = str(reason)
-        if source != last_fault:
+        if source and source != last_fault:
             logging.getLogger(__name__).warning("Output stopped: %s", source)
-            message = "invalid data" if isinstance(reason, NonFiniteError) else reason
-            set_banner("DISENGAGED — " + message, COL_ACCENT_BLUE, 3.0)
         last_fault = source
+        healthy_since = None
 
     def restart_calibration(reason: str) -> None:
-        if pad is not None and pad.engaged:
-            pad.disengage()
-            audio.play("disengage")
-        elif pad is not None and flow.output_direction.active:
-            pad.center()
-        probe.reset()
-        lat_ctrl.reset()
+        stop_output(reason)
         flow.restart(reason)
         set_banner("CALIBRATION RESET", (80, 220, 255), 4.0)
 
@@ -329,6 +346,7 @@ def run(settings: Settings, game: GameProfile | str, *,
             print("force-engage: pad engaged at startup (DEV — needs "
                   "calibration to actually track)")
 
+        was_engaged_last_frame = bool(pad and pad.engaged)
         try:
             while max_frames is None or n_frames < max_frames:
                 if tuner is not None:
@@ -339,45 +357,46 @@ def run(settings: Settings, game: GameProfile | str, *,
                 frame_idx += 1
                 t_grab = time.perf_counter()
                 frame = cap.grab()
+                fresh_frame = frame is not None
+                if not fresh_frame and cap.done:
+                    break
                 pressed = keys.poll()
                 if ord("q") in pressed and hk("quit"):
                     break
                 if KEY_INSERT in pressed and pad is not None and pad.engaged:
-                    stop_output("Disengaged")
+                    stop_output(user_stop=True)
                     pressed.remove(KEY_INSERT)
-                if frame is None:
-                    if cap.done:
-                        break
-                    stop_output("Capture unavailable")
-                    if KEY_INSERT in pressed:
-                        set_banner("DISENGAGED", COL_ACCENT_BLUE, 1.5)
-                    if not window_open:
-                        # waitKey only sleeps once a window exists.
-                        time.sleep(0.002)
-                    continue
-                calib.update_for_frame(frame.shape)
+                current_fault = "" if fresh_frame else "Capture unavailable"
+                if fresh_frame:
+                    last_frame = frame
+                    calib.update_for_frame(frame.shape)
+                    n_frames += 1
+                else:
+                    frame = last_frame
                 frame_fov_h_deg = float(calib.fov_h_deg)
-                n_frames += 1
-                t_warp = time.perf_counter()
+                t_warp = t_model = t_ctrl = time.perf_counter()
+                now_perf = clock.now()
+                dt = max(1e-3, now_perf - last)
+                now_wall = now_perf
+                lane_change_active = (lane_change_idx is not None and now_wall < lane_change_until)
+                decoded = display_decoded
+                vx = None
+                ai_steer = steer = ai_throttle = ai_brake = throttle_out = brake_out = 0.
+                fov_vision_s = 0.
+                camera_learning = False
+                camera_rejection = None
+                pipeline_healthy = False
                 restart_reason = flow.take_restart_request()
                 if restart_reason:
                     restart_calibration(restart_reason)
                 if live_params.device_kind != flow.device:
-                    if pad is not None and pad.engaged:
-                        pad.disengage()
+                    stop_output("Output device changed")
                     flow.switch_device(live_params.device_kind)
-                    lat_ctrl.reset()
-                    long_ctrl.reset()
-                    probe.reset()
-                    last_device_axis = None
-                    was_measuring = False
                 if not headless and not window_open:
                     h, w = frame.shape[:2]
                     win_w = min(w, settings.max_width)
                     _setup_window_or_exit(win_w, int(round(h * win_w / w)))
-                    cv2.setWindowTitle(
-                        WINDOW_NAME,
-                        f"SimSteer {__version__} — {profile.display_name}")
+                    cv2.setWindowTitle(WINDOW_NAME, f"SimSteer {__version__} — {profile.display_name}")
                     window_open = True
 
                 # Recover telemetry if it wasn't live at launch.
@@ -398,170 +417,162 @@ def run(settings: Settings, game: GameProfile | str, *,
                     require_finite("telemetry", speed=v_real, yaw=actual_yaw,
                                    wheel=wheel_angle, axis=game_steer, user=user_steer)
                     require_finite("manual", **vars(manual))
-                except NonFiniteError as exc:
-                    stop_output(exc)
-                    continue
-                if not tel.available or v_real is None:
-                    stop_output("Telemetry unavailable")
-
-                # --- Compose desire (nav + manual lane-change), step model ---
-                img_narrow, img_wide = fq.push(frame, calib)
-                now_perf = clock.now()
-                dt = max(1e-3, now_perf - last)
-                nav_desire_idx = nav.tick(v_ego=v_ego, dt=dt, now_t=now_perf)
-                now_wall = now_perf
-                if hasattr(tel, "nav_distance_m"):
-                    nav.update_destination(tel.nav_distance_m(), tel.nav_time_s())
-                lane_change_active = (lane_change_idx is not None
-                                      and now_wall < lane_change_until)
-                effective_idx = (lane_change_idx if lane_change_active
-                                 else nav_desire_idx)
-                if effective_idx is not None:
-                    desire_vec = np.zeros(DESIRE_LEN, dtype=np.float32)
-                    desire_vec[effective_idx] = 1.0
-                else:
-                    desire_vec = None
-                    lane_change_idx = None
-                t_model = time.perf_counter()
-                vision_out, policy_out = model.step(img_narrow, img_wide,
-                                                    desire=desire_vec)
-                t_ctrl = time.perf_counter()
-                try:
-                    decoded = decode(vision_out, policy_out)
-                    require_finite("decoded", **vars(decoded))
-                except NonFiniteError as exc:
-                    stop_output(exc)
-                    continue
-
-                vx = (float(decoded.pose[0])
-                      if decoded.pose is not None and len(decoded.pose) > 0
-                      else None)
-
-                try:
-                    # --- Calibration: FOV measurement, then camera pose ---
-                    fov_vision_s = 0.0
-                    if flow.step is Step.FOV and frame_idx > FRAME_QUEUE_FILL:
-                        before = flow.fov_solver.vision_s
-                        flow.feed_fov(frame, vx, v_real, actual_yaw,
-                                      time.perf_counter)
-                        fov_vision_s = flow.fov_solver.vision_s - before
-                    camera_learning = flow.camera_learning
-                    if camera_learning:
-                        live_calib.update(
-                            calib, decoded.pose, decoded.road_transform,
-                            actual_yaw, v_real,
-                            pose_std=decoded.pose_std,
-                            road_transform_std=decoded.road_transform_std,
-                            wide_from_device_euler=decoded.wide_from_device_euler,
-                            game_steer=game_steer)
-                    camera_rejection = (live_calib.last_rejection_reason
-                                        if camera_learning else None)
-
-                    # --- Lateral + longitudinal control ---
-                    output_fault = flow.observe_output(
-                        command=last_device_axis,
-                        observed=game_steer if tel.available else None,
-                        speed=v_real, engaged=bool(pad and pad.engaged),
-                        manual_override=manual.steer_override,
-                        user_axis=user_steer,
-                        lane_change=lane_change_active or lat_ctrl.last_in_lane_change,
-                        dt=dt)
-                    if output_fault and pad is not None:
-                        pad.disengage()
-                        lat_ctrl.reset()
-                        long_ctrl.reset()
-                        probe.reset()
-                        audio.play("disengage")
-                        set_banner("DISENGAGED — output direction changed", COL_ACCENT_BLUE, 4.0)
-                    ai_steer = lat_ctrl.compute(
-                        decoded, v_ego, actual_wheel_angle=wheel_angle,
-                        lane_change_command_active=lane_change_active, dt=dt,
-                        wheel_sign=flow.steering_sign)
-                    require_finite("lateral", output=ai_steer)
-                    ai_steer = flow.device_axis(ai_steer)
-                    steer = manual.steer if manual.steer_override else ai_steer
-                    if pad is not None and flow.ai_steering_ready and not manual.steer_override:
-                        steer += probe.tick(
-                            dt=dt, ai_axis=steer, v_ego=v_real,
-                            in_lane_change=lane_change_active,
-                            engaged=pad.engaged,
-                            lp_trusted=live_params.trusted(),
-                            calibrating=flow.probe_wanted)
-                    ai_throttle, ai_brake = long_ctrl.compute(decoded, v_ego)
-                    require_finite("longitudinal", throttle=ai_throttle, brake=ai_brake)
-                    if not flow.ai_steering_ready:
-                        ai_throttle = ai_brake = 0.0
-                    if manual.long_override:
-                        throttle_out, brake_out = manual.throttle, manual.brake
-                    else:
-                        throttle_out, brake_out = ai_throttle, ai_brake
-
-                    # --- Feed LiveParams (after the command is known) ---
-                    # Disengaged, the observed axis is the player's, so only
-                    # profiles whose rack response doesn't depend on the input
-                    # device fit from it. Replay has no pad and fits here too.
-                    engaged_now = bool(pad is not None and pad.engaged)
-                    flow.passive_fit = passive_fit_allowed()
-                    if (engaged_now and flow.ai_steering_ready) or (not engaged_now and flow.passive_fit):
-                        # LiveParams fits game input units, never device units.
-                        cmd = (steer * (flow.output_direction.sign if flow.steering_fit else 1)
-                               if engaged_now else game_steer)
-                        live_params.update(game_steer, v_real, wheel_angle,
-                                           commanded_axis=cmd,
-                                           gate_override=flow.gate_override)
-
-                    live_params.validate_state()
-                    live_calib.validate_state()
-                    require_finite("command", steering=steer, throttle=throttle_out,
-                                   brake=brake_out)
-                    # --- Device output ---
-                    last_device_axis = None
-                    if pad is not None:
-                        measuring = flow.output_direction.active
-                        binding = getattr(pad, "tick_bind", lambda *a, **kw: False)(
-                            now_perf, v_real if tel.available else None,
-                            manual_override=manual.steer_override or manual.long_override)
-                        if not tel.available or v_real is None:
-                            stop_output("Telemetry unavailable")
-                        elif binding:
-                            pass
-                        elif measuring:
-                            # Verification is steering only, with AI disengaged.
-                            # INSERT explicitly starts it; --no-probe only disables
-                            # the later rack-fitting perturbation.
-                            steer = flow.measure_output(
-                                speed=v_real if tel.available else None,
-                                observed=game_steer, user_axis=user_steer, dt=dt,
-                                manual_override=manual.steer_override or pad.engaged
-                                or lane_change_active)
-                            require_finite("output_check", steering=steer)
-                            pad.set_steering(steer, force=True)
-                            throttle_out = brake_out = 0.0
-                            if not flow.output_direction.active:
-                                pad.center()
-                                lat_ctrl.reset()
-                        elif was_measuring:
-                            pad.center()
-                        elif pad.engaged:
-                            pad.set_steering(steer)
-                            last_device_axis = steer
-                            pad.set_throttle_brake(throttle_out, brake_out)
+                    require_finite("calibration", **vars(calib))
+                    if not tel.available or v_real is None:
+                        current_fault = current_fault or "Telemetry unavailable"
+                    if current_fault:
+                        stop_output(current_fault, preserve_bind=True)
+                    binding = bool(pad and getattr(pad, "tick_bind", lambda *a, **kw: False)(
+                        now_perf, v_real if tel.available else None,
+                        manual_override=manual.steer_override or manual.long_override))
+                    if fresh_frame:
+                        # --- Compose desire, then run the model ---
+                        img_narrow, img_wide = fq.push(frame, calib)
+                        nav_desire_idx = nav.tick(v_ego=v_ego, dt=dt, now_t=now_perf)
+                        if hasattr(tel, "nav_distance_m"):
+                            nav.update_destination(tel.nav_distance_m(), tel.nav_time_s())
+                        effective_idx = lane_change_idx if lane_change_active else nav_desire_idx
+                        if effective_idx is not None:
+                            desire_vec = np.zeros(DESIRE_LEN, dtype=np.float32)
+                            desire_vec[effective_idx] = 1.0
                         else:
-                            if frame_idx % DISENGAGED_RECENTER_EVERY_N == 0:
-                                pad.center()
-                            if manual.steer_override:
-                                pad.set_steering(manual.steer, force=True)
-                            if manual.long_override:
-                                pad.set_throttle_brake(manual.throttle,
-                                                       manual.brake, force=True)
-                        was_measuring = flow.output_direction.active
+                            desire_vec = None
+                            lane_change_idx = None
+                        t_model = time.perf_counter()
+                        vision_out, policy_out = model.step(img_narrow, img_wide, desire=desire_vec)
+                        t_ctrl = time.perf_counter()
+                        decoded = decode(vision_out, policy_out)
+                        require_finite("decoded", **vars(decoded))
+                        vx = (float(decoded.pose[0])
+                              if decoded.pose is not None and len(decoded.pose) > 0
+                              else None)
 
+                        # --- Calibration: FOV measurement, then camera pose ---
+                        fov_vision_s = 0.0
+                        if flow.step is Step.FOV and frame_idx > FRAME_QUEUE_FILL:
+                            before = flow.fov_solver.vision_s
+                            flow.feed_fov(frame, vx, v_real, actual_yaw,
+                                          time.perf_counter)
+                            fov_vision_s = flow.fov_solver.vision_s - before
+                        camera_learning = flow.camera_learning
+                        if camera_learning:
+                            live_calib.update(
+                                calib, decoded.pose, decoded.road_transform,
+                                actual_yaw, v_real,
+                                pose_std=decoded.pose_std,
+                                road_transform_std=decoded.road_transform_std,
+                                wide_from_device_euler=decoded.wide_from_device_euler,
+                                game_steer=game_steer)
+                        camera_rejection = (live_calib.last_rejection_reason
+                                            if camera_learning else None)
+
+                        # --- Lateral + longitudinal control ---
+                        output_fault = flow.observe_output(
+                            command=last_device_axis,
+                            observed=game_steer if tel.available else None,
+                            speed=v_real, engaged=bool(pad and pad.engaged),
+                            manual_override=manual.steer_override,
+                            user_axis=user_steer,
+                            lane_change=lane_change_active or lat_ctrl.last_in_lane_change,
+                            dt=dt)
+                        if output_fault and pad is not None:
+                            stop_output("Output direction changed")
+                            current_fault = "Output direction changed"
+                        ai_steer = lat_ctrl.compute(
+                            decoded, v_ego, actual_wheel_angle=wheel_angle,
+                            lane_change_command_active=lane_change_active, dt=dt,
+                            wheel_sign=flow.steering_sign)
+                        require_finite("lateral", output=ai_steer)
+                        ai_steer = flow.device_axis(ai_steer)
+                        steer = manual.steer if manual.steer_override else ai_steer
+                        if pad is not None and flow.ai_steering_ready and not manual.steer_override:
+                            steer += probe.tick(
+                                dt=dt, ai_axis=steer, v_ego=v_real,
+                                in_lane_change=lane_change_active,
+                                engaged=pad.engaged,
+                                lp_trusted=live_params.trusted(),
+                                calibrating=flow.probe_wanted)
+                        ai_throttle, ai_brake = long_ctrl.compute(decoded, v_ego)
+                        require_finite("longitudinal", throttle=ai_throttle, brake=ai_brake)
+                        if not flow.ai_steering_ready:
+                            ai_throttle = ai_brake = 0.0
+                        if manual.long_override:
+                            throttle_out, brake_out = manual.throttle, manual.brake
+                        else:
+                            throttle_out, brake_out = ai_throttle, ai_brake
+
+                        # --- Feed LiveParams (after the command is known) ---
+                        # Disengaged, the observed axis is the player's, so only
+                        # profiles whose rack response doesn't depend on the input
+                        # device fit from it. Replay has no pad and fits here too.
+                        engaged_now = bool(pad is not None and pad.engaged)
+                        flow.passive_fit = passive_fit_allowed()
+                        if (engaged_now and flow.ai_steering_ready) or (not engaged_now and flow.passive_fit):
+                            # LiveParams fits game input units, never device units.
+                            cmd = (steer * (flow.output_direction.sign if flow.steering_fit else 1)
+                                   if engaged_now else game_steer)
+                            live_params.update(game_steer, v_real, wheel_angle,
+                                               commanded_axis=cmd,
+                                               gate_override=flow.gate_override)
+
+                        live_params.validate_state()
+                        live_calib.validate_state()
+                        require_finite("command", steering=steer, throttle=throttle_out,
+                                       brake=brake_out)
+                        # --- Device output ---
+                        last_device_axis = None
+                        if pad is not None:
+                            measuring = flow.output_direction.active
+                            if binding:
+                                pass
+                            elif current_fault or not tel.available or v_real is None:
+                                stop_output(current_fault or "Telemetry unavailable")
+                            elif measuring:
+                                # Verification is steering only, with AI disengaged.
+                                # INSERT explicitly starts it; --no-probe only disables
+                                # the later rack-fitting perturbation.
+                                steer = flow.measure_output(
+                                    speed=v_real if tel.available else None,
+                                    observed=game_steer, user_axis=user_steer, dt=dt,
+                                    manual_override=manual.steer_override or pad.engaged
+                                    or lane_change_active)
+                                require_finite("output_check", steering=steer)
+                                pad.set_steering(steer, force=True)
+                                throttle_out = brake_out = 0.0
+                                if not flow.output_direction.active:
+                                    pad.center()
+                                    lat_ctrl.reset()
+                            elif was_measuring:
+                                pad.center()
+                            elif pad.engaged:
+                                pad.set_steering(steer)
+                                last_device_axis = steer
+                                pad.set_throttle_brake(throttle_out, brake_out)
+                            else:
+                                if frame_idx % DISENGAGED_RECENTER_EVERY_N == 0:
+                                    pad.center()
+                                if manual.steer_override:
+                                    pad.set_steering(manual.steer, force=True)
+                                if manual.long_override:
+                                    pad.set_throttle_brake(manual.throttle,
+                                                           manual.brake, force=True)
+                            was_measuring = flow.output_direction.active
+
+                        pipeline_healthy = True
                 except NonFiniteError as exc:
                     stop_output(exc)
-                    continue
+                    current_fault = "Invalid data"
+                    decoded = display_decoded
+                    v_real = actual_yaw = wheel_angle = game_steer = user_steer = None
+                    v_ego = ctrl_cfg.default_speed
+                    ai_steer = steer = ai_throttle = ai_brake = throttle_out = brake_out = 0.
+                    camera_learning = False
+                    camera_rejection = "non_finite"
 
-                if tel.available and v_real is not None:
-                    last_fault = ""
+                if not current_fault:
+                    healthy_since = now_perf if healthy_since is None else healthy_since
+                    if now_perf - healthy_since >= .25:
+                        last_fault = ""
 
                 # --- FPS + auto-disengage (with DML-warmup grace) ---
                 now = clock.now()
@@ -569,36 +580,30 @@ def run(settings: Settings, game: GameProfile | str, *,
                 last = now
                 if (pad is not None and pad.engaged and fps < MIN_HEALTHY_FPS
                         and frame_idx > WARMUP_FRAMES):
-                    pad.disengage()
-                    lat_ctrl.reset()
-                    long_ctrl.reset()
-                    audio.play("disengage")
-                    set_banner(f"DISENGAGED — frame rate dropped ({fps:.1f} fps)",
-                               COL_ACCENT_BLUE, 3.0)
+                    stop_output(f"frame rate dropped ({fps:.1f} fps)")
+                    current_fault = "Low frame rate"
 
                 engaged_now = bool(pad is not None and pad.engaged)
-                if was_engaged_last_frame and not engaged_now and not banner_text:
-                    audio.play("disengage")
-                    set_banner("DISENGAGED", COL_ACCENT_BLUE, 2.0)
+                if was_engaged_last_frame and not engaged_now:
+                    stop_output(user_stop=True)
                 was_engaged_last_frame = engaged_now
                 direction_was_ready = flow.direction.ready
-                flow.tick(Obs(
-                    now=now, dt=dt, v=v_real, yaw_rate=actual_yaw,
-                    wheel=wheel_angle, vx_model=vx,
-                    observed_axis=game_steer,
-                    model_curvature=lat_ctrl.last_curvature,
-                    lane_offset=_lane_offset(decoded), axis=float(steer),
-                    driving=engaged_now or pad is None, engaged=engaged_now,
-                    lane_change=(lane_change_active
-                                 or lat_ctrl.last_in_lane_change),
-                    telemetry_ok=tel.available))
+                if pipeline_healthy:
+                    flow.tick(Obs(
+                        now=now, dt=dt, v=v_real, yaw_rate=actual_yaw,
+                        wheel=wheel_angle, vx_model=vx,
+                        observed_axis=game_steer,
+                        model_curvature=lat_ctrl.last_curvature,
+                        lane_offset=_lane_offset(decoded), axis=float(steer),
+                        driving=engaged_now or pad is None, engaged=engaged_now,
+                        lane_change=(lane_change_active
+                                     or lat_ctrl.last_in_lane_change),
+                        telemetry_ok=tel.available))
                 if flow.direction.ready and not direction_was_ready:
                     lat_ctrl.reset()
                 if (not flow.ai_steering_ready
                         and pad is not None and pad.engaged):
-                    pad.disengage()
-                    lat_ctrl.reset()
-                    long_ctrl.reset()
+                    stop_output("Steering calibration required")
                 allowed, blocked_reason = engage_check()
                 t_render = time.perf_counter()
 
@@ -620,6 +625,9 @@ def run(settings: Settings, game: GameProfile | str, *,
                         print(f"hud: {settings.hud_mode!r}")
                     elif key == ord("r") and hk("recalibrate"):
                         restart_calibration("R pressed")
+                    elif key == KEY_INSERT and current_fault:
+                        audio.play("denied")
+                        set_banner("CANNOT ENGAGE — " + current_fault, COL_ACCENT_BLUE, 3.0)
                     elif key == KEY_INSERT and flow.accept_fov():
                         set_banner(f"FOV {calib.fov_h_deg:.0f}", COL_ACCENT_GREEN, 3.0)
                     elif key == KEY_BACKSPACE and hk("keep_fov") and flow.keep_fov():
@@ -640,12 +648,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                             probe.reset()
                             lat_ctrl.reset()
                         elif pad.engaged:
-                            pad.disengage()
-                            lat_ctrl.reset()
-                            long_ctrl.reset()
-                            audio.play("disengage")
-                            set_banner("DISENGAGED", COL_ACCENT_BLUE, 1.5)
-                            print("-> DISENGAGED")
+                            stop_output(user_stop=True)
                         else:
                             ok, why = engage_check()
                             if not ok:
@@ -711,6 +714,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                         "brake": round(float(brake_out), 4),
                         "engaged": engaged_now,
                         "telemetry": "ok" if tel.available else "lost",
+                        "output_fault": current_fault or None,
                         "camera_learning": camera_learning,
                         "camera_rejection": camera_rejection,
                         "actual_speed_mps": v_real,
@@ -803,7 +807,8 @@ def run(settings: Settings, game: GameProfile | str, *,
 
         finally:
             if pad is not None:
-                getattr(pad, "close", pad.disengage)()
+                stop_output(user_stop=True)
+                getattr(pad, "shutdown_output", pad.disengage)()
             live_params.save()
             live_calib.save_state(game_id)
             calib.save(game=game_id)
