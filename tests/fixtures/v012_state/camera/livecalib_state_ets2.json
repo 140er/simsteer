@@ -1,0 +1,33 @@
+{
+  "certainty_state_version": 1,
+  "bootstrap_samples": 30,
+  "bootstrap_rpy_sum": [
+    0.0,
+    0.29999000059995723,
+    0.29999000059995723
+  ],
+  "bootstrap_height_sum": 36.0,
+  "bootstrap_height_n": 30,
+  "reset_generation": 0,
+  "rpys": [],
+  "heights": [],
+  "wide_sum": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "wide_n": 0,
+  "wide_from_device_estimate": null,
+  "block_rpy_sum": [
+    0.0,
+    0.29999000059995723,
+    0.29999000059995723
+  ],
+  "block_height_sum": 36.0,
+  "block_n": 30,
+  "samples": 30,
+  "rejected": 0,
+  "blocked_counts": {},
+  "last_rejection_reason": null,
+  "cal_status": 0
+}

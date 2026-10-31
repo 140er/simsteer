@@ -1,11 +1,11 @@
 """Axis conversion and explicit pedal calibration, without device I/O."""
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 MAP_PEDAL_WINDOW_S = 3.0
 PEDALS = ("throttle", "brake", "clutch")
+AXIS_MIN, AXIS_MAX = -(2**31), 2**31 - 1  # DirectInput LONG endpoints.
 
 
 def validate_axes(value) -> dict:
@@ -20,7 +20,8 @@ def validate_axes(value) -> dict:
         p = value[name]
         if (not isinstance(p, dict) or set(p) != {"slot", "rest", "full"}
                 or type(p["slot"]) is not int or not 0 <= p["slot"] < 8 or p["slot"] in used
-                or any(type(p[k]) not in (int, float) or not math.isfinite(p[k]) for k in ("rest", "full"))
+                or any(type(p[k]) not in (int, float) or not AXIS_MIN <= p[k] <= AXIS_MAX
+                       for k in ("rest", "full"))
                 or p["rest"] == p["full"]):
             return {}
         used.add(p["slot"])

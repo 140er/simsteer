@@ -86,6 +86,7 @@ class Gamepad:
                 self._pad._busp, self._pad._devicep, ctypes.byref(index))
             if error == errors.VIGEM_ERROR_NONE:
                 if index.value < 4 and get_state(index.value, state) == 0:
+                    self._xinput_index = int(index.value)
                     return
             elif error != errors.VIGEM_ERROR_XUSB_USERINDEX_OUT_OF_RANGE:
                 raise GamepadError(f"could not read virtual gamepad slot: {error:#x}")

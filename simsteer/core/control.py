@@ -50,7 +50,6 @@ in its velocity prediction; we just follow it.
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
@@ -63,6 +62,7 @@ from simsteer.core.finite import require_finite
 from simsteer.core.constants import T_IDXS
 from simsteer.core.learners.liveparams import LiveParams
 from simsteer.paths import load_with_fallback, state_path
+from simsteer.state import snapshot_exists, atomic_save_json, dataclass_values, read_json_object, state_warning
 from simsteer.core.postprocess import Decoded, desired_curvature_lag_adjusted
 
 CONFIG_PATH = state_path("controller")
@@ -263,12 +263,16 @@ class ControllerConfig:
         entirely."""
         if path is None:
             path = load_with_fallback("controller", game)
-        if path is not None and path.exists():
-            data = json.loads(path.read_text())
-            cfg = cls(**{k: v for k, v in data.items()
-                         if k in cls.__dataclass_fields__})
-        else:
-            cfg = cls(**(seed or {}))
+        cfg = cls(**(seed or {}))
+        if path is not None and snapshot_exists(path):
+            try:
+                cfg = cls(**{**asdict(cfg), **dataclass_values(cls, read_json_object(path))})
+                if not (cfg.wheelbase_m > 0 and cfg.default_speed > 0
+                        and cfg.max_speed_mps > 0 and 0 <= cfg.steer_max <= 1):
+                    raise ValueError("invalid controller limits")
+            except (OSError, ValueError, TypeError, OverflowError):
+                state_warning(path, "unreadable; using defaults")
+                cfg = cls(**(seed or {}))
         # No actuator-delay floor for sim use: the game applies steering
         # almost instantly, so lookahead_s can sit near 0 ("snap to now"),
         # which is what the user wants here. Only guard against a negative
@@ -281,7 +285,7 @@ class ControllerConfig:
              path: Path | None = None) -> None:
         if path is None:
             path = state_path("controller", game)
-        path.write_text(json.dumps(asdict(self), indent=2))
+        atomic_save_json(path, asdict(self))
 
 
 class LateralController:

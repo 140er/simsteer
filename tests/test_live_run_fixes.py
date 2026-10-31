@@ -281,10 +281,10 @@ def test_item3_capture_resize_precedes_warp_and_vertical_fov_entry(monkeypatch, 
         assert calib.fov_h_deg == pytest.approx(expected)
         assert calib.fov_v_deg == pytest.approx(72.)
 
-    frames = [np.zeros((1440, 3440, 3), np.uint8), np.zeros((1440, 2560, 3), np.uint8)]
+    frames = [np.zeros((1080, 1920, 3), np.uint8), np.zeros((1200, 1600, 3), np.uint8)]
     run_frames(monkeypatch, tmp_path, frames,
                [dict(speed=10., yaw=0., decoded=healthy_decoded())] * 2, on_push=push)
-    assert seen == [(3440, 1440), (2560, 1440)]
+    assert seen == [(1920, 1080), (1600, 1200)]
 
 
 def test_item4_manual_fov_survives_restart_with_history(monkeypatch, data_dir):
@@ -294,7 +294,8 @@ def test_item4_manual_fov_survives_restart_with_history(monkeypatch, data_dir):
     lp = LiveParams(game="ets2", device_kind="gamepad")
     flow = CalibFlow("ets2", "gamepad", live_calib=lc, live_params=lp, calib=cal)
     for _ in range(120):
-        lc.update(cal, np.array([10., .02, -.03]), np.array([0., 0., 1.2]), 0., 10.)
+        lc.update(cal, np.array([10., .02, -.03]), np.array([0., 0., 1.2]), 0., 10.,
+                  pose_std=np.full(3, .01), road_transform_std=np.full(3, .01))
     assert lc.blocks == 1 and lc._block_n == 20
     save_flow = flow.save
 
@@ -303,7 +304,7 @@ def test_item4_manual_fov_survives_restart_with_history(monkeypatch, data_dir):
         save_flow()
 
     monkeypatch.setattr(flow, "save", save_after_calibration)
-    cal.fov_h_deg = 120.10235969224264
+    cal.fov_h_deg = 120.0
     flow.tick(Obs(now=1., dt=.05))
     before = json.loads((data_dir / "livecalib_state_ets2.json").read_text())
     restored_cal = Calibration.load(game="ets2")
@@ -318,8 +319,8 @@ def test_item4_manual_fov_survives_restart_with_history(monkeypatch, data_dir):
 
 
 REJECTION_CASES = [
-    ("missing_pose", {"pose": None, "v_ego": None}, 0),
-    ("missing_speed", {"v_ego": None}, 0),
+    ("missing_pose", {"pose": None, "v_ego": None}, 1),
+    ("missing_speed", {"v_ego": None}, 1),
     ("speed", {"v_ego": 6., "actual_yaw_rate": .1}, 1),
     ("turning", {"actual_yaw_rate": .04}, 1),
     ("lateral_acceleration", {"v_ego": 100., "actual_yaw_rate": .02}, 1),
@@ -338,6 +339,8 @@ REJECTION_CASES = [
 @pytest.mark.parametrize("reason,changes,rejected", REJECTION_CASES)
 def test_item5_first_failing_reason_and_unchanged_acceptance(reason, changes, rejected):
     lc, cal = LiveCalib(), Calibration()
+    if reason in ("lateral_uncertainty", "height_uncertainty"):
+        lc._rpys.extend(np.zeros(3) for _ in range(5))
     lc._last_game_steer = 0.
     inputs = dict(pose=np.array([10., 0., 0.]), road_transform=np.array([0., 0., 1.2]),
                   actual_yaw_rate=0., v_ego=10., pose_std=np.array([.01, .02, .01]),
@@ -359,13 +362,18 @@ def test_item5_jsonl_records_actual_gate_inputs_without_affecting_acceptance(mon
     lc, rows = run_frames(monkeypatch, tmp_path, frames, observations)
     unlogged, _ = run_frames(monkeypatch, tmp_path, frames, observations, log=False)
     assert lc.samples == unlogged.samples == 1
-    assert lc.rejected == unlogged.rejected == 1
+    assert lc.rejected == unlogged.rejected == 2
     assert [r["camera_rejection"] for r in rows] == ["missing_speed", "speed", None]
     assert rows[0]["actual_speed_mps"] is None  # distinct from the control fallback
     assert rows[0]["actual_yaw_rad_s"] == .01
     assert rows[0]["pose_vx"] == 10.
     assert rows[0]["pose_lateral_std"] == .02
     assert rows[0]["road_height_m"] == 1.2 and rows[0]["road_height_std_m"] == .02
+    assert rows[0]["camera"]["blocked_counts"] == {"missing_speed": 1}
+    assert rows[1]["camera"]["blocked_counts"] == {"missing_speed": 1, "speed": 1}
+    assert rows[2]["camera"]["samples"] == 1
+    assert rows[2]["camera_sample"]["pose"][:3] == [10., 0., 0.]
+    assert rows[2]["camera_sample"]["calibration"]["pitch_deg"] == 0.
     assert rows[0]["fov_h_deg"] == 90.
     assert (rows[0]["frame_width"], rows[0]["frame_height"]) == (320, 180)
 

@@ -83,6 +83,32 @@ def test_live_poll_does_not_erase_uncommitted_typing(tuner):
     assert tuner.ctrl_cfg.max_speed_mps == 25
 
 
+def test_camera_block_and_no_progress_are_visible_in_normal_tuner(tuner):
+    from simsteer.calib.flow import CalibFlow, Obs, Step
+    from simsteer.core.learners.livecalib import CameraBlockedReason, LiveCalib
+    from simsteer.ui.hud import HudState
+    from simsteer.ui.state import calibration_view
+
+    learner = LiveCalib()
+    flow = CalibFlow("ets2", "gamepad", live_calib=learner, live_params=tuner.live_params,
+                     calib=tuner.calib, persist=False, model_identity={})
+    flow._enter(Step.CAMERA)
+    learner.record_blocked(CameraBlockedReason.MODEL_SPEED)
+    tuner.calib_flow = flow
+    tuner.update_state(HudState(calibration=calibration_view(flow=flow, v_ego=10.)))
+    tuner._refresh()
+    tuner._root.update()
+    assert tuner._camera_status.winfo_ismapped()
+    assert "MODEL_SPEED" in tuner._camera_status.cget("text")
+    flow._camera_no_progress_s = 179.75
+    flow.tick(Obs(now=180., dt=.25, v=10.))
+    tuner.update_state(HudState(calibration=calibration_view(flow=flow, v_ego=10.)))
+    tuner._refresh()
+    tuner._root.update()
+    assert "NO_PROGRESS" in tuner._camera_status.cget("text")
+    assert "FOV" in tuner._camera_status.cget("text")
+
+
 def test_restart_visibility_and_complete_workbench_inventory(tuner):
     assert not tuner._restart_button.winfo_ismapped()
     game = next(k for k, v in tuner._game_choices.items() if v == "ats")

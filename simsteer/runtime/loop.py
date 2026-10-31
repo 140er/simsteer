@@ -53,19 +53,22 @@ from simsteer.core.finite import NonFiniteError, require_finite
 from simsteer.core.control import (
     ControllerConfig, LateralController, LongitudinalController,
 )
-from simsteer.core.learners.livecalib import CalStatus, LiveCalib
+from simsteer.core.learners.livecalib import CalStatus, CameraBlockedReason, LiveCalib
 from simsteer.core.learners.liveparams import LiveParams
 from simsteer.core.model import DrivingModel
 from simsteer.core.postprocess import decode
 from simsteer.core.preprocess import FrameQueue, model_views, yuv6_to_bgr
 from simsteer.games.base import GameProfile, get_profile
+from simsteer.paths import data_dir
+from simsteer.state import flush_state, take_state_warnings, with_background_saves
+from simsteer.state_import import import_legacy_state
 from simsteer.runtime.capture import Capture, CaptureConfig
 from simsteer.runtime.fov import FovSolver, model_vision
 from simsteer.runtime.faults import neutral_decoded
 from simsteer.runtime.output.base import DeviceManager
 from simsteer.runtime import wheel_session
 from simsteer.runtime.replay import LiveClock
-from simsteer.runtime.telemetry import Telemetry
+from simsteer.runtime.telemetry import Telemetry, vehicle_context
 from simsteer.ui.hud import (
     COL_ACCENT_BLUE, COL_ACCENT_GREEN, COL_ACCENT_RED, HudRenderer, HudState,
 )
@@ -141,6 +144,7 @@ def _setup_window_or_exit(w: int, h: int) -> None:
             f"Run with --headless or install opencv-python. ({e.err})") from None
 
 
+@with_background_saves
 def run(settings: Settings, game: GameProfile | str, *,
         source=None,
         make_telemetry: Callable[[], Telemetry] | None = None,
@@ -160,14 +164,15 @@ def run(settings: Settings, game: GameProfile | str, *,
     `headless` opens no window, no tuner and reads no keys.
 
     Pinned-game only for now: the live `GameDetector` + `SessionManager`
-    hot-swap arrives in Phase 2. Per-game state (calibration, controller
-    config, liveparams, livecalib) is read from the same files v1 uses,
-    so an existing v1 calibration carries over."""
+    hot-swap arrives in Phase 2. Per-game state is loaded from the
+    per-user data directory and validated before use."""
     profile = get_profile(game) if isinstance(game, str) else game
     if profile is None:
         print(f"unknown game: {game!r}")
         return 2
     game_id = profile.id
+    import_legacy_state()
+    state_root = data_dir()
     if source is None:
         source = Capture(CaptureConfig(target_fps=20))
     if make_telemetry is None:
@@ -196,11 +201,18 @@ def run(settings: Settings, game: GameProfile | str, *,
     probe = SteeringProbe(enabled=not settings.no_probe)
     hud_renderer = HudRenderer()
 
-    pad = None
+    pad: DeviceManager | None = None
 
     def passive_fit_allowed() -> bool:
         return (profile.capabilities.passive_fit_safe or settings.passive_fit
                 or bool(getattr(pad, "passthrough_live", False)))
+
+    if not settings.no_gamepad:
+        pad = DeviceManager(initial_kind=settings.device,
+                            vjoy_device_id=settings.vjoy_device,
+                            passthrough=settings.wheel_passthrough, settings=settings)
+        if pad.kind is None:
+            print(f"device init failed: {pad.last_error} — overlay-only")
 
     vision = model_vision(model)
     flow = CalibFlow(
@@ -214,17 +226,11 @@ def run(settings: Settings, game: GameProfile | str, *,
         certification_context=lambda: {
             "controller": asdict(ctrl_cfg), "device": settings.device,
             "device_id": settings.vjoy_device,
+            "binding": getattr(pad, "binding_identity", None),
+            **vehicle_context(tel),
             "capabilities": asdict(profile.capabilities)},
         make_fov_solver=lambda: FovSolver(vision, model_views),
         fov_config=profile_reader(profile.camera.fov_source))
-
-    pad: DeviceManager | None = None
-    if not settings.no_gamepad:
-        pad = DeviceManager(initial_kind=settings.device,
-                            vjoy_device_id=settings.vjoy_device,
-                            passthrough=settings.wheel_passthrough, settings=settings)
-        if pad.kind is None:
-            print(f"device init failed: {pad.last_error} — overlay-only")
 
     # Tk owns its windows; publish presentation snapshots from this loop.
     tuner = None
@@ -373,6 +379,9 @@ def run(settings: Settings, game: GameProfile | str, *,
                         stop_output("Restarting")
                         break
                 frame_idx += 1
+                state_notice = take_state_warnings(state_root)
+                if state_notice:
+                    set_banner(state_notice, COL_ACCENT_RED, 10.0)
                 t_grab = time.perf_counter()
                 frame = cap.grab()
                 fresh_frame = frame is not None
@@ -392,6 +401,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                 else:
                     frame = last_frame
                 frame_fov_h_deg = float(calib.fov_h_deg)
+                frame_camera_pose = {name: getattr(calib, name)
+                                     for name in ("pitch_deg", "yaw_deg", "height_m")}
                 t_warp = t_model = t_ctrl = time.perf_counter()
                 now_perf = clock.now()
                 dt = max(1e-3, now_perf - last)
@@ -583,6 +594,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                         pipeline_healthy = True
                 except NonFiniteError as exc:
                     stop_output(exc)
+                    if flow.camera_learning:
+                        live_calib.record_blocked(CameraBlockedReason.NON_FINITE)
                     current_fault = "Invalid data"
                     decoded = display_decoded
                     v_real = actual_yaw = wheel_angle = game_steer = user_steer = None
@@ -745,6 +758,15 @@ def run(settings: Settings, game: GameProfile | str, *,
                         "output_fault": current_fault or None,
                         "camera_learning": camera_learning,
                         "camera_rejection": camera_rejection,
+                        "camera_sample": ({
+                            **{name: (getattr(decoded, name).tolist()
+                                      if getattr(decoded, name) is not None else None)
+                               for name in ("pose", "road_transform", "pose_std",
+                                            "road_transform_std", "wide_from_device_euler")},
+                            "actual_yaw_rate": actual_yaw, "v_ego": v_real,
+                            "game_steer": game_steer,
+                            "calibration": frame_camera_pose,
+                        } if camera_learning else None),
                         "actual_speed_mps": v_real,
                         "actual_yaw_rad_s": actual_yaw,
                         "pose_vx": vx,
@@ -851,6 +873,9 @@ def run(settings: Settings, game: GameProfile | str, *,
                     log_f.close()
                 if window_open:
                     cv2.destroyAllWindows()
+    # Output is neutral and capture is closed. A replacement process must
+    # observe the final snapshots before it starts loading its own state.
+    flush_state()
     if restart_args:
         try:
             subprocess.Popen(restart_args)

@@ -36,10 +36,10 @@ def centroid(view):
 @pytest.mark.parametrize("bigmodel", [False, True], ids=["narrow", "wide"])
 @pytest.mark.parametrize("pitch", [-4.0, 0.0, 2.0, 5.0])
 @pytest.mark.parametrize("w,h,hfov,top,bottom", [
-    (2560, 1440, 120.0, 0.0, 0.0),
+    (1920, 1080, 120.0, 0.0, 0.0),
     (1920, 1080, 75.0, 0.18, 0.04),
     (1366, 768, 90.0, 0.03, 0.20),
-    (3440, 1440, 110.0, 0.12, 0.12),
+    (3840, 1600, 110.0, 0.12, 0.12),
     (1600, 1200, 60.0, 0.0, 0.15),
     (1280, 720, 40.0, 0.05, 0.0),
 ])
@@ -76,6 +76,6 @@ def test_simple_warp_explicitly_ignores_yaw():
 
 def test_capture_dimensions_override_stale_saved_dimensions():
     scene = vanishing_point_scene(1920, 1080, 75.0, 2.0)
-    calib = Calibration(image_w=3440, image_h=1440, fov_h_deg=75.0, pitch_deg=2.0)
+    calib = Calibration(image_w=2560, image_h=1600, fov_h_deg=75.0, pitch_deg=2.0)
     assert np.array_equal(warp_to_model(scene, calib),
                           warp_to_model(scene, replace(calib, image_w=1920, image_h=1080)))

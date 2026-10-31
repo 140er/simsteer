@@ -206,7 +206,7 @@ def test_no_test_fire_and_passthrough_skips_periodic_center(monkeypatch, tmp_pat
 def test_passthrough_off_replay_matches_base_bytes(tmp_path, monkeypatch):
     import simsteer.runtime.loop as loop
     # Execute the exact parent loop against the same replay/model/state.
-    original = subprocess.run(["git", "show", "075280a:simsteer/runtime/loop.py"],
+    original = subprocess.run(["git", "show", "894a9f4:simsteer/runtime/loop.py"],
                               check=True, capture_output=True, text=True).stdout
     parent = ModuleType("parent_loop")
     exec(compile(original, "parent_loop.py", "exec"), parent.__dict__)

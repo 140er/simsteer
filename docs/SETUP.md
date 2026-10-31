@@ -320,6 +320,31 @@ full release/zip checklist, including the optional code-signing step.
 
 ---
 
+## Saved state and upgrades
+
+Source and packaged runs save settings and calibration in
+`%LOCALAPPDATA%\SimSteer` on Windows and `$XDG_DATA_HOME/SimSteer`
+(or `~/.local/share/SimSteer`) elsewhere. Runtime snapshots use atomic
+replacement. Driving sessions send saves to one background writer and
+flush the final snapshots after output stops.
+
+On the first live start, an empty data directory imports user-owned
+settings, calibration, learned state and first-drive completion flags from
+the old source/app directory. JSON state passes the normal guarded loaders.
+Unusable calibration and learner files stay at the source so startup can
+use the game profile's seeds. Settings retain valid fields when another
+field is invalid. The import records completion,
+keeps the original files and preserves existing per-user state. An
+interrupted import resumes without overwriting completed files.
+
+If an upgrade already removed the old root files, copy your saved files
+into the data directory before starting SimSteer.
+
+A temporary lack of vehicle identity holds engagement until telemetry
+identifies the vehicle. The same vehicle restores the saved certificate;
+a changed vehicle requires confirmation and a new Check. Readers without
+vehicle identity support keep calibrations scoped to the remaining context.
+
 ## Run from source (Smart App Control)
 
 Windows 11 can run Smart App Control, which blocks apps that are neither

@@ -40,7 +40,6 @@ auto-migrated on load.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from collections import deque
@@ -53,6 +52,10 @@ import numpy as np
 from simsteer.core.finite import NonFiniteError, require_finite
 
 from simsteer.paths import load_with_fallback, state_path
+from simsteer.state import (
+    atomic_save_json, bounded_int, bounded_number, delete_state,
+    read_json_object, snapshot_exists, state_warning,
+)
 
 CONFIG_PATH = state_path("liveparams")
 
@@ -918,8 +921,7 @@ class LiveParams:
                 key = f"{self.game}_{self.device_kind}"
             try:
                 p = state_path("liveparams", key)
-                if p.exists():
-                    p.unlink()
+                delete_state(p)
             except OSError:
                 pass
 
@@ -959,16 +961,16 @@ class LiveParams:
         if device_kind and game:
             key = f"{game}_{device_kind}"
             game_dev_path = state_path("liveparams", key)
-            if game_dev_path.exists():
+            if snapshot_exists(game_dev_path):
                 return game_dev_path
         # Per-game (pre-device-suffix) file.
         if game:
             game_path = state_path("liveparams", game)
-            if game_path.exists():
+            if snapshot_exists(game_path):
                 return game_path
         # Legacy single-file.
         legacy = state_path("liveparams", None)
-        if legacy.exists():
+        if snapshot_exists(legacy):
             return legacy
         return None
 
@@ -986,13 +988,28 @@ class LiveParams:
 
         if path is None:
             path = cls._resolve_path(game, device_kind)
-        if path is None or not path.exists():
+        if path is None or not snapshot_exists(path):
             return _seeded()
         try:
-            data = json.loads(path.read_text())
-            require_finite("liveparams.load", state=data)
-        except (json.JSONDecodeError, OSError, NonFiniteError):
+            return cls._decode_state(read_json_object(path))
+        except (OSError, ValueError, TypeError, OverflowError):
+            state_warning(path, "unreadable; using defaults")
             return _seeded()
+
+    @classmethod
+    def _decode_state(cls, data: dict) -> _Persisted:
+        for field in ("a", "b", "c", "scale", "offset"):
+            if field in data:
+                data[field] = bounded_number(data[field], -1e12, 1e12)
+        if "samples" in data:
+            data["samples"] = bounded_int(data["samples"])
+        if "coverage_version" in data:
+            bounded_int(data["coverage_version"])
+        if "legacy_fit" in data and type(data["legacy_fit"]) is not bool:
+            raise ValueError("invalid legacy flag")
+        if data.get("axis_sign") is not None:
+            if type(data["axis_sign"]) not in (int, float) or data["axis_sign"] not in (-1, 1):
+                raise ValueError("invalid axis sign")
         # New format: {"a", "b", "c", "samples"}.
         if "a" in data:
             try:
@@ -1001,7 +1018,7 @@ class LiveParams:
                 c = float(data.get("c", C_INIT))
                 samples = int(data.get("samples", 0))
             except (ValueError, TypeError, OverflowError):
-                return _seeded()
+                raise ValueError("invalid saved fit")
         else:
             # Legacy format: {"scale", "offset", "samples"}. Migrate:
             #   wheel = scale·axis + offset
@@ -1023,9 +1040,9 @@ class LiveParams:
                 scale = float(data.get("scale", 0.1))
                 offset = float(data.get("offset", 0.0))
             except (ValueError, TypeError):
-                return _seeded()
+                raise ValueError("invalid saved fit")
             if abs(scale) < 1e-6:
-                return _seeded()
+                raise ValueError("invalid saved fit")
             a = 1.0 / scale
             b = B_INIT
             c = -offset / scale
@@ -1042,27 +1059,34 @@ class LiveParams:
                      and abs(b) <= B_ABS_MAX
                      and abs(c) <= _GATES_DEFAULT["c_abs_max"])
         if not in_bounds:
-            return _seeded()
+            raise ValueError("invalid saved fit")
         axis_sign = data.get("axis_sign")
         if axis_sign not in (-1, 1):
             axis_sign = None
         coverage = data.get("coverage", {})
         if not (isinstance(coverage, dict) and all(
-                k.isdigit() and isinstance(v, list) and len(v) == 2
-                and all(type(n) is int and n >= 0 for n in v)
+                k.isdigit() and 0 <= int(k) <= 1000 // TRUSTED_SPEED_BIN_MPS
+                and isinstance(v, list) and len(v) == 2
+                and all(type(n) is int and 0 <= n <= (1 << 31) - 1 for n in v)
                 for k, v in coverage.items())):
-            coverage = {}
+            raise ValueError("invalid coverage counts")
         speed_min, speed_max = data.get("coverage_speed_min"), data.get("coverage_speed_max")
-        if not all(type(v) in (int, float) and np.isfinite(v) for v in (speed_min, speed_max)):
-            speed_min = speed_max = None
+        for speed in (speed_min, speed_max):
+            if speed is not None:
+                bounded_number(speed, 0, 1000)
+        if (speed_min is None) != (speed_max is None) or (
+                speed_min is not None and speed_min > speed_max):
+            raise ValueError("invalid speed span")
         ranges = data.get("coverage_speed_ranges", {})
         if not isinstance(ranges, dict):
-            ranges = {}
-        ranges = {k: v for k, v in ranges.items()
-                  if k in coverage and isinstance(v, list) and len(v) == 2
-                  and all(type(n) in (int, float) and np.isfinite(n) for n in v)
-                  and int(k) * TRUSTED_SPEED_BIN_MPS <= v[0] <= v[1]
-                  < (int(k) + 1) * TRUSTED_SPEED_BIN_MPS}
+            raise ValueError("invalid speed ranges")
+        for key, values in ranges.items():
+            if key not in coverage or not isinstance(values, list) or len(values) != 2:
+                raise ValueError("invalid speed range")
+            low, high = (bounded_number(v, 0, 1000) for v in values)
+            if not (int(key) * TRUSTED_SPEED_BIN_MPS <= low <= high
+                    < (int(key) + 1) * TRUSTED_SPEED_BIN_MPS):
+                raise ValueError("invalid speed range")
         legacy_fit = data.get("legacy_fit", data.get("coverage_version") is None
                               and samples >= TRUSTED_MIN_SAMPLES and not coverage) is True
         return _Persisted(a=a, b=b, c=c, samples=samples, axis_sign=axis_sign,
@@ -1085,7 +1109,7 @@ class LiveParams:
             path = state_path("liveparams", key)
         try:
             self.validate_state()
-            path.write_text(json.dumps({
+            atomic_save_json(path, {
                 "a": self.a_linear,
                 "b": self.b_quad,
                 "c": self.c_bias,
@@ -1097,7 +1121,7 @@ class LiveParams:
                 "coverage_speed_min": self.coverage_speed_min,
                 "coverage_speed_max": self.coverage_speed_max,
                 "legacy_fit": self.legacy_fit,
-            }, indent=2, allow_nan=False))
+            })
         except NonFiniteError as exc:
             logging.getLogger(__name__).warning("Not saving non-finite state: %s", exc)
         except OSError:

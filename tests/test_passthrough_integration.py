@@ -79,6 +79,8 @@ def test_simulator_takeover_reengage_and_nan_share_one_writer(monkeypatch):
         sim.vjoy.SetAxis = checked
         manager = simulated_manager(monkeypatch, sim)
         assert manager.passthrough
+        assert manager.binding_identity == dict(kind="wheel", backend="vjoy", index=1,
+                                                steering="x", throttle="y", brake="z")
         io = manager.device.io
         try:
             until(io, lambda: manager.physical.ok)
