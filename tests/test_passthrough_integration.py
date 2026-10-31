@@ -214,6 +214,13 @@ def test_loop_fault_preserves_player_controls(monkeypatch, tmp_path, fault):
             self.steering_fit = False
             self.step = loop.Step.DONE
             self.lc.cal_status = loop.CalStatus.CALIBRATED
+            from simsteer.calib.score import evaluate
+            from test_calib_score import _drive
+            self.calib.update_for_frame((180, 320, 3))
+            self._check_requested = True
+            self._check_context = self._context()
+            self.result = {**evaluate(_drive(), self.check_policy).to_dict(),
+                           "context": self._check_context}
 
     with FanatecSim("dd2", live_instance=1) as sim:
         manager = simulated_manager(monkeypatch, sim)
