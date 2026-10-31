@@ -155,16 +155,17 @@ def geometry_probe(clip, frame_pairs, calib, vision, selected=None):
     times = all_times[::step]
     frames = [cv2.imread(str(clip / "frames" / f"{i:06d}.jpg"))
               for i in range(0, len(all_times), step)]
-    variants = [("simple", "simple", 0., 152., 0.),
-                ("perspective", "perspective", 0., 152., 0.),
-                ("simple_pinned_cy", "simple", 0., 151.8, 0.),
-                ("perspective_pinned_cy", "perspective", 0., 151.8, 0.),
-                ("subpixel_simple_pinned_cy", "subpixel", 0., 151.8, 0.),
-                ("pinned_nearest_yuv", "pinned_nearest", 0., 151.8, 0.),
-                ("pitch_minus_025", "simple", -.25, 152., 0.),
-                ("pitch_plus_025", "simple", .25, 152., 0.),
-                ("principal_minus_1px", "simple", 0., 152., -1.),
-                ("principal_plus_1px", "simple", 0., 152., 1.)]
+    cy = warp.SBIGMODEL_CY
+    variants = [("simple", "simple", 0., cy, 0.),
+                ("perspective", "perspective", 0., cy, 0.),
+                ("simple_legacy_cy", "simple", 0., 152., 0.),
+                ("perspective_legacy_cy", "perspective", 0., 152., 0.),
+                ("subpixel_simple_pinned_cy", "subpixel", 0., cy, 0.),
+                ("pinned_nearest_yuv", "pinned_nearest", 0., cy, 0.),
+                ("pitch_minus_025", "simple", -.25, cy, 0.),
+                ("pitch_plus_025", "simple", .25, cy, 0.),
+                ("principal_minus_1px", "simple", 0., cy, -1.),
+                ("principal_plus_1px", "simple", 0., cy, 1.)]
     results = []
     for name, kind, pitch_delta, cy, shift in variants:
         if selected and name not in selected:

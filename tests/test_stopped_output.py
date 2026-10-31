@@ -151,7 +151,7 @@ def run_plant(monkeypatch, tmp_path, *, polarity=-1, convention=1, inversion=1,
     monkeypatch.setattr(loop, "LongitudinalController", lambda cfg: SimpleNamespace(
         compute=lambda *args: (0.3, 0.0), reset=lambda: None))
     monkeypatch.setattr(loop, "FrameQueue", lambda: SimpleNamespace(
-        push=lambda *args, **kwargs: (None, None), ready=True, span_s=.2,
+        push=lambda *args, **kwargs: (None, None), ready=True, pair_ok=True, span_s=.2,
         resets=0, reset=lambda: None))
     tel = SimpleNamespace(
         available=True, speed_mps=lambda: st.speed, yaw_rate_rad_s=lambda: 0.0,

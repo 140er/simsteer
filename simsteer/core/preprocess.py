@@ -31,7 +31,8 @@ from simsteer.core.constants import MODEL_H, MODEL_W, SRC_H, SRC_W
 from simsteer.core.warp import warp_to_model
 from simsteer.core.finite import require_finite
 from simsteer.core.timing import (
-    CONTEXT_PERIOD_S, FRAME_PERIOD_S, TIME_EPSILON_S, frame_gap, frame_geometry,
+    CONTEXT_PERIOD_S, FRAME_PERIOD_S, PAIR_SPAN_TOL_S, TIME_EPSILON_S,
+    frame_gap, frame_geometry, frame_pose,
 )
 
 if TYPE_CHECKING:
@@ -134,9 +135,11 @@ class FrameQueue:
         self._buf_narrow: deque[np.ndarray] = deque()
         self._buf_wide: deque[np.ndarray] = deque()
         self._times: deque[float] = deque()
+        self._poses: deque[tuple] = deque()
         self._geometry: tuple | None = None
         self.span_s = 0.0
         self.ready = False
+        self.pair_ok = False
         self.resets = 0
         self.last_yuv_narrow: np.ndarray | None = None
         self.last_yuv_wide: np.ndarray | None = None
@@ -150,9 +153,11 @@ class FrameQueue:
         self._buf_narrow.clear()
         self._buf_wide.clear()
         self._times.clear()
+        self._poses.clear()
         self._geometry = None
         self.span_s = 0.0
         self.ready = False
+        self.pair_ok = False
         self.last_yuv_narrow = self.last_yuv_wide = None
         self.resets += 1
 
@@ -174,11 +179,11 @@ class FrameQueue:
         previous = self._times[-1] if self._times else None
         if timestamp is None:
             timestamp = 0.0 if previous is None else previous + FRAME_PERIOD_S
-        require_finite("frame", timestamp=timestamp)
         geometry = frame_geometry(calib, bgr.shape)
         if (frame_gap(previous, timestamp)
                 or (self._geometry is not None and geometry != self._geometry)):
             self.reset()
+        require_finite("frame", timestamp=timestamp)
         self._geometry = geometry
         self.last_captured_shape = bgr.shape[:2]
         narrow_bgr, wide_bgr = crop_for_model(bgr, calib)
@@ -193,6 +198,7 @@ class FrameQueue:
         self._buf_narrow.append(narrow_yuv)
         self._buf_wide.append(wide_yuv)
         self._times.append(timestamp)
+        self._poses.append(frame_pose(calib))
         target = timestamp - CONTEXT_PERIOD_S
         self.ready = self.ready or target >= self._times[0] - TIME_EPSILON_S
         # Keep the sample just before the target as well as the newer ones.
@@ -200,8 +206,14 @@ class FrameQueue:
             self._times.popleft()
             self._buf_narrow.popleft()
             self._buf_wide.popleft()
+            self._poses.popleft()
         j = min(range(len(self._times)), key=lambda i: abs(self._times[i] - target))
         self.span_s = timestamp - self._times[j]
+        # A pose refinement keeps engagement and policy history. Only the
+        # calibration consumers skip pairs warped with different poses.
+        self.pair_ok = (self.ready and self._poses[j] == self._poses[-1]
+                        and abs(self.span_s - CONTEXT_PERIOD_S)
+                        <= PAIR_SPAN_TOL_S + TIME_EPSILON_S)
 
         narrow_stack = np.concatenate(
             [self._buf_narrow[j], self._buf_narrow[-1]], axis=0)

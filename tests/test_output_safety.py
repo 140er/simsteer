@@ -96,7 +96,7 @@ def test_nonfinite_device_command_neutralizes_every_channel(bad, channel, backen
 
 def drive(monkeypatch, *, fault=None, frames=4, key=None, no_frames=False,
           mode="player", force=True, source=None, on_grab=None, speed=20.,
-          telemetry_source=None, tuner_factory=None, keys_at=None):
+          telemetry_source=None, tuner_factory=None, keys_at=None, frame_queue_factory=None):
     import simsteer.runtime.loop as loop
     import simsteer.runtime.output.base as devices
 
@@ -128,9 +128,9 @@ def drive(monkeypatch, *, fault=None, frames=4, key=None, no_frames=False,
 
     monkeypatch.setattr(loop, "CalibFlow", Flow)
     # Fault tests start at an already warm, certified checkpoint.
-    monkeypatch.setattr(loop, "FrameQueue", lambda: SimpleNamespace(
-        push=lambda *a, **kw: (None, None), ready=True, span_s=.2,
-        resets=0, reset=lambda: None))
+    monkeypatch.setattr(loop, "FrameQueue", frame_queue_factory or (lambda: SimpleNamespace(
+        push=lambda *a, **kw: (None, None), ready=True, pair_ok=True, span_s=.2,
+        resets=0, reset=lambda: None)))
 
     class Source:
         done = False
@@ -238,7 +238,7 @@ def drive(monkeypatch, *, fault=None, frames=4, key=None, no_frames=False,
         monkeypatch.setattr(loop, "Tuner", lambda *a, **kw: tuner_factory(st, manager))
         monkeypatch.setattr(loop, "FrameQueue", lambda: SimpleNamespace(
             push=lambda *a, **kw: (None, None), last_yuv=None,
-            last_yuv_narrow=None, last_yuv_wide=None, ready=True,
+            last_yuv_narrow=None, last_yuv_wide=None, ready=True, pair_ok=True,
             span_s=.2, resets=0, reset=lambda: None))
         monkeypatch.setattr(loop, "_setup_window_or_exit", lambda *a: None)
         monkeypatch.setattr(loop.cv2, "setWindowTitle", lambda *a: None)

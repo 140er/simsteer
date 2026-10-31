@@ -50,7 +50,7 @@ def test_frame_pair_and_pose_use_elapsed_time(small_views, hz):
 
 
 @pytest.mark.parametrize("change", [
-    {"fov_h_deg": 80.}, {"pitch_deg": 1.}, {"yaw_deg": 1.}, {"height_m": 1.5},
+    {"fov_h_deg": 80.},
     {"crop_top_pct": .1}, {"crop_bottom_pct": .1}, {"simple_warp": False},
     {"cx_frac": .4}, {"cy_frac": .4}, {"image_w": 800}, {"image_h": 600},
 ])
@@ -145,7 +145,7 @@ def test_model_reset_clears_features_and_held_desire(model_inputs, reset):
     left = np.eye(8, dtype=np.float32)[3]
     for i in range(10):
         model.step(pixels(1), desire=left, timestamp=i / 20)
-    t = .7 if reset == "gap" else 0.
+    t = .8 if reset == "gap" else 0.
     if reset == "pause":
         model.reset()
         t = .5
@@ -281,7 +281,7 @@ def test_loop_resets_on_capture_gap_pause_and_geometry(monkeypatch, tmp_path, sm
             if state.i == 40:
                 self.done = True
                 return None
-            t = state.i / 20 + (.2 if state.i >= 9 else 0.)
+            t = state.i / 20 + (.3 if state.i >= 9 else 0.)
             self.frame_timestamp = t
             state.t = 20. + t * 2  # Processing time is a different clock.
             if state.i == 30:
@@ -317,7 +317,7 @@ def test_loop_resets_on_capture_gap_pause_and_geometry(monkeypatch, tmp_path, sm
                     clock=SimpleNamespace(now=lambda: state.t), log_path=str(log)) == 0
     for i in (9, 15, 18, 24, 30):
         assert {(i, kind) for kind in ("frames", "model", "fov")} <= set(events)
-    assert stamps == pytest.approx([i / 20 + (.2 if i >= 9 else 0.) for i in range(40)])
+    assert stamps == pytest.approx([i / 20 + (.3 if i >= 9 else 0.) for i in range(40)])
     rows = [json.loads(line) for line in log.read_text().splitlines()]
     for i in (0, 9, 18, 24, 30):
         assert rows[i]["vision_span_s"] == 0.
@@ -330,7 +330,7 @@ def test_loop_resets_on_capture_gap_pause_and_geometry(monkeypatch, tmp_path, sm
         runs = receipt["runs"]
         assert [(r["capture_width"], r["capture_height"], r["samples"]) for r in runs] == [
             (2, 2, 23), (3, 2, 15)]
-        assert [r["mean_ms"] for r in runs] == pytest.approx([2700 / 23, 100])
+        assert [r["mean_ms"] for r in runs] == pytest.approx([2900 / 23, 100])
         assert {r["hud_mode"] for r in runs} == {"user"}
     else:
         assert not log.with_suffix(".metrics.json").exists()

@@ -59,7 +59,7 @@ from simsteer.core.learners.liveparams import LiveParams
 from simsteer.core.model import DrivingModel
 from simsteer.core.postprocess import decode
 from simsteer.core.preprocess import FrameQueue, model_views, yuv6_to_bgr
-from simsteer.core.timing import CONTEXT_PERIOD_S
+from simsteer.core.timing import CONTEXT_PERIOD_S, MIN_HEALTHY_FPS
 from simsteer.games.base import GameProfile, get_profile
 from simsteer.runtime.capture import Capture, CaptureConfig
 from simsteer.runtime.fov import FovSolver, model_vision
@@ -90,7 +90,6 @@ DESIRE_LANE_CHANGE_RIGHT = 4
 
 KEY_BACKSPACE = 8
 
-MIN_HEALTHY_FPS = 8.0
 DISENGAGED_RECENTER_EVERY_N = 20
 # DirectML compiles its kernels on the first few inferences (<5 fps);
 # don't enforce the fps auto-disengage until past this many frames.
@@ -352,6 +351,7 @@ def run(settings: Settings, game: GameProfile | str, *,
     def restart_calibration(reason: str) -> None:
         stop_output(reason)
         flow.restart(reason)
+        reset_temporal_state()
         set_banner("CALIBRATION RESET", (80, 220, 255), 4.0)
 
     with source as cap:
@@ -469,6 +469,11 @@ def run(settings: Settings, game: GameProfile | str, *,
                         now_perf, v_real if tel.available else None,
                         manual_override=manual.steer_override or manual.long_override))
                     if fresh_frame:
+                        try:
+                            require_finite("frame", timestamp=frame_timestamp)
+                        except NonFiniteError:
+                            reset_temporal_state()
+                            raise
                         # --- Compose desire, then run the model ---
                         resets = fq.resets
                         img_narrow, img_wide = fq.push(frame, calib, timestamp=frame_timestamp)
@@ -501,16 +506,16 @@ def run(settings: Settings, game: GameProfile | str, *,
 
                         # --- Calibration: FOV measurement, then camera pose ---
                         fov_vision_s = 0.0
-                        if flow.step is Step.FOV and fq.ready and telemetry_available:
+                        if flow.step is Step.FOV and telemetry_available:
                             before = flow.fov_solver.vision_s
                             # The solver consumes raw vision velocity plus
                             # its measured span; decoded pose is corrected.
                             raw_vx = vx * fq.span_s / CONTEXT_PERIOD_S if vx is not None else None
                             flow.feed_fov(frame, raw_vx, v_real, actual_yaw,
                                           time.perf_counter, timestamp=frame_timestamp,
-                                          frame_span_s=fq.span_s)
+                                          frame_span_s=fq.span_s, pair_ok=fq.pair_ok)
                             fov_vision_s = flow.fov_solver.vision_s - before
-                        camera_learning = flow.camera_learning and fq.ready and telemetry_available
+                        camera_learning = flow.camera_learning and fq.pair_ok and telemetry_available
                         if camera_learning:
                             live_calib.update(
                                 calib, decoded.pose, decoded.road_transform,
@@ -784,6 +789,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                         "actual_yaw_rad_s": actual_yaw,
                         "pose_vx": vx,
                         "vision_span_s": fq.span_s,
+                        "vision_pair_ok": fq.pair_ok,
                         "frame_timestamp": frame_timestamp,
                         "engage_blocked_reason": blocked_reason or None,
                         "live_frame_period_ms": live_frame_period_ms,

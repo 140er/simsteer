@@ -60,8 +60,8 @@ class Decoded:
     lane_lines: np.ndarray        # (4, 33, 2)
     lane_lines_prob: np.ndarray   # (4,) — sigmoid'd
     road_edges: np.ndarray        # (2, 33, 2)
-    pose: np.ndarray              # (6,) — vehicle ego-motion (m/s, rad/s) in device frame
-    pose_std: np.ndarray          # (6,) — model's per-axis std for the above; gates LiveCalib
+    pose: np.ndarray | None       # (6,) — ego motion; absent without a temporal pair
+    pose_std: np.ndarray | None   # (6,) — per-axis std; absent without a temporal pair
     road_transform: np.ndarray    # (6,) — road frame in device coords (trans + euler)
     road_transform_std: np.ndarray  # (6,) — std on the same; height-std gate uses [2]
     wide_from_device_euler: np.ndarray  # (3,) — model's wide-cam mount estimate (rad)
@@ -107,9 +107,12 @@ def decode(vision_flat: np.ndarray, policy_flat: np.ndarray, *,
             raise ValueError("negative vision frame span")
         # The vision head reads displacement as velocity over its trained
         # 200 ms pair. Correct both linear/angular rates and their stds.
-        scale = CONTEXT_PERIOD_S / frame_span_s if frame_span_s > 0 else 0.0
-        pose_mu = pose_mu * scale
-        pose_std = pose_std * scale
+        if frame_span_s == 0:
+            pose_mu = pose_std = None
+        else:
+            scale = CONTEXT_PERIOD_S / frame_span_s
+            pose_mu = pose_mu * scale
+            pose_std = pose_std * scale
 
     road_tf_raw = _slice(vision_flat, "road_transform", VISION_SLICES)  # 12 = mu(6) + std(6)
     road_tf_mu, road_tf_std = _split_mu_std(road_tf_raw)

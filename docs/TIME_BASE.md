@@ -21,15 +21,25 @@ extends that contract to variable capture rates using frame timestamps:
   zeros before the available history. Desire rising edges are max-pooled
   into 200 ms windows and expire after five seconds. At exactly 20 Hz the
   tensors match upstream's skip-four and pool-four operations.
-- A gap longer than 100 ms, a backwards/repeated timestamp, a pause or a
-  geometry/FOV change clears temporal inputs. Engagement waits for a fresh
-  200 ms history. Resuming telemetry also clears frames collected while
-  paused. Calibration Checks from the previous adapter are invalidated.
+- A gap longer than 250 ms (twice the supported 8 Hz period), a non-finite,
+  backwards/repeated timestamp, a pause or a crop/resolution/FOV/warp-mode
+  change clears temporal inputs. A flow reset clears them explicitly.
+  Engagement waits for a fresh 200 ms history. Resuming telemetry also
+  clears frames collected while paused. Earlier-adapter Checks are invalidated.
+- Ordinary reader jitter preserves history. A main vision pair is eligible
+  for camera learning and the FOV estimate only when its span is within
+  60 ms of 200 ms and both buffered frames carry the same pitch/yaw/height
+  tag. Pose edits from every writer preserve engagement and policy history;
+  straddling pairs are skipped until the tags match again.
 
 The FOV solver receives raw vision speed and the measured vision-pair
 span. Each candidate warp also records its own previous-frame timestamp;
 both stages apply `0.2 / measured_span` to the speed ratio. Previously
 saved ratios without this timing contract are discarded.
+Candidate pairs retain their four-tick schedule and are independent of the
+main pair's quality flag. A pose change clears their cached frame pairs,
+while preserving accumulated ratios. A completed solve stays completed.
+At zero frame span, decoded pose and its uncertainty are both absent.
 
 Live runs with rendering print the mean `live_frame_period_ms` per native
 capture resolution and HUD mode. With a JSONL log, the same run receipt is
@@ -43,8 +53,15 @@ resamples its saved frames at 10, 15, 18 and 20 Hz. It records real ONNX
 speed and FOV results, plus a separate exact-flow FOV probe that isolates
 time-span math. Exact-flow accuracy does not certify a network's absolute
 FOV accuracy: scene-dependent speed bias can remain at the trained rate.
+`tools/measure_capture_timing.py` separately probes a jittered 20 Hz reader
+sampled by 8/9/10/12/15/18/20 Hz consumers for 60 seconds per rate. It records
+resets, ready frames and eligible calibration pairs without live capture.
 
 ## Absolute FOV accuracy
+
+Absolute accuracy and candidate-selection changes are deferred to the
+recorded-game evaluation. This timing change preserves the selection rule,
+acceptance thresholds and the 20 Hz results on both synthetic clips.
 
 The full-model solver has an unresolved scale bias on the synthetic
 calibration scenes. At the true FOV, its learned speed can be lower than

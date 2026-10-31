@@ -10,7 +10,7 @@ PINNED_SHA256 = {
 }
 # Bump for semantic changes to model inputs, decoding, shapes or constants.
 # Comments and formatting must not invalidate saved calibration Checks.
-ADAPTER_VERSION = 5
+ADAPTER_VERSION = 6
 
 
 def _sha256(path: Path) -> str:

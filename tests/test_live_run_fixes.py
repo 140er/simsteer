@@ -228,7 +228,7 @@ def run_frames(monkeypatch, tmp_path, frames, observations, *, log=True, on_push
         return None, None
 
     monkeypatch.setattr(loop, "FrameQueue", lambda: SimpleNamespace(
-        push=push, ready=True, span_s=.2, resets=0, reset=lambda: None))
+        push=push, ready=True, pair_ok=True, span_s=.2, resets=0, reset=lambda: None))
 
     class Source:
         done = False

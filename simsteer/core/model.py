@@ -106,9 +106,9 @@ class DrivingModel:
         previous = self._times[-1] if self._times else None
         if timestamp is None:
             timestamp = 0.0 if previous is None else previous + FRAME_PERIOD_S
-        require_finite("model", timestamp=timestamp)
         if frame_gap(previous, timestamp):
             self.reset()
+        require_finite("model", timestamp=timestamp)
 
         # --- Vision ---
         vision_outputs = self.vision.run(

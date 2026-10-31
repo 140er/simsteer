@@ -49,7 +49,7 @@ import numpy as np
 from simsteer.core.constants import FRAME_SKIP
 from simsteer.core.finite import require_finite
 from simsteer.core.timing import (
-    CONTEXT_PERIOD_S, FRAME_PERIOD_S, frame_gap, frame_geometry,
+    CONTEXT_PERIOD_S, FRAME_PERIOD_S, frame_gap, frame_geometry, frame_pose,
 )
 
 FOV_MIN_DEG, FOV_MAX_DEG = 40.0, 150.0
@@ -107,6 +107,7 @@ class FovSolver:
         self._prev_times: list[float | None] = []
         self._last_timestamp: float | None = None
         self._geometry: tuple | None = None
+        self._pose_tag: tuple | None = None
         self._tick = 0
         self._candidate_phase = 0
         self.vision_s = 0.0
@@ -144,29 +145,37 @@ class FovSolver:
                v_ego: float | None, yaw_rate: float | None,
                perf_counter: Callable[[], float] | None = None, *,
                timestamp: float | None = None,
-               frame_span_s: float = CONTEXT_PERIOD_S) -> float | None:
+               frame_span_s: float = CONTEXT_PERIOD_S,
+               pair_ok: bool = True) -> float | None:
         """Use raw vision vx and the measured span of its stacked pair.
 
         Candidate pairs have separate spans, since each candidate is
         evaluated every fourth frame. Returns a newly solved FOV or None.
         """
+        if self.done:
+            return None
         if timestamp is None:
             timestamp = (0.0 if self._last_timestamp is None
                          else self._last_timestamp + FRAME_PERIOD_S)
-        require_finite("fov", timestamp=timestamp, frame_span_s=frame_span_s)
         shape = frame.shape if frame is not None else (calib.image_h, calib.image_w)
         geometry = frame_geometry(calib, shape)
         if (frame_gap(self._last_timestamp, timestamp)
                 or (self._geometry is not None and geometry != self._geometry)):
             self.reset()
+        require_finite("fov", timestamp=timestamp, frame_span_s=frame_span_s)
         self._last_timestamp = timestamp
         self._geometry = geometry
-        if self.done:
-            return None
+        pose_tag = frame_pose(calib)
+        if self._pose_tag is not None and pose_tag != self._pose_tag:
+            # Never infer a candidate pair across a pose refinement. Keep
+            # accumulated evidence and the four-tick candidate schedule.
+            self._prev = [None for _ in self.candidates]
+            self._prev_times = [None for _ in self.candidates]
+        self._pose_tag = pose_tag
         if self.applied_fov is None:
             self.applied_fov = float(calib.fov_h_deg)
         if self.stage == "estimate":
-            if (_usable(v_ego, yaw_rate) and vx_model is not None
+            if (pair_ok and _usable(v_ego, yaw_rate) and vx_model is not None
                     and vx_model > 0.1 and frame_span_s > 0):
                 self._ratios.append(vx_model / v_ego * CONTEXT_PERIOD_S / frame_span_s)
             if len(self._ratios) >= ESTIMATE_SAMPLES:

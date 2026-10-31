@@ -161,9 +161,10 @@ def measure(clip: Path, out: Path) -> dict:
                 if n >= 5:
                     solver.update(frame, calib, raw_vx, SPEED_MPS, 0.0,
                                   **({"timestamp": t, "frame_span_s": span}
-                                     if stamped_solver else {}))
-                ratio = float(decoded.pose[0]) / SPEED_MPS
-                if t >= 2.0:
+                                     if stamped_solver else {}),
+                                  **({"pair_ok": queue.pair_ok} if hasattr(queue, "pair_ok") else {}))
+                ratio = float(decoded.pose[0]) / SPEED_MPS if decoded.pose is not None else None
+                if t >= 2.0 and ratio is not None:
                     ratios.append(ratio)
                 log.write(json.dumps({"t": t, "source_frame": i,
                                       "span_s": span, "raw_vx": raw_vx,
