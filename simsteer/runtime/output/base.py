@@ -194,12 +194,18 @@ class DeviceManager(OutputSafety):
     def shutdown_output(self):
         with self._lifecycle_lock:
             with self._output_lock:
+                if self._closed:
+                    return
                 self._shutdown_requested = True
-                if self.passthrough:
+                relay = self.passthrough
+                if relay:
                     self._device.io.stopping.set()
-            if self.passthrough:
-                self._device.close()
-            super().shutdown_output()
+            try:
+                if relay:
+                    self._device.close()
+            finally:
+                # The owner handles relay release, even after a timed-out join.
+                super().shutdown_output(close_device=not relay)
 
     @output_locked
     def resume_output(self):

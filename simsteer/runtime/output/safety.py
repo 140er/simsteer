@@ -13,7 +13,7 @@ from __future__ import annotations
 import atexit
 import ctypes
 from functools import wraps
-from threading import RLock
+from threading import RLock, get_ident
 
 from simsteer.runtime.output.binding import Binding
 
@@ -34,10 +34,12 @@ class OutputGate:
         self._output_lock = RLock()
         self._closed = False
 
-    def write_output(self, writer):
-        """Serialize a complete output operation; closed gates reject it."""
+    def write_output(self, writer, *, cleanup=False):
+        """Serialize output; cleanup permits the owner's final neutral/release."""
         with self._output_lock:
-            if not self._closed:
+            io = getattr(getattr(self, "device", None), "io", None)
+            final_release = cleanup and io is not None and io.stopping.is_set() and io.ident == get_ident()
+            if not self._closed or final_release:
                 return writer(getattr(self, "device", None))
 
 
@@ -65,7 +67,7 @@ class OutputSafety(OutputGate):
         # Preserve normal interrupt/exit processing after neutralization.
         return False
 
-    def shutdown_output(self):
+    def shutdown_output(self, *, close_device=True):
         with self._output_lock:
             if self._closed:
                 return
@@ -74,7 +76,7 @@ class OutputSafety(OutputGate):
                     try:
                         self._binding.cancel(self)
                     finally:
-                        if self.device is not None:
+                        if close_device and self.device is not None:
                             self.device.disengage()
                             close = getattr(self.device, "close", None)
                             if close is not None:

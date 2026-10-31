@@ -826,18 +826,22 @@ def run(settings: Settings, game: GameProfile | str, *,
                 show_scaled(overlay, settings.max_width)
 
         finally:
-            if pad is not None:
-                stop_output(user_stop=True)
-                getattr(pad, "shutdown_output", pad.disengage)()
-            live_params.save()
-            live_calib.save_state(game_id)
-            calib.save(game=game_id)
-            flow.save()
-            tel.close()
-            if log_f is not None:
-                log_f.close()
-            if window_open:
-                cv2.destroyAllWindows()
+            try:
+                if pad is not None:
+                    try:
+                        stop_output(user_stop=True)
+                    finally:
+                        getattr(pad, "shutdown_output", pad.disengage)()
+            finally:
+                live_params.save()
+                live_calib.save_state(game_id)
+                calib.save(game=game_id)
+                flow.save()
+                tel.close()
+                if log_f is not None:
+                    log_f.close()
+                if window_open:
+                    cv2.destroyAllWindows()
     if restart_args:
         try:
             subprocess.Popen(restart_args)

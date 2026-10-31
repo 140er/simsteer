@@ -147,8 +147,10 @@ can add to the commanded throttle. Steering blends back to the rim within
 two seconds. The status label shows **AI**, **Player** or **No wheel**.
 The hard takeover limit also measures travel from the end of the engage
 grace period, so gradual turns cannot be absorbed indefinitely. The test-fire
-key is disabled during passthrough; Bind remains available while disengaged.
-On disconnect or an input/output error the relay centres steering and
+key is disabled; Bind remains available while disengaged.
+An AI fault ends autonomous control immediately; the player's rim and mapped
+pedals keep driving through the relay, including during capture or telemetry
+stalls. On wheel loss or an input/output error the relay centres steering and
 releases all pedals. Stop the vehicle before quitting: exit also centres
 steering and releases pedals. Console close requests this cleanup too.
 Windows does not deliver logoff/shutdown console events after the app loads

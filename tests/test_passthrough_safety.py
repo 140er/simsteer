@@ -188,7 +188,7 @@ def test_delivered_console_exit_callbacks_neutralize_on_owner(event):
         thread = threading.Thread(target=lambda: results.append(handler(event)))
         thread.start()
         thread.join(.5)
-        assert results == [1] and not wheel.io.is_alive()
+        assert results == [0] and not wheel.io.is_alive()
         assert dll.values == {0x30: 0x4000, 0x31: 1, 0x32: 1, 0x33: 1}
         assert {c[3] for c in dll.calls} == {wheel.io.ident}
         assert registrations[-1][1] == 0

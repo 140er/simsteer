@@ -31,6 +31,10 @@ def percentile(values, p):
     return ordered[max(0, math.ceil(len(ordered) * p) - 1)] if ordered else 0.0
 
 
+def player_output(physical):
+    return Override().step(0, physical, Commands())
+
+
 class ConsoleExit:
     """Console events ask the I/O owner to neutralize and release its device."""
     def __init__(self, close, *, api=None):
@@ -42,7 +46,7 @@ class ConsoleExit:
                 close()
             except Exception:
                 LOG.exception("Wheel console exit failed")
-            return 1
+            return 0  # Continue to the manager's permanent shutdown handler.
         self.callback = callback_type(on_event)
         if api is None:
             api = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -67,7 +71,7 @@ class WheelIo(threading.Thread):
         self.reader_factory = reader_factory or (lambda: PhysicalWheel(settings))
         self.feeder_factory = feeder_factory or (lambda: VJoyFeeder(device_id))
         self.write_output = write_output or OutputGate().write_output
-        self.inhibited, self.reset = threading.Event(), threading.Event()
+        self.reset = threading.Event()
         self.stop_epoch = 0
         self.lock, self.ready, self.stopping = threading.Lock(), threading.Event(), threading.Event()
         self.commands, self.output, self.physical = Commands(), Output(), Physical()
@@ -104,16 +108,17 @@ class WheelIo(threading.Thread):
                         p = replace(p, throttle=None, clutch=None)
                     machine.rim_range_deg = self.settings.rim_range_deg
                     if reset:
-                        machine.step(now, Physical(), Commands())
-                    out = machine.step(now, Physical() if self.inhibited.is_set() else p, commands)
-                    if out != previous or now - written_at >= RELAY_REFRESH_S:
+                        machine = Override(self.settings.rim_range_deg)
+                        machine.output = player_output(p)
+                    out = machine.step(now, p, commands)
+                    if reset or epoch != self.stop_epoch or out != previous or now - written_at >= RELAY_REFRESH_S:
                         def emit(_):
                             with self.lock:
-                                actual = (Output() if self.inhibited.is_set() or self.stopping.is_set()
-                                          or epoch != self.stop_epoch else out)
+                                actual = (Output() if self.stopping.is_set() else
+                                          player_output(p) if epoch != self.stop_epoch else out)
                                 feeder.write(actual)
                                 return actual
-                        out = self.write_output(emit)
+                        out = self.write_output(emit) or Output()
                         finished = time.monotonic()
                         if p.ok:
                             self.latencies.append(max(0, finished - p.sampled_at) * 1000)
@@ -131,7 +136,8 @@ class WheelIo(threading.Thread):
                         break
                     previous = None
                 with self.lock:
-                    self.physical, self.output = p, out
+                    self.physical = p
+                    self.output = player_output(p) if epoch != self.stop_epoch else out
                     self.name_text, self.map_status = reader.name, reader.status
                     if reader.instance_proven:
                         # Save cleared/rebuilt axes before the new identity.
@@ -163,7 +169,7 @@ class WheelIo(threading.Thread):
             finally:
                 try:
                     if feeder:
-                        self.write_output(lambda _: feeder.close())
+                        self.write_output(lambda _: feeder.close(), cleanup=True)
                 finally:
                     self.output, self.physical = Output(reason="lost" if self.error else "closed"), Physical()
                     sys.setswitchinterval(previous_interval)
@@ -199,7 +205,7 @@ class PassthroughWheel:
 
     @property
     def engaged(self):
-        return not (self.io.inhibited.is_set() or self.io.stopping.is_set()) and self.io.output.engaged
+        return not self.io.stopping.is_set() and self.io.output.engaged
 
     @property
     def physical(self):
@@ -235,7 +241,6 @@ class PassthroughWheel:
                 if self._refused_reason:
                     return False
                 cmd = replace(cmd, steer=self.io.output.steer, throttle=0.0, brake=0.0)
-                self.io.inhibited.clear()
             self._refused_reason = ""
             self.io.commands = replace(cmd, serial=cmd.serial + 1, request=request,
                                        ai_at=time.monotonic(), forced={})
@@ -248,17 +253,15 @@ class PassthroughWheel:
         self._request(reason)
 
     def stop_output(self):
-        """Fault stop: keep every axis neutral until a healthy loop or engage."""
+        """Drop AI authority immediately while keeping physical controls live."""
         with self.io.lock:
-            self.io.inhibited.set()
             self.io.reset.set()
             self.io.stop_epoch += 1
             self.io.commands = Commands(serial=self.io.commands.serial + 1)
-            self.io.output = Output(reason="stopped")
+            self.io.output = player_output(self.io.physical)
 
     def resume_output(self):
-        if not self.io.stopping.is_set():
-            self.io.inhibited.clear()
+        """Physical controls already remain live after an AI stop."""
 
     def toggle(self):
         desired = not self.engaged
