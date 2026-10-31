@@ -126,13 +126,20 @@ def test_old_livecalib_provenance_is_dropped_silently(version, data_dir, tmp_pat
     learner.save_state("ets2")
 
 
-@pytest.mark.parametrize("field", ["no_progress_s", "discard_no_progress_s", "progress_mark",
+@pytest.mark.parametrize("field", ["no_progress_s", "progress_mark",
                                    "samples_seen", "reset_seen", "blocks_seen", "jumps_seen",
                                    "discard_jumps"])
 @pytest.mark.parametrize("value", BAD_VALUES)
 def test_flow_camera_numbers_are_bounded(field, value, data_dir):
     raw = flow_snapshot()
     raw.setdefault("camera", {})[field] = value
+    load_flow(raw, data_dir)
+
+
+@pytest.mark.parametrize("value", [v for v in BAD_VALUES if v is not None])
+def test_flow_discard_timer_numbers_are_bounded(value, data_dir):
+    raw = flow_snapshot()
+    raw.setdefault("camera", {})["discard_no_progress_s"] = value
     load_flow(raw, data_dir)
 
 

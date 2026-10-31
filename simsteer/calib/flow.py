@@ -1060,8 +1060,7 @@ class CalibFlow:
 
     def to_dict(self) -> dict:
         camera = self.camera_diagnostics()
-        # Absence means no discard deadline is active. Present timer values
-        # must be numbers, so an explicit null is never persisted.
+        # Omit inactive deadlines in new snapshots; older saves use null.
         if camera["discard_no_progress_s"] is None:
             del camera["discard_no_progress_s"]
         return {
@@ -1132,9 +1131,10 @@ class CalibFlow:
             for name in ("progress_mark", "samples_seen", "reset_seen", "blocks_seen",
                          "jumps_seen", "discard_jumps"):
                 bounded_int(camera.get(name, 0))
-            for name in ("no_progress_s", "discard_no_progress_s"):
-                if name in camera:
-                    bounded_number(camera[name], 0, 1e12)
+            if "no_progress_s" in camera:
+                bounded_number(camera["no_progress_s"], 0, 1e12)
+            if camera.get("discard_no_progress_s") is not None:
+                bounded_number(camera["discard_no_progress_s"], 0, 1e12)
             blocked_counts_from_state(camera.get("no_progress_counts", {}))
         if "check_requested" in d and type(d["check_requested"]) is not bool:
             raise ValueError("invalid Check request")

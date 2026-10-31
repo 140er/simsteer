@@ -1,0 +1,922 @@
+{
+  "version": 5,
+  "simple_warp_version": 2,
+  "game": "ets2",
+  "device": "gamepad",
+  "step": "done",
+  "attempts": 0,
+  "result": {
+    "passed": true,
+    "status": "PASS",
+    "score": 1.0,
+    "redo": null,
+    "reason": "",
+    "missing": [],
+    "coverage": {
+      "frames": 0,
+      "driving": 0,
+      "engaged": 2400,
+      "engaged_seconds": 120.0,
+      "left": 1144,
+      "right": 1144,
+      "lane_changes": 0,
+      "lane_crossings": 0
+    },
+    "measurements": {
+      "lane_offset_spread": {
+        "name": "lane_offset_spread",
+        "step": "steering",
+        "value": 0.0643,
+        "score": 1.0,
+        "samples": 2400,
+        "denominator": 2400,
+        "required_samples": 200,
+        "required": true,
+        "source": "measured"
+      },
+      "lane_offset_bias": {
+        "name": "lane_offset_bias",
+        "step": "steering",
+        "value": 0.0004,
+        "score": 1.0,
+        "samples": 2400,
+        "denominator": 2400,
+        "required_samples": 200,
+        "required": true,
+        "source": "measured"
+      },
+      "lane_excursions": {
+        "name": "lane_excursions",
+        "step": "steering",
+        "value": 0.0,
+        "score": 1.0,
+        "samples": 2400,
+        "denominator": 2400,
+        "required_samples": 200,
+        "required": true,
+        "source": "measured"
+      },
+      "speed_ratio_error": {
+        "name": "speed_ratio_error",
+        "step": "fov",
+        "value": 0.0097,
+        "score": 1.0,
+        "samples": 2400,
+        "denominator": 2400,
+        "required_samples": 100,
+        "required": true,
+        "source": "measured"
+      },
+      "steering_saturation": {
+        "name": "steering_saturation",
+        "step": "steering",
+        "value": 0.0,
+        "score": 1.0,
+        "samples": 2400,
+        "denominator": 2400,
+        "required_samples": 200,
+        "required": true,
+        "source": "measured"
+      },
+      "steering_fit_error": {
+        "name": "steering_fit_error",
+        "step": "steering",
+        "value": 0.05,
+        "score": 1.0,
+        "samples": 600,
+        "denominator": 600,
+        "required_samples": 50,
+        "required": true,
+        "source": "measured"
+      }
+    },
+    "date": "2026-10-30",
+    "fov_source": "manual",
+    "context": {
+      "schema": 5,
+      "game": "ets2",
+      "device": "gamepad",
+      "camera": {
+        "image_w": 1920,
+        "image_h": 1080,
+        "fov_h_deg": 75.0,
+        "height_m": 1.200000000000002,
+        "pitch_deg": 0.5729386976834846,
+        "yaw_deg": 0.5729386976834846,
+        "lateral_sign": -1.0,
+        "cx_frac": 0.5,
+        "cy_frac": 0.5,
+        "crop_top_pct": 0.0,
+        "crop_bottom_pct": 0.0,
+        "simple_warp": true,
+        "simple_warp_version": 2,
+        "model_narrow_fov_h_deg": 52.0,
+        "model_wide_fov_h_deg": 120.0,
+        "synthesize_wider_fov": false
+      },
+      "policy": {
+        "required": [
+          "lane_offset_spread",
+          "lane_offset_bias",
+          "lane_excursions",
+          "speed_ratio_error",
+          "steering_saturation",
+          "steering_fit_error"
+        ],
+        "fit_source": "measured"
+      },
+      "controls": {},
+      "model": {
+        "model": "upgrade-fixture",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  },
+  "legacy_result": null,
+  "redo_note": "",
+  "camera": {
+    "status": "CALIBRATED",
+    "blocked_reason": null,
+    "blocked_counts": {},
+    "samples": 310,
+    "blocks": 3,
+    "block_n": 10,
+    "bootstrap_samples": 310,
+    "bootstrap_blocks": 3,
+    "required_certain_blocks": 2,
+    "no_progress_s": 2.5,
+    "progress_mark": 30,
+    "samples_seen": 30,
+    "reset_seen": 0,
+    "blocks_seen": 0,
+    "jumps_seen": 0,
+    "discard_no_progress_s": null,
+    "discard_jumps": 0,
+    "no_progress_counts": {}
+  },
+  "fov": {
+    "solver": {
+      "stage": "estimate",
+      "applied_fov": null,
+      "estimate": null,
+      "candidates": [],
+      "shifts": 0,
+      "tick": 0,
+      "result": null,
+      "ratios": [],
+      "cand_ratios": []
+    },
+    "proposal": null,
+    "source": "manual"
+  },
+  "steering": {
+    "prompt": 0,
+    "prompt_s": 0.0,
+    "regime_s": 0.0,
+    "lane_changes": 0,
+    "direction": {
+      "model_sign": 1,
+      "axis_sign": 1,
+      "model_pairs": [
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          0.004,
+          0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ],
+        [
+          -0.004,
+          -0.01
+        ]
+      ],
+      "axis_pairs": [
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          0.04,
+          0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ],
+        [
+          -0.04,
+          -0.01
+        ]
+      ]
+    },
+    "output_direction": {
+      "method": "stopped-pulses-v1",
+      "sign": -1,
+      "pairs": [
+        [
+          0.1,
+          -0.09999999999999996
+        ],
+        [
+          -0.1,
+          0.09999999999999996
+        ],
+        [
+          0.1,
+          -0.09999999999999996
+        ],
+        [
+          -0.1,
+          0.09999999999999996
+        ]
+      ]
+    }
+  },
+  "check": {
+    "seconds": 0.0,
+    "engaged_seconds": 0.0,
+    "frames": 0,
+    "driving_n": 0,
+    "lane_change_n": 0,
+    "left_n": 0,
+    "right_n": 0,
+    "off_total": 0,
+    "off_n": 0,
+    "off_mean": 0.0,
+    "off_m2": 0.0,
+    "off_excursions": 0,
+    "off_crossings": 0,
+    "off_last": 0.0,
+    "off_last_valid": false,
+    "off_recent": [],
+    "ratio_total": 0,
+    "ratio_n": 0,
+    "ratio_log_sum": 0.0,
+    "sat_total": 0,
+    "sat_n": 0,
+    "sat_hits": 0,
+    "fit_total": 0,
+    "fit_n": 0,
+    "fit_err_sum": 0.0,
+    "fit_act_sum": 0.0,
+    "fit_source": "measured"
+  },
+  "check_context": {
+    "schema": 5,
+    "game": "ets2",
+    "device": "gamepad",
+    "camera": {
+      "image_w": 1920,
+      "image_h": 1080,
+      "fov_h_deg": 75.0,
+      "height_m": 1.200000000000002,
+      "pitch_deg": 0.5729386976834846,
+      "yaw_deg": 0.5729386976834846,
+      "lateral_sign": -1.0,
+      "cx_frac": 0.5,
+      "cy_frac": 0.5,
+      "crop_top_pct": 0.0,
+      "crop_bottom_pct": 0.0,
+      "simple_warp": true,
+      "simple_warp_version": 2,
+      "model_narrow_fov_h_deg": 52.0,
+      "model_wide_fov_h_deg": 120.0,
+      "synthesize_wider_fov": false
+    },
+    "policy": {
+      "required": [
+        "lane_offset_spread",
+        "lane_offset_bias",
+        "lane_excursions",
+        "speed_ratio_error",
+        "steering_saturation",
+        "steering_fit_error"
+      ],
+      "fit_source": "measured"
+    },
+    "controls": {},
+    "model": {
+      "model": "upgrade-fixture",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "check_model": [
+    10.0,
+    0.0,
+    0.0
+  ],
+  "check_requested": true
+}
