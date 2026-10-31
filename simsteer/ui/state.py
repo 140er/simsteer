@@ -27,7 +27,7 @@ def restart_required(startup_game: str, selected_game: str) -> bool:
 def status_label(state) -> str:
     """The toolbar and HUD name the same state, including the failing check."""
     if state.engaged:
-        return "Engaged"
+        return state.driver or "Engaged"
     if state.engaged_label.upper() == "NO GAMEPAD":
         return "No gamepad"
     if state.telemetry_status == "Unavailable":
@@ -40,7 +40,7 @@ def status_label(state) -> str:
             if state.calibration.tone == "calibrating"
             else state.calibration.step_name
         )
-    return state.engaged_label.capitalize()
+    return state.driver or state.engaged_label.capitalize()
 
 
 @dataclass(frozen=True)

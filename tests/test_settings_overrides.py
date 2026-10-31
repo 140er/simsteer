@@ -29,7 +29,7 @@ def test_cli_overrides_are_not_persisted_by_ui_saves(
     args = ["--game", "ets2"]
     if launch == "cli":
         args += ["--force-engage", "--passive-fit", "--no-gamepad", "--no-tuner",
-                 "--device", "wheel", "--vjoy-device", "3", "--max-width", "900"]
+                 "--device", "wheel", "--vjoy-device", "3", "--max-width", "900", "--no-passthrough"]
     else:
         clip = _make_clip(tmp_path / "clip", frames=1)
         (clip / "state").mkdir()
@@ -45,6 +45,7 @@ def test_cli_overrides_are_not_persisted_by_ui_saves(
         assert settings.no_gamepad
         if launch == "cli":
             assert settings.force_engage and settings.passive_fit and settings.no_tuner
+            assert not settings.wheel_passthrough
             assert (settings.device, settings.vjoy_device, settings.max_width) == ("wheel", 3, 900)
         else:
             assert kwargs["headless"] and kwargs["source"] is not None
@@ -72,3 +73,26 @@ def test_cli_overrides_are_not_persisted_by_ui_saves(
     assert calls == [True]
     if launch == "replay":
         assert asdict(Settings.load()) == asdict(baseline)
+
+
+@pytest.mark.parametrize("field,value,expected", [
+    ("wheel_passthrough", False, False), ("wheel_passthrough", "false", True),
+    ("rim_range_deg", 100, 180), ("rim_range_deg", 3000, 2520),
+    ("rim_range_deg", 1080, 1080), ("rim_range_deg", "1080", 900),
+    ("rim_range_deg", True, 900), ("rim_range_deg", 900.5, 900),
+    ("rim_range_deg", float("inf"), 900), ("wheel_instance", 1, ""),
+    ("wheel_instance", "invalid", ""), ("wheel_axes", [], {}),
+    ("wheel_axes", {"throttle": {"slot": 1, "rest": 1, "full": 1}}, {}),
+])
+def test_wheel_saved_types_ranges_and_shapes(tmp_path, field, value, expected):
+    (tmp_path / "settings.json").write_text(json.dumps({field: value}))
+    assert getattr(Settings.load(), field) == expected
+
+
+def test_wheel_identity_and_explicit_pedal_map_round_trip():
+    identity = "00000001-0000-0000-0000-000000000000"
+    axes = {"steer": 0, "throttle": {"slot": 1, "rest": 32767, "full": 0}}
+    settings = Settings(wheel_instance=identity, wheel_axes=axes, rim_range_deg=1080)
+    settings.save()
+    loaded = Settings.load()
+    assert (loaded.wheel_instance, loaded.wheel_axes, loaded.rim_range_deg) == (identity, axes, 1080)

@@ -33,6 +33,7 @@ READOUT_H = 26
 @dataclass
 class HudState:
     engaged: bool = False
+    driver: str | None = None
     engaged_label: str = "Disengaged"
     engaged_color: Color = COL_FG_LIGHT
     banner_text: str = ""
@@ -78,7 +79,7 @@ class HudRenderer:
             color = {"passed": COL_ACCENT_GREEN, "failed": COL_ACCENT_RED}.get(
                 cal.tone, COL_ACCENT_BLUE
             )
-        if label in ("No gamepad", "No telemetry", "Low fps"):
+        if label in ("No gamepad", "No telemetry", "Low fps", "No wheel"):
             color = COL_ACCENT_RED
         draw_text(img, label, 16, 10, color, 16, True, max_width=max(80, w // 4))
         left = 16 + min(text_width(label, 16, True), max(80, w // 4)) + 24

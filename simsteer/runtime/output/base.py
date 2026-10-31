@@ -39,8 +39,9 @@ class DeviceManager:
     can use a `DeviceManager` anywhere either was previously used."""
 
     def __init__(self, initial_kind: DeviceKind = "gamepad",
-                 vjoy_device_id: int = 1) -> None:
+                 vjoy_device_id: int = 1, *, passthrough=False, settings=None) -> None:
         self._vjoy_id = vjoy_device_id
+        self._passthrough, self._settings = passthrough, settings
         self._kind: DeviceKind | None = None
         self._device: Gamepad | Wheel | None = None
         self.last_error: str | None = None
@@ -76,7 +77,7 @@ class DeviceManager:
         # ViGEm doesn't care but it's cleaner.
         if self._device is not None:
             try:
-                self._device.disengage()
+                self.close()
             except Exception:
                 pass
             self._device = None
@@ -86,7 +87,15 @@ class DeviceManager:
             if kind == "gamepad":
                 self._device = Gamepad()
             elif kind == "wheel":
-                self._device = Wheel(device_id=self._vjoy_id)
+                if self._passthrough:
+                    from simsteer.runtime.output.passthrough import PassthroughWheel
+                    self._device = PassthroughWheel(self._settings, self._vjoy_id)
+                    if not self._device.available:
+                        self._device.close()
+                        self._device = None
+                        print("No Fanatec wheel; using plain vJoy")
+                if self._device is None:
+                    self._device = Wheel(device_id=self._vjoy_id)
             else:
                 self.last_error = f"unknown device kind: {kind}"
                 return False
@@ -95,7 +104,7 @@ class DeviceManager:
             return False
         self._kind = kind
         self.last_error = None
-        if was_engaged:
+        if was_engaged and not self.passthrough:
             self._device.engage()
         return True
 
@@ -112,6 +121,42 @@ class DeviceManager:
     def disengage(self) -> None:
         if self._device is not None:
             self._device.disengage()
+
+    def insert_disengage(self) -> None:
+        if self.passthrough:
+            self._device.disengage("insert")
+        else:
+            self.disengage()
+
+    @property
+    def passthrough(self):
+        return hasattr(self._device, "passthrough_live")
+
+    @property
+    def passthrough_live(self):
+        return getattr(self._device, "passthrough_live", False)
+
+    @property
+    def physical(self):
+        return getattr(self._device, "physical", None)
+
+    @property
+    def last_reason(self):
+        return getattr(self._device, "last_reason", "")
+
+    @property
+    def source(self):
+        return getattr(self._device, "source", None)
+
+    def stats(self, **kwargs):
+        return self._device.stats(**kwargs) if self.passthrough else {}
+
+    def map_pedals(self):
+        return self._device.map_pedals() if self.passthrough else False
+
+    def close(self):
+        if self._device:
+            getattr(self._device, "close", self._device.disengage)()
 
     def toggle(self) -> bool:
         if self._device is None:

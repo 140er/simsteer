@@ -114,6 +114,38 @@ axis→wheel response (often nicer to tune).
 > You only need the one matching your `--device`. Gamepad is the default
 > and the simplest to get going.
 
+### Physical wheel passthrough
+
+With `--device wheel`, a connected Fanatec DD2 is read in the background
+and relayed to vJoy. No force feedback is sent. Without a supported wheel,
+SimSteer uses plain vJoy output. `--no-passthrough` disables the relay for
+that run only; gamepad mode is unchanged.
+
+In the developer workbench, choose **Wheel → Map pedals** while stopped.
+Start with all pedals released; press and release throttle, brake and
+clutch fully during their three-second windows. Clutch is optional.
+Pedals stay disabled until mapped; **Check pedals** means release the
+throttle before retrying. The map and active wheel instance are saved.
+
+Bind the game's steering, throttle, brake and optional clutch to **vJoy
+X/Y/Z/Rx** by moving the real rim and pedals. Remove those physical-wheel
+axis bindings from the game. Wheel buttons can stay bound directly.
+For ETS2, use Wheel (absolute), zero deadzone and zero nonlinearity.
+Match the game's rotation to the base's rotation; set **Rotation (°)**
+in the workbench to the same value for takeover detection (default 900°).
+
+**INSERT** engages through the normal calibration gate. Firm rim travel,
+a brake press, INSERT or a stale command hands control back; throttle alone
+can add to the commanded throttle. Steering blends back to the rim within
+two seconds. The status label shows **AI**, **Player** or **No wheel**.
+On disconnect or an input/output error the relay centres steering and
+releases all pedals. Stop the vehicle before quitting: exit also centres
+steering and releases pedals. Behaviour after a hard process kill still
+needs hardware validation.
+
+Read-only diagnostics: `python -m simsteer.runtime.input.physical --monitor
+--seconds 20`; add `--echo-vjoy` to compare the relayed steering with vJoy.
+
 ### Shortcut: the driver scripts
 
 Instead of installing by hand, run the helper (installs **both** ViGEm
@@ -327,6 +359,7 @@ same as for the exe.
 | `--list-games` | — | Print every game profile (built-in and yours from `%LOCALAPPDATA%\SimSteer\games\`) and exit. Broken profile files are named on stderr. |
 | `--device {gamepad,wheel}` | gamepad | Output device. gamepad = ViGEm Xbox 360; wheel = vJoy. |
 | `--vjoy-device N` | 1 | vJoy device index when `--device wheel`. |
+| `--no-passthrough` | off | Disable physical-wheel relay for this run only. |
 | `--max-width N` | 1600 | Cap overlay window width (px). |
 | `--no-gamepad` | off | Run overlay + model but open no virtual device. Skips ViGEm/vJoy preflight. Dry-run. |
 | `--no-tuner` | off | Don't open the tuner window. (You lose the Setup tab too.) |

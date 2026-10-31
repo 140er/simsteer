@@ -327,6 +327,7 @@ class Tuner:
         self._build_flags(columns[1])
         self._build_manual(columns[1])
         self._build_status(columns[2])
+        self._build_wheel(columns[2])
         self._build_speed(columns[2])
         hotkeys = ctk.CTkFrame(scroll, fg_color="transparent")
         hotkeys.grid(row=1, column=0, columnspan=3, sticky="ew", padx=6)
@@ -482,6 +483,17 @@ class Tuner:
             ("calibration", "Calibration"),
         ]:
             self._readout(group, key, name, "—")
+
+    def _build_wheel(self, parent):
+        group = self._make_group(parent, "Wheel")
+        for key, name in (("wheel_name", "Wheel"), ("wheel_relay", "Relay"),
+                          ("wheel_rim", "Rim"), ("wheel_pedals", "Pedals"), ("wheel_map", "Map")):
+            self._readout(group, key, name, "—")
+        self._add_number(group, _NumberSpec(self.settings, "rim_range_deg", "Rotation (°)", 180, 2520, 10, "{:.0f}"))
+        group.add(self._button(group.body, "Map pedals", self._map_pedals), "Map pedals")
+
+    def _map_pedals(self):
+        return bool(self.device and self.device.map_pedals())
 
     def _build_speed(self, parent):
         group = self._make_group(parent, "Speed & ACC")
@@ -695,7 +707,7 @@ class Tuner:
         )
         if panel and not engaged and label == "Disengaged":
             label = "Calibrating" if panel.tone == "calibrating" else panel.step_name
-        if label in ("No gamepad", "No telemetry", "Low fps") or (panel and panel.tone == "failed"):
+        if label in ("No gamepad", "No telemetry", "Low fps", "No wheel") or (panel and panel.tone == "failed"):
             color = RED
         elif engaged or (panel and panel.tone == "passed"):
             color = GREEN
@@ -751,6 +763,15 @@ class Tuner:
                     else "—"
                 ),
             }
+            if self.device and getattr(self.device, "passthrough", False):
+                info, p = self.device.stats(), self.device.physical
+                values.update(device=f"vJoy {self.settings.vjoy_device} · DD2", wheel_name=info["name"],
+                              wheel_relay=f"{info['relay_hz']:.0f} Hz · p95 {info['latency_p95_ms']:.1f} ms",
+                              wheel_rim=f"{p.steer * self.settings.rim_range_deg / 2:+.1f}°",
+                              wheel_pedals=f"{p.throttle or 0:.2f} / {p.brake or 0:.2f} / {p.clutch or 0:.2f}",
+                              wheel_map=info["pedal_status"])
+            elif self.device and self.device.is_wheel:
+                values["device"] = f"vJoy {self.settings.vjoy_device} · No wheel"
             if self.calib_flow and self.calib_flow.result:
                 result = self.calib_flow.result
                 values["calibration"] = (
@@ -831,6 +852,8 @@ class Tuner:
     def _zero_manual(self):
         self.manual.throttle = self.manual.brake = self.manual.steer = 0.0
         self.manual.steer_override = self.manual.long_override = False
+        if self.device and getattr(self.device, "passthrough", False):
+            self.device.center()
         self._sync_controls(force_obj=self.manual)
 
     def _on_recalibrate_click(self):
@@ -913,7 +936,8 @@ class Tuner:
         if self.device.is_wheel:
             from simsteer.runtime.output.wheel import Wheel
 
-            return list(Wheel.WIGGLE_INPUTS)
+            return [i for i in Wheel.WIGGLE_INPUTS if not getattr(self.device, "passthrough", False)
+                    or not i[0].startswith("button_")]
         if self.device.is_gamepad:
             return [
                 ("left_stick_x", "Left stick X"),

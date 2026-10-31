@@ -60,6 +60,7 @@ from simsteer.runtime.fov import FovSolver, model_vision
 from simsteer.runtime.output.base import DeviceManager
 from simsteer.runtime.replay import LiveClock
 from simsteer.runtime.telemetry import Telemetry
+from simsteer.runtime import wheel_session
 from simsteer.ui.hud import (
     COL_ACCENT_BLUE, COL_ACCENT_GREEN, COL_ACCENT_RED, HudRenderer, HudState,
 )
@@ -190,8 +191,11 @@ def run(settings: Settings, game: GameProfile | str, *,
     probe = SteeringProbe(enabled=not settings.no_probe)
     hud_renderer = HudRenderer()
 
+    pad: DeviceManager | None = None
+
     def passive_fit_allowed() -> bool:
-        return profile.capabilities.passive_fit_safe or settings.passive_fit
+        return (profile.capabilities.passive_fit_safe or settings.passive_fit
+                or bool(getattr(pad, "passthrough_live", False)))
 
     vision = model_vision(model)
     flow = CalibFlow(
@@ -202,10 +206,10 @@ def run(settings: Settings, game: GameProfile | str, *,
         make_fov_solver=lambda: FovSolver(vision, model_views),
         fov_config=profile_reader(profile.camera.fov_source))
 
-    pad: DeviceManager | None = None
     if not settings.no_gamepad:
         pad = DeviceManager(initial_kind=settings.device,
-                            vjoy_device_id=settings.vjoy_device)
+                            vjoy_device_id=settings.vjoy_device,
+                            passthrough=settings.wheel_passthrough, settings=settings)
         if pad.kind is None:
             print(f"device init failed: {pad.last_error} — overlay-only")
 
@@ -253,6 +257,9 @@ def run(settings: Settings, game: GameProfile | str, *,
     was_measuring = False
 
     def engage_check() -> tuple[bool, str]:
+        wheel_block = wheel_session.engage_block(pad)
+        if wheel_block:
+            return False, wheel_block
         if not flow.ai_steering_ready:
             return False, flow.engage_block()
         if settings.force_engage:
@@ -466,6 +473,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                         steer = flow.measure_output(
                             speed=v_real if tel.available else None,
                             observed=game_steer, user_axis=user_steer, dt=dt,
+                            player_axis=wheel_session.player_axis(pad),
                             manual_override=manual.steer_override or pad.engaged
                             or lane_change_active)
                         pad.set_steering(steer, force=True)
@@ -503,9 +511,15 @@ def run(settings: Settings, game: GameProfile | str, *,
                                COL_ACCENT_BLUE, 3.0)
 
                 engaged_now = bool(pad is not None and pad.engaged)
-                if was_engaged_last_frame and not engaged_now and not banner_text:
+                takeover_reason = (getattr(pad, "last_reason", "")
+                                   if was_engaged_last_frame and not engaged_now else "")
+                if was_engaged_last_frame and not engaged_now and (takeover_reason or not banner_text):
+                    lat_ctrl.reset()
+                    long_ctrl.reset()
+                    probe.reset()
                     audio.play("disengage")
-                    set_banner("DISENGAGED", COL_ACCENT_BLUE, 2.0)
+                    set_banner("DISENGAGED" + (f" — {takeover_reason}" if takeover_reason else ""),
+                               COL_ACCENT_BLUE, 2.0)
                 was_engaged_last_frame = engaged_now
                 direction_was_ready = flow.direction.ready
                 flow.tick(Obs(
@@ -561,12 +575,14 @@ def run(settings: Settings, game: GameProfile | str, *,
                             elif pad.kind is not None:
                                 output.start(speed=v_real if tel.available else None,
                                              observed=game_steer, user_axis=user_steer,
+                                             player_axis=wheel_session.player_axis(pad),
+                                             rim_range_deg=settings.rim_range_deg,
                                              manual_override=manual.steer_override)
                                 pad.center()
                             probe.reset()
                             lat_ctrl.reset()
                         elif pad.engaged:
-                            pad.disengage()
+                            getattr(pad, "insert_disengage", pad.disengage)()
                             lat_ctrl.reset()
                             long_ctrl.reset()
                             audio.play("disengage")
@@ -667,6 +683,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                         "frame_width": calib.image_w,
                         "frame_height": calib.image_h,
                         **flow.log_fields(),
+                        **wheel_session.log_fields(pad, takeover_reason),
                     }
                     if log_timing:
                         # The FOV step's extra vision runs are model time.
@@ -741,7 +758,7 @@ def run(settings: Settings, game: GameProfile | str, *,
 
         finally:
             if pad is not None:
-                pad.disengage()
+                getattr(pad, "close", pad.disengage)()
             live_params.save()
             live_calib.save_state(game_id)
             calib.save(game=game_id)
@@ -825,9 +842,13 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
     ]
     if blocked_reason and not (pad and pad.engaged):
         dev_lines.insert(1, (f"cannot engage: {blocked_reason}", COL_ACCENT_BLUE))
+    wheel_line = wheel_session.dev_line(pad, settings.rim_range_deg)
+    if wheel_line:
+        dev_lines.append((wheel_line, COL_ACCENT_BLUE))
 
     return HudState(
         engaged=bool(pad and pad.engaged),
+        driver=wheel_session.driver(pad),
         engaged_label=eng_label,
         engaged_color=eng_col,
         banner_text=banner,

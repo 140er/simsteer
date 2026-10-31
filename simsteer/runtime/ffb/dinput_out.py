@@ -52,6 +52,7 @@ DI8DEVCLASS_GAMECTRL = 4
 DIEDFL_ATTACHEDONLY = 0x00000001
 DIEDFL_FORCEFEEDBACK = 0x00000100
 DISCL_EXCLUSIVE = 0x00000001
+DISCL_NONEXCLUSIVE = 0x00000002
 DISCL_BACKGROUND = 0x00000008
 DIDFT_ALL = 0x00000000
 DIDFT_AXIS = 0x00000003
@@ -221,6 +222,28 @@ class DIPROPHEADER(ctypes.Structure):
 
 class DIPROPDWORD(ctypes.Structure):
     _fields_ = [("diph", DIPROPHEADER), ("dwData", DWORD)]
+
+
+class JOYSTATE(ctypes.Structure):
+    _fields_ = [("axes", LONG * 8), ("povs", DWORD * 4), ("buttons", ctypes.c_uint8 * 128)]
+
+
+def joystick_state_format() -> tuple[DIDATAFORMAT, list]:
+    """Full joystick format copied from the read-only wheel probe.
+
+    Keep the returned buffers alive for the lifetime of the device.
+    The FFB sink's existing axis-only format is intentionally unchanged.
+    """
+    guids = [GUID.parse(g) for g in _AXIS_GUIDS]
+    guids.append(GUID.parse("A36D02F2-C9F3-11CF-BFC7-444553540000"))  # POV
+    rows = [(ctypes.pointer(guids[i]), i * 4,
+             DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, DIDOI_ASPECTPOSITION) for i in range(8)]
+    rows += [(ctypes.pointer(guids[-1]), 32 + i * 4,
+              DIDFT_OPTIONAL | 0x10 | DIDFT_ANYINSTANCE, 0) for i in range(4)]
+    rows += [(None, 48 + i, DIDFT_OPTIONAL | 0x0C | DIDFT_ANYINSTANCE, 0) for i in range(128)]
+    objects = (DIOBJECTDATAFORMAT * len(rows))(*rows)
+    return DIDATAFORMAT(ctypes.sizeof(DIDATAFORMAT), ctypes.sizeof(DIOBJECTDATAFORMAT),
+                        DIDF_ABSAXIS, ctypes.sizeof(JOYSTATE), len(rows), objects), [guids, objects]
 
 
 class DIENVELOPE(ctypes.Structure):
@@ -464,6 +487,9 @@ class DirectInput:
             raise OSError(f"CreateWindowExW failed: error {error}")
 
     def ff_devices(self) -> list[DIDEVICEINSTANCEW]:
+        return self.game_controllers(ff_only=True)
+
+    def game_controllers(self, ff_only: bool = False) -> list[DIDEVICEINSTANCEW]:
         found: list[DIDEVICEINSTANCEW] = []
         callback_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.POINTER(DIDEVICEINSTANCEW), ctypes.c_void_p)
 
@@ -476,7 +502,8 @@ class DirectInput:
         callback = callback_type(on_device)
         _check("EnumDevices", _com_call(
             self.ptr, "IDirectInput8W", "EnumDevices", [DWORD, callback_type, ctypes.c_void_p, DWORD],
-            DI8DEVCLASS_GAMECTRL, callback, None, DIEDFL_ATTACHEDONLY | DIEDFL_FORCEFEEDBACK,
+            DI8DEVCLASS_GAMECTRL, callback, None,
+            DIEDFL_ATTACHEDONLY | (DIEDFL_FORCEFEEDBACK if ff_only else 0),
         ))
         return found
 

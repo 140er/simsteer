@@ -22,6 +22,22 @@ from simsteer.ui.state import (
 from simsteer.ui.tuner import Tuner, _NumberSpec
 
 
+@pytest.mark.parametrize("driver,engaged,label", [("AI", True, "AI"), ("Player", False, "Player"),
+                                                ("No wheel", False, "No wheel"), (None, True, "Engaged"),
+                                                (None, False, "Disengaged")])
+def test_single_driver_source_label(driver, engaged, label):
+    from simsteer.ui.state import status_label
+    assert status_label(HudState(driver=driver, engaged=engaged)) == label
+
+
+def test_driver_label_preserves_calibration_and_failure_priority():
+    from simsteer.ui.state import status_label
+    state = HudState(driver="Player", calibration=CalibrationView("Camera", "Drive"))
+    assert status_label(state) == "Calibrating"
+    state.telemetry_status = "Unavailable"
+    assert status_label(state) == "No telemetry"
+
+
 def test_calibration_view_bounds_and_unknown_eta():
     view = CalibrationView("Camera", "Drive straight", 1.8, -3)
     assert view.progress == 1

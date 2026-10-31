@@ -52,14 +52,23 @@ class Wheel:
     """Virtual steering wheel + pedals via vJoy. Matches the Gamepad
     interface so the main loop can use either."""
 
-    def __init__(self, device_id: int = 1) -> None:
+    def __init__(self, device_id: int = 1, *, feeder=None) -> None:
+        self._feeder = feeder
         try:
             import pyvjoy
-        except ImportError as e:
-            raise WheelError(
-                "pyvjoy not installed. Run `pip install pyvjoy` and install "
-                "the vJoy driver from https://sourceforge.net/projects/vjoystick/"
-            ) from e
+        except ImportError:
+            pyvjoy = None
+        if feeder is not None or pyvjoy is None:
+            from types import SimpleNamespace
+            from simsteer.runtime.output.vjoy_feeder import VJoyFeeder
+            try:
+                self._dev = self._feeder = feeder or VJoyFeeder(device_id)
+            except Exception as e:
+                raise WheelError(str(e)) from e
+            self._pyvjoy = SimpleNamespace(HID_USAGE_X=0x30, HID_USAGE_Y=0x31, HID_USAGE_Z=0x32)
+            self._engaged = False
+            self.center()
+            return
 
         try:
             self._dev = pyvjoy.VJoyDevice(device_id)
@@ -86,6 +95,12 @@ class Wheel:
     def disengage(self) -> None:
         self._engaged = False
         self.center()
+
+    def close(self) -> None:
+        self.disengage()
+        if self._feeder is not None:
+            self._feeder.close()
+        self._dev = None
 
     def toggle(self) -> bool:
         if self._engaged:

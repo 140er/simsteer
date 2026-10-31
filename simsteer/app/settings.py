@@ -12,7 +12,10 @@ the repo root in dev mode (via `simsteer.paths.data_dir()`).
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, field
+import uuid
+
+from simsteer.runtime.input.mapping import validate_axes
 
 from simsteer.paths import data_dir
 
@@ -43,6 +46,10 @@ class Settings:
     forza_port: int = 7777
     # vJoy device index when device=wheel.
     vjoy_device: int = 1
+    wheel_passthrough: bool = True
+    rim_range_deg: int = 900
+    wheel_instance: str = ""
+    wheel_axes: dict = field(default_factory=dict)
     # cv2 overlay max width (px). Larger = nicer view, more GPU/CPU.
     max_width: int = 1600
     # Suppress the tuner window entirely (advanced; you lose the
@@ -66,6 +73,18 @@ class Settings:
             self.disabled_hotkeys = []
         # Runtime overrides are deliberately outside the persisted dataclass.
         self._runtime_overrides: dict = {}
+        # Saved annotations are strings; validate these fields explicitly.
+        if type(self.wheel_passthrough) is not bool:
+            self.wheel_passthrough = True
+        try:
+            self.rim_range_deg = max(180, min(2520, int(self.rim_range_deg)))
+        except (TypeError, ValueError, OverflowError):
+            self.rim_range_deg = 900
+        try:
+            self.wheel_instance = str(uuid.UUID(self.wheel_instance)).upper() if self.wheel_instance else ""
+        except (TypeError, ValueError, AttributeError):
+            self.wheel_instance = ""
+        self.wheel_axes = validate_axes(self.wheel_axes)
 
     def override(self, **values) -> None:
         """Apply values for this run, retaining their persisted baseline."""
