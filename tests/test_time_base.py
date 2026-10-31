@@ -188,7 +188,7 @@ def test_fov_normalises_main_and_candidate_spans(hz, start):
         t = i / hz
         raw_vx = 22 * (4 / hz) / .2 / math.tan(math.radians(start / 2))
         solver.update(np.array([t]), calib, raw_vx, 22., 0.,
-                      timestamp=t, frame_span_s=4 / hz)
+                      timestamp=t, frame_span_s=4 / hz, pair_ok=True)
         if solver.done:
             break
     assert solver.result == pytest.approx(90., abs=1.5)
@@ -203,7 +203,7 @@ def test_fov_uses_individual_spans_under_jitter():
         t = times[-1]
         span = t - times[max(0, len(times) - 5)]
         solver.update(np.array([t]), calib, 22 * span / .2 / math.tan(math.radians(50)),
-                      22., 0., timestamp=t, frame_span_s=span)
+                      22., 0., timestamp=t, frame_span_s=span, pair_ok=True)
         if solver.done:
             break
     assert solver.result == pytest.approx(90., abs=1.5)
@@ -214,7 +214,7 @@ def test_fov_discontinuity_discards_ratios_and_candidate_pairs(interruption):
     solver = FovSolver(flow_vision, flow_views)
     calib = Calibration(fov_h_deg=90.)
     for i in range(55):
-        solver.update(np.array([i / 20]), calib, 22., 22., 0., timestamp=i / 20)
+        solver.update(np.array([i / 20]), calib, 22., 22., 0., timestamp=i / 20, pair_ok=True)
     assert solver.stage == "bracket" and solver._prev
     solver.vision_s = 12.
     t = 3. if interruption == "gap" else 2.75
@@ -222,7 +222,7 @@ def test_fov_discontinuity_discards_ratios_and_candidate_pairs(interruption):
         solver.reset()
     if interruption == "geometry":
         calib.crop_top_pct = .1
-    solver.update(np.array([t]), calib, 22., 22., 0., timestamp=t)
+    solver.update(np.array([t]), calib, 22., 22., 0., timestamp=t, pair_ok=True)
     assert solver.stage == "estimate" and solver.samples == 1
     assert not solver._prev and not solver._prev_times
     assert solver.vision_s == 12.

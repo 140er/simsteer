@@ -70,7 +70,7 @@ def test_bad_main_pair_does_not_stop_candidate_ticks_or_drop_evidence():
     calib = Calibration(simple_warp=False)
     solver = FovSolver(flow_vision, flow_views)
     for i in range(55):
-        solver.update(np.array([i / 20]), calib, 22., 22., 0., timestamp=i / 20)
+        solver.update(np.array([i / 20]), calib, 22., 22., 0., timestamp=i / 20, pair_ok=True)
     assert solver.stage == "bracket" and any(solver._prev)
     evidence = [list(ratios) for ratios in solver._cand_ratios]
     estimates = list(solver._ratios)
@@ -92,7 +92,7 @@ def test_pose_straddling_pair_is_not_used_for_fov_estimate(small_views):
     solver = FovSolver()
     for i in range(6):
         queue.push(pixels(i), calib, timestamp=i / 20)
-    solver.update(None, calib, 22., 22., 0., timestamp=.25)
+    solver.update(None, calib, 22., 22., 0., timestamp=.25, pair_ok=True)
     calib.yaw_deg += .01
     for i in range(6, 10):
         queue.push(pixels(i), calib, timestamp=i / 20)
@@ -106,10 +106,10 @@ def test_pose_straddling_pair_is_not_used_for_fov_estimate(small_views):
 def test_completed_fov_survives_later_geometry_edits():
     solver, calib = FovSolver(), Calibration()
     for i in range(40):
-        solver.update(None, calib, 22., 22., 0., timestamp=i / 20)
+        solver.update(None, calib, 22., 22., 0., timestamp=i / 20, pair_ok=True)
     result = solver.result
     calib.fov_h_deg += 10
-    solver.update(None, calib, 20., 22., 0., timestamp=3.)
+    solver.update(None, calib, 20., 22., 0., timestamp=3., pair_ok=True)
     assert solver.done and solver.result == result
 
 
@@ -128,13 +128,13 @@ def test_nonfinite_stamp_clears_temporal_state_before_rejection(small_views, mod
     for i in range(10):
         img, big = queue.push(pixels(1), calib, timestamp=i / 20)
         model.step(img, big, timestamp=i / 20)
-        solver.update(None, calib, 22., 22., 0., timestamp=i / 20)
+        solver.update(None, calib, 22., 22., 0., timestamp=i / 20, pair_ok=True)
     with pytest.raises(NonFiniteError):
         queue.push(pixels(1), calib, timestamp=bad)
     with pytest.raises(NonFiniteError):
         model.step(img, big, timestamp=bad)
     with pytest.raises(NonFiniteError):
-        solver.update(None, calib, 22., 22., 0., timestamp=bad)
+        solver.update(None, calib, 22., 22., 0., timestamp=bad, pair_ok=True)
     assert queue.resets == 1 and not queue.ready and not queue.pair_ok
     assert not model._times and not model._feat_q and not model._desire_q
     assert solver.samples == 0
@@ -165,7 +165,9 @@ def test_flow_restart_explicitly_clears_temporal_inputs(monkeypatch, small_views
     assert queue.resets == 1 and not queue.ready
 
 
-def test_livecalib_commits_keep_an_engaged_drive_and_skip_straddling_pairs(monkeypatch, small_views):
+def test_livecalib_commits_keep_an_engaged_drive_and_skip_straddling_pairs(
+        monkeypatch, small_views, tmp_path):
+    import json
     import simsteer.runtime.loop as loop
     from simsteer.core.learners.livecalib import INPUTS_NEEDED, LiveCalib
     from simsteer.runtime.output.gamepad import Gamepad
@@ -176,6 +178,7 @@ def test_livecalib_commits_keep_an_engaged_drive_and_skip_straddling_pairs(monke
     monkeypatch.setattr(loop.Calibration, "load", lambda *a, **kw: Calibration(simple_warp=False))
 
     def update(self, calib, *args, **kwargs):
+        self.last_commit_delta_deg = None
         i = state["i"]
         state["calls"].append(i)
         if i not in (8, 20, 32):
@@ -205,7 +208,8 @@ def test_livecalib_commits_keep_an_engaged_drive_and_skip_straddling_pairs(monke
 
     monkeypatch.setattr(LiveCalib, "update", update)
     monkeypatch.setattr(Gamepad, "disengage", disengage)
-    run, _, _ = drive(monkeypatch, frames=48, frame_queue_factory=lambda: queue,
+    path = tmp_path / "drive.jsonl"
+    run, _, _ = drive(monkeypatch, frames=48, frame_queue_factory=lambda: queue, log_path=path,
                       on_grab=lambda st, manager: state.update(i=st.i))
     assert state["commits"] == [8, 20, 32]
     assert state["disengages"] == [] and queue.resets == 0
@@ -213,3 +217,32 @@ def test_livecalib_commits_keep_an_engaged_drive_and_skip_straddling_pairs(monke
     for commit in state["commits"]:
         assert not (set(range(commit + 1, commit + 5)) & set(state["calls"]))
         assert commit + 5 in state["calls"]
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    commits = [i for i, row in enumerate(rows) if row["camera_commit_delta_deg"] is not None]
+    assert commits == state["commits"]
+    assert all(0. < rows[i]["camera_commit_delta_deg"] < .02 for i in commits)
+
+
+def test_pitch_hotkey_keeps_engagement_and_excludes_straddling_pairs(monkeypatch, small_views):
+    import simsteer.runtime.loop as loop
+    from test_output_safety import drive
+
+    pairs = []
+
+    class ObservedQueue(FrameQueue):
+        def push(self, *args, **kwargs):
+            result = super().push(*args, **kwargs)
+            pairs.append(self.pair_ok)
+            return result
+
+    queue = ObservedQueue()
+    monkeypatch.setattr(loop.Calibration, "load", lambda *a, **kw: Calibration(simple_warp=False))
+    # Isolate the user edit from automatic pose writes.
+    monkeypatch.setattr(loop.LiveCalib, "update", lambda *a, **kw: None)
+    st, _, _ = drive(monkeypatch, frames=18, mode="dev", frame_queue_factory=lambda: queue,
+                     keys_at={8: [ord(".")]})
+    assert st.flow.calib.pitch_deg == .5
+    assert queue.resets == 0
+    assert all(engaged for engaged, _ in st.checkpoints[8:])
+    assert pairs[8] and pairs[13]
+    assert not any(pairs[9:13])

@@ -96,7 +96,8 @@ def test_nonfinite_device_command_neutralizes_every_channel(bad, channel, backen
 
 def drive(monkeypatch, *, fault=None, frames=4, key=None, no_frames=False,
           mode="player", force=True, source=None, on_grab=None, speed=20.,
-          telemetry_source=None, tuner_factory=None, keys_at=None, frame_queue_factory=None):
+          telemetry_source=None, tuner_factory=None, keys_at=None, frame_queue_factory=None,
+          log_path=None):
     import simsteer.runtime.loop as loop
     import simsteer.runtime.output.base as devices
 
@@ -250,7 +251,8 @@ def drive(monkeypatch, *, fault=None, frames=4, key=None, no_frames=False,
     st.settings = Settings(no_tuner=not tuner_factory, no_probe=True, force_engage=force, hud_mode=mode)
     loop.run(st.settings,
              "ets2", source=Source(), make_telemetry=lambda: tel,
-             clock=SimpleNamespace(now=lambda: st.t), model=Model(), keys=Keys(), headless=not tuner_factory)
+             clock=SimpleNamespace(now=lambda: st.t), model=Model(), keys=Keys(),
+             headless=not tuner_factory, log_path=str(log_path) if log_path else None)
     return st, pad, manager
 
 

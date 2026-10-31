@@ -140,7 +140,7 @@ def solve20(vision, frames, times, calib, views):
         img, big = (np.concatenate([past[j], current[j]], axis=0)[None] for j in (0, 1))
         vx, _ = vision(img, big)
         if i >= 5:
-            solver.update(frame, calib, vx, 22., 0., timestamp=t, frame_span_s=span)
+            solver.update(frame, calib, vx, 22., 0., timestamp=t, frame_span_s=span, pair_ok=True)
         if solver.done:
             break
         previous = previous[-6:]

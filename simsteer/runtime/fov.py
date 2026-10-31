@@ -146,7 +146,7 @@ class FovSolver:
                perf_counter: Callable[[], float] | None = None, *,
                timestamp: float | None = None,
                frame_span_s: float = CONTEXT_PERIOD_S,
-               pair_ok: bool = True) -> float | None:
+               pair_ok: bool) -> float | None:
         """Use raw vision vx and the measured span of its stacked pair.
 
         Candidate pairs have separate spans, since each candidate is

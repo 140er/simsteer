@@ -424,6 +424,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                 fov_vision_s = 0.
                 camera_learning = False
                 camera_rejection = None
+                camera_commit_delta_deg = None
                 pipeline_healthy = False
                 restart_reason = flow.take_restart_request()
                 if restart_reason:
@@ -526,8 +527,11 @@ def run(settings: Settings, game: GameProfile | str, *,
                                 road_transform_std=decoded.road_transform_std,
                                 wide_from_device_euler=decoded.wide_from_device_euler,
                                 game_steer=game_steer)
-                        camera_rejection = (live_calib.last_rejection_reason
-                                            if camera_learning else None)
+                            camera_rejection = live_calib.last_rejection_reason
+                            camera_commit_delta_deg = live_calib.last_commit_delta_deg
+                        elif flow.camera_learning and not fq.pair_ok:
+                            live_calib.record_blocked(CameraBlockedReason.FRAME_TIMING)
+                            camera_rejection = live_calib.last_rejection_reason
 
                         # --- Lateral + longitudinal control ---
                         output_fault = flow.observe_output(
@@ -789,6 +793,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                         "output_fault": current_fault or None,
                         "camera_learning": camera_learning,
                         "camera_rejection": camera_rejection,
+                        "camera_commit_delta_deg": camera_commit_delta_deg,
                         "camera_sample": ({
                             **{name: (getattr(decoded, name).tolist()
                                       if getattr(decoded, name) is not None else None)

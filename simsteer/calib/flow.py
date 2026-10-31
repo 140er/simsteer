@@ -638,7 +638,7 @@ class CalibFlow:
     def feed_fov(self, frame, vx_model: float | None, v_ego: float | None,
                  yaw_rate: float | None, perf_counter=None, *,
                  timestamp: float | None = None, frame_span_s: float = 0.2,
-                 pair_ok: bool = True) -> None:
+                 pair_ok: bool) -> None:
         if self.step is not Step.FOV or self.fov_proposal is not None:
             return
         if self._config_pending:

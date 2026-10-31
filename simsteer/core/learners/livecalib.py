@@ -169,6 +169,7 @@ class CameraBlockedReason(str, Enum):
     BLOCK_JUMP = "block_jump"
     NON_FINITE = "non_finite"
     MISSING_UNCERTAINTY = "missing_uncertainty"
+    FRAME_TIMING = "frame_timing"
 
 
 CAMERA_GUIDANCE = {
@@ -187,6 +188,7 @@ CAMERA_GUIDANCE = {
     CameraBlockedReason.BLOCK_JUMP: "Keep the camera fixed and drive smoothly.",
     CameraBlockedReason.NON_FINITE: "Restore valid model and telemetry data.",
     CameraBlockedReason.MISSING_UNCERTAINTY: "Restore the model's pose and height uncertainty outputs.",
+    CameraBlockedReason.FRAME_TIMING: "Keep the camera fixed and restore steady capture timing.",
 }
 
 _REJECTION_COUNTERS = {
@@ -256,6 +258,8 @@ class LiveCalib:
         self.rej_human = 0
         self.rej_block_jump = 0       # block-level (not sample-level)
         self.last_rejection_reason: CameraBlockedReason | None = None
+        # Report-only maximum pitch/yaw change from this update's pose write.
+        self.last_commit_delta_deg: float | None = None
         # First failing gate per update; BLOCK_JUMP counts discarded blocks.
         self.blocked_counts: Counter[CameraBlockedReason] = Counter()
         self._last_diagnostic_save = self.clock()
@@ -368,6 +372,7 @@ class LiveCalib:
                wide_from_device_euler: np.ndarray | None = None,
                game_steer: float | None = None) -> None:
         self.last_rejection_reason = None
+        self.last_commit_delta_deg = None
         require_finite("livecalib.sample", pose=pose, road=road_transform,
                        yaw=actual_yaw_rate, speed=v_ego, pose_std=pose_std,
                        road_std=road_transform_std, wide=wide_from_device_euler,
@@ -587,10 +592,13 @@ class LiveCalib:
             pitch = self.pitch_estimate
             yaw = self.yaw_estimate
             height = self.height_estimate
+            previous_pitch, previous_yaw = calib.pitch_deg, calib.yaw_deg
             if pitch is not None:
                 calib.pitch_deg = float(pitch)
             if yaw is not None:
                 calib.yaw_deg = float(yaw)
+            self.last_commit_delta_deg = max(abs(calib.pitch_deg - previous_pitch),
+                                             abs(calib.yaw_deg - previous_yaw))
             # Height directly drives `road_to_image`'s placement of the
             # road plane (z_FRD = +height_m), so a wrong manual value
             # vertically misaligns the overlay. Only certainty-gated block
@@ -684,6 +692,7 @@ class LiveCalib:
         self.rej_human = 0
         self.rej_block_jump = 0
         self.last_rejection_reason = None
+        self.last_commit_delta_deg = None
         self.blocked_counts.clear()
         self._last_diagnostic_save = self.clock()
         self._last_game_steer = None

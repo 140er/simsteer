@@ -103,7 +103,8 @@ def synthetic_fov(rate: int, true_fov: float = TRUE_FOV) -> float | None:
     for i in range(1000):
         t = i / rate
         solver.update(np.array([t]), calib, SPEED_MPS * 20 / rate, SPEED_MPS, 0.0,
-                      **({"timestamp": t, "frame_span_s": 4 / rate} if stamped else {}))
+                      **({"timestamp": t, "frame_span_s": 4 / rate, "pair_ok": True}
+                         if stamped else {}))
         if solver.done:
             break
     return solver.result
