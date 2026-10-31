@@ -425,6 +425,12 @@ class Tuner:
 
     def _set_mirror(self, value: bool) -> None:
         if self.device is not None and self.device.engaged:
+            sw = self._switches.get("mirror_lateral_sign")
+            if sw is not None:
+                if self.calib.lateral_sign < 0:
+                    sw.select()
+                else:
+                    sw.deselect()
             return
         self.calib.lateral_sign = -1.0 if value else 1.0
 

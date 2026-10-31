@@ -12,7 +12,7 @@ from test_output_safety import drive
 
 
 @pytest.mark.parametrize("key,initial_sign", [(ord("m"), -1.), (ord("0"), 1.)])
-def test_engaged_sign_controls_preserve_device_direction(monkeypatch, key, initial_sign):
+def test_engaged_sign_controls_preserve_sign_and_engagement(monkeypatch, key, initial_sign):
     def observe(st, manager):
         if st.i == 1 and initial_sign == 1.:
             st.flow.calib.lateral_sign = initial_sign
@@ -22,17 +22,19 @@ def test_engaged_sign_controls_preserve_device_direction(monkeypatch, key, initi
             st.before = len(manager._device.raw.sent)
             st.start_sign = st.flow.steering_sign
         if st.i == 4:
+            st.end = len(manager._device.raw.sent)
             st.still_engaged = manager.engaged
 
     st, pad, _ = drive(monkeypatch, mode="dev", frames=5,
                        keys_at={2: [key]}, on_grab=observe)
     before = [r[0] for r in pad.raw.sent[:st.before] if abs(r[0]) > 1e-6]
-    after = [r[0] for r in pad.raw.sent[st.before:] if abs(r[0]) > 1e-6]
-    assert before and after
+    window = pad.raw.sent[st.before:st.end]
+    assert before and window
     assert st.start_sign == initial_sign
-    assert all(math.copysign(1., x) == math.copysign(1., before[-1]) for x in after)
-    assert st.flow.calib.lateral_sign == initial_sign
-    assert st.still_engaged
+    zeros = sum(abs(r[0]) <= 1e-6 for r in window)
+    assert (st.flow.calib.lateral_sign, st.still_engaged, zeros) == (initial_sign, True, 0)
+    assert all(c[0] and abs(c[1][0]) > 1e-6 for c in st.checkpoints[1:5])
+    assert all(math.copysign(1., r[0]) == math.copysign(1., before[-1]) for r in window)
 
 
 @pytest.mark.parametrize("module", ["simsteer.ui.tuner", "pilot.tuner"])
@@ -41,8 +43,8 @@ def test_tuner_mirror_respects_engagement(monkeypatch, module, engaged):
     tuner_module = importlib.import_module(module)
     options = {"start_thread": False}
     if module == "pilot.tuner":
-        monkeypatch.setattr(tuner_module.threading, "Thread", lambda **kw: SimpleNamespace(
-            start=lambda: None))
+        monkeypatch.setattr(tuner_module, "threading", SimpleNamespace(
+            Thread=lambda **kw: SimpleNamespace(start=lambda: None)))
         options = {}
     calib = Calibration(lateral_sign=-1.)
     tuner = tuner_module.Tuner(calib, SimpleNamespace(), SimpleNamespace(),
@@ -51,11 +53,30 @@ def test_tuner_mirror_respects_engagement(monkeypatch, module, engaged):
     assert calib.lateral_sign == (-1. if engaged else 1.)
 
 
+def test_legacy_mirror_switch_resyncs_rejected_click(monkeypatch):
+    from pilot import tuner as tuner_module
+
+    monkeypatch.setattr(tuner_module, "threading", SimpleNamespace(
+        Thread=lambda **kw: SimpleNamespace(start=lambda: None)))
+    calib = Calibration(lateral_sign=-1.)
+    tuner = tuner_module.Tuner(calib, SimpleNamespace(), SimpleNamespace(),
+                               device=SimpleNamespace(engaged=True))
+    switch = SimpleNamespace(selected=False)
+    switch.select = lambda: setattr(switch, "selected", True)
+    switch.deselect = lambda: setattr(switch, "selected", False)
+    tuner._switches["mirror_lateral_sign"] = switch
+    tuner._set_mirror(False)
+    assert switch.selected
+    assert calib.lateral_sign == -1.
+
+
 def test_disabled_mirror_hotkey_is_ignored(monkeypatch):
     def disable(st, manager):
         st.settings.disabled_hotkeys = ["mirror_sign"]
 
-    st, _, _ = drive(monkeypatch, mode="dev", keys_at={2: [ord("m")]}, on_grab=disable)
+    st, _, _ = drive(monkeypatch, mode="dev", force=False,
+                     keys_at={2: [ord("m")]}, on_grab=disable)
+    assert not st.checkpoints[2][0] and not st.checkpoints[3][0]
     assert st.flow.calib.lateral_sign == -1.
 
 

@@ -720,7 +720,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                             continue
                         if (calib_hk_id in ("mirror_sign", "reset_calib_defaults")
                                 and pad is not None and pad.engaged):
-                            print(f"{calib_hk_id} locked while engaged")
+                            print("calibration locked while engaged")
                             continue
                         msg = handle_calibration_key(calib, key)
                         if msg is not None:
