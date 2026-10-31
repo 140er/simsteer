@@ -10,11 +10,13 @@ Lives in the per-user data directory (via `simsteer.paths.data_dir()`).
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, field
+import uuid
 from pathlib import Path
 from typing import get_type_hints
 
 from simsteer.paths import data_dir
+from simsteer.runtime.input.mapping import validate_axes
 from simsteer.state import snapshot_exists, atomic_save_json, loaded_value as _loaded_value, read_json_object, state_warning
 
 
@@ -44,6 +46,10 @@ class Settings:
     forza_port: int = 7777
     # vJoy device index when device=wheel.
     vjoy_device: int = 1
+    wheel_passthrough: bool = True
+    rim_range_deg: int = 900
+    wheel_instance: str = ""
+    wheel_axes: dict = field(default_factory=dict)
     # cv2 overlay max width (px). Larger = nicer view, more GPU/CPU.
     max_width: int = 1600
     # Suppress the tuner window entirely (advanced; you lose the
@@ -67,6 +73,13 @@ class Settings:
             self.disabled_hotkeys = []
         # Runtime overrides are deliberately outside the persisted dataclass.
         self._runtime_overrides: dict = {}
+        # load() validates types; these are wheel-specific value constraints.
+        self.rim_range_deg = max(180, min(2520, self.rim_range_deg))
+        try:
+            self.wheel_instance = str(uuid.UUID(self.wheel_instance)).upper() if self.wheel_instance else ""
+        except (TypeError, ValueError, AttributeError):
+            self.wheel_instance = ""
+        self.wheel_axes = validate_axes(self.wheel_axes)
 
     def override(self, **values) -> None:
         """Apply values for this run, retaining their persisted baseline."""
@@ -106,9 +119,13 @@ class Settings:
             try:
                 value = _loaded_value(v, hints[k])
                 limits = {"vjoy_device": (1, 16), "forza_port": (1, 65535),
-                          "max_width": (160, 32768)}
+                          "max_width": (160, 32768), "rim_range_deg": (180, 2520)}
                 if k in limits and not limits[k][0] <= value <= limits[k][1]:
                     raise ValueError("setting out of range")
+                if k == "wheel_instance" and value:
+                    value = str(uuid.UUID(value)).upper()
+                if k == "wheel_axes" and validate_axes(value) != value:
+                    raise ValueError("invalid pedal map")
                 kwargs[k] = value
             except (TypeError, ValueError, OverflowError):
                 print(f"warning: invalid setting {k!r}; using default")

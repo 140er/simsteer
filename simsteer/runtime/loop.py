@@ -66,6 +66,7 @@ from simsteer.runtime.capture import Capture, CaptureConfig
 from simsteer.runtime.fov import FovSolver, model_vision
 from simsteer.runtime.faults import neutral_decoded
 from simsteer.runtime.output.base import DeviceManager
+from simsteer.runtime import wheel_session
 from simsteer.runtime.replay import LiveClock
 from simsteer.runtime.telemetry import Telemetry, vehicle_context
 from simsteer.ui.hud import (
@@ -200,13 +201,16 @@ def run(settings: Settings, game: GameProfile | str, *,
     probe = SteeringProbe(enabled=not settings.no_probe)
     hud_renderer = HudRenderer()
 
-    def passive_fit_allowed() -> bool:
-        return profile.capabilities.passive_fit_safe or settings.passive_fit
-
     pad: DeviceManager | None = None
+
+    def passive_fit_allowed() -> bool:
+        return (profile.capabilities.passive_fit_safe or settings.passive_fit
+                or bool(getattr(pad, "passthrough_live", False)))
+
     if not settings.no_gamepad:
         pad = DeviceManager(initial_kind=settings.device,
-                            vjoy_device_id=settings.vjoy_device)
+                            vjoy_device_id=settings.vjoy_device,
+                            passthrough=settings.wheel_passthrough, settings=settings)
         if pad.kind is None:
             print(f"device init failed: {pad.last_error} — overlay-only")
 
@@ -281,6 +285,9 @@ def run(settings: Settings, game: GameProfile | str, *,
     def engage_check() -> tuple[bool, str]:
         if current_fault:
             return False, current_fault
+        wheel_block = wheel_session.engage_block(pad)
+        if wheel_block:
+            return False, wheel_block
         if not flow.ai_steering_ready:
             return False, flow.engage_block()
         if pad is None or pad.kind is None:
@@ -317,9 +324,11 @@ def run(settings: Settings, game: GameProfile | str, *,
         keep_bind = (preserve_bind and pad is not None and not pad.engaged
                      and getattr(pad, "binding_active", False))
         if pad is not None and not keep_bind:
-            handback = (getattr(pad, "insert_disengage", pad.disengage)
-                        if user_stop and was_engaged else pad.disengage)
-            handback()
+            if user_stop:
+                if pad.engaged:
+                    getattr(pad, "insert_disengage", pad.disengage)()
+            else:
+                pad.disengage()
         if flow.output_direction.active:
             flow.output_direction.cancel("Output stopped")
         lat_ctrl.reset()
@@ -347,7 +356,7 @@ def run(settings: Settings, game: GameProfile | str, *,
         flow.restart(reason)
         set_banner("CALIBRATION RESET", (80, 220, 255), 4.0)
 
-    with source as cap:
+    with wheel_session.output_guard(pad), source as cap:
         if keys is None and headless:
             keys = NoKeys()
         elif keys is None:
@@ -542,6 +551,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                         # --- Device output ---
                         last_device_axis = None
                         if pad is not None:
+                            if not current_fault:
+                                getattr(pad, "resume_output", lambda: None)()
                             measuring = flow.output_direction.active
                             if binding:
                                 pass
@@ -554,6 +565,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                                 steer = flow.measure_output(
                                     speed=v_real if tel.available else None,
                                     observed=game_steer, user_axis=user_steer, dt=dt,
+                                    player_axis=wheel_session.player_axis(pad),
                                     manual_override=manual.steer_override or pad.engaged
                                     or lane_change_active)
                                 require_finite("output_check", steering=steer)
@@ -569,7 +581,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                                 last_device_axis = steer
                                 pad.set_throttle_brake(throttle_out, brake_out)
                             else:
-                                if frame_idx % DISENGAGED_RECENTER_EVERY_N == 0:
+                                if (frame_idx % DISENGAGED_RECENTER_EVERY_N == 0
+                                        and not getattr(pad, "passthrough", False)):
                                     pad.center()
                                 if manual.steer_override:
                                     pad.set_steering(manual.steer, force=True)
@@ -606,8 +619,10 @@ def run(settings: Settings, game: GameProfile | str, *,
                     current_fault = "Low frame rate"
 
                 engaged_now = bool(pad is not None and pad.engaged)
+                takeover_reason = (getattr(pad, "last_reason", "")
+                                   if was_engaged_last_frame and not engaged_now else "")
                 if was_engaged_last_frame and not engaged_now:
-                    stop_output(user_stop=True)
+                    stop_output(takeover_reason, user_stop=True)
                 was_engaged_last_frame = engaged_now
                 direction_was_ready = flow.direction.ready
                 if pipeline_healthy:
@@ -665,6 +680,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                             elif pad.kind is not None:
                                 output.start(speed=v_real if tel.available else None,
                                              observed=game_steer, user_axis=user_steer,
+                                             player_axis=wheel_session.player_axis(pad),
+                                             rim_range_deg=settings.rim_range_deg,
                                              manual_override=manual.steer_override)
                                 pad.center()
                             probe.reset()
@@ -674,13 +691,14 @@ def run(settings: Settings, game: GameProfile | str, *,
                         else:
                             flow.confirm_check()
                             ok, why = engage_check()
+                            if ok and pad.engage() is False:
+                                ok, why = False, pad.last_reason
                             if not ok:
                                 audio.play("denied")
                                 set_banner(f"CANNOT ENGAGE — {why}",
                                            COL_ACCENT_BLUE, 3.0)
                                 print(f"-> ENGAGE BLOCKED: {why}")
                             else:
-                                pad.engage()
                                 lat_ctrl.reset()
                                 audio.play("engage")
                                 set_banner("ENGAGED", COL_ACCENT_GREEN, 1.5)
@@ -765,6 +783,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                         "frame_width": calib.image_w,
                         "frame_height": calib.image_h,
                         **flow.log_fields(),
+                        **wheel_session.log_fields(pad, takeover_reason, user_steer),
                     }
                     if log_timing:
                         # The FOV step's extra vision runs are model time.
@@ -838,18 +857,22 @@ def run(settings: Settings, game: GameProfile | str, *,
                 show_scaled(overlay, settings.max_width)
 
         finally:
-            if pad is not None:
-                stop_output(user_stop=True)
-                getattr(pad, "shutdown_output", pad.disengage)()
-            live_params.save()
-            live_calib.save_state(game_id)
-            calib.save(game=game_id)
-            flow.save()
-            tel.close()
-            if log_f is not None:
-                log_f.close()
-            if window_open:
-                cv2.destroyAllWindows()
+            try:
+                if pad is not None:
+                    try:
+                        stop_output(user_stop=True)
+                    finally:
+                        getattr(pad, "shutdown_output", pad.disengage)()
+            finally:
+                live_params.save()
+                live_calib.save_state(game_id)
+                calib.save(game=game_id)
+                flow.save()
+                tel.close()
+                if log_f is not None:
+                    log_f.close()
+                if window_open:
+                    cv2.destroyAllWindows()
     # Output is neutral and capture is closed. A replacement process must
     # observe the final snapshots before it starts loading its own state.
     flush_state()
@@ -934,8 +957,13 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
     if blocked_reason and not (pad and pad.engaged):
         dev_lines.insert(1, (f"cannot engage: {blocked_reason}", COL_ACCENT_BLUE))
 
+    wheel_line = wheel_session.dev_line(pad, settings.rim_range_deg)
+    if wheel_line:
+        dev_lines.append((wheel_line, COL_ACCENT_BLUE))
+
     return HudState(
         engaged=bool(pad and pad.engaged),
+        driver=wheel_session.driver(pad),
         engaged_label=eng_label,
         engaged_color=eng_col,
         banner_text=banner,
