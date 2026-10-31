@@ -28,7 +28,7 @@ class VJoyFeeder:
                 ("AcquireVJD", [c.c_uint32], c.c_int), ("GetVJDAxisExist", [c.c_uint32, c.c_uint32], c.c_int),
                 ("SetAxis", [c.c_int32, c.c_uint32, c.c_uint32], c.c_int),
                 ("SetBtn", [c.c_int, c.c_uint32, c.c_uint8], c.c_int),
-                ("ResetVJD", [c.c_uint32], c.c_int), ("RelinquishVJD", [c.c_uint32], None),
+                ("RelinquishVJD", [c.c_uint32], None),
             ):
                 getattr(self.dll, name).argtypes, getattr(self.dll, name).restype = args, result
         if not self.dll.AcquireVJD(device_id):
@@ -73,13 +73,10 @@ class VJoyFeeder:
         self._owner()
         if not self.closed:
             try:
-                self.dll.ResetVJD(self.device_id)
+                self.write(Output())
             finally:
-                try:
-                    self.write(Output())
-                finally:
-                    self.dll.RelinquishVJD(self.device_id)
-                    self.closed = True
+                self.dll.RelinquishVJD(self.device_id)
+                self.closed = True
 
 
 class ThreadedFeeder:

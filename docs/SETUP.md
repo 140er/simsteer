@@ -121,11 +121,15 @@ and relayed to vJoy. No force feedback is sent. Without a supported wheel,
 SimSteer uses plain vJoy output. `--no-passthrough` disables the relay for
 that run only; gamepad mode is unchanged.
 
-In the developer workbench, choose **Wheel → Map pedals** while stopped.
+Move the rim a few degrees to confirm the input instance. In the developer
+workbench, choose **Wheel → Map pedals** while stopped.
 Start with all pedals released; press and release throttle, brake and
 clutch fully during their three-second windows. Clutch is optional.
-Pedals stay disabled until mapped; **Check pedals** means release the
-throttle before retrying. The map and active wheel instance are saved.
+Pedals stay disabled until mapped; **Check pedals** means release all mapped
+pedals. At startup, each must reach within 5% of its mapped rest value.
+The map and active wheel instance are saved together. An instance change
+clears the map and requires **Map pedals** again. Engagement requires a
+working mapped brake.
 
 Bind the game's steering, throttle, brake and optional clutch to **vJoy
 X/Y/Z/Rx** by moving the real rim and pedals. Remove those physical-wheel
@@ -138,6 +142,9 @@ in the workbench to the same value for takeover detection (default 900°).
 a brake press, INSERT or a stale command hands control back; throttle alone
 can add to the commanded throttle. Steering blends back to the rim within
 two seconds. The status label shows **AI**, **Player** or **No wheel**.
+The hard takeover limit also measures travel from the end of the engage
+grace period, so gradual turns cannot be absorbed indefinitely. The test-fire
+key is disabled during passthrough; Bind remains available while disengaged.
 On disconnect or an input/output error the relay centres steering and
 releases all pedals. Stop the vehicle before quitting: exit also centres
 steering and releases pedals. Behaviour after a hard process kill still

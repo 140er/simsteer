@@ -148,6 +148,10 @@ class DeviceManager:
         return getattr(self._device, "last_reason", "")
 
     @property
+    def pedal_status(self):
+        return getattr(self._device, "pedal_status", "")
+
+    @property
     def source(self):
         return getattr(self._device, "source", None)
 

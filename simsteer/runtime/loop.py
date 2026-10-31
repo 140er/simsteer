@@ -488,7 +488,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                         last_device_axis = steer
                         pad.set_throttle_brake(throttle_out, brake_out)
                     else:
-                        if frame_idx % DISENGAGED_RECENTER_EVERY_N == 0:
+                        if (frame_idx % DISENGAGED_RECENTER_EVERY_N == 0
+                                and not getattr(pad, "passthrough", False)):
                             pad.center()
                         if manual.steer_override:
                             pad.set_steering(manual.steer, force=True)
@@ -621,6 +622,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                         nav.clear()
                         print("NAV: queue cleared")
                     elif key == ord("t") and pad is not None and hk("test_fire"):
+                        if getattr(pad, "passthrough", False):
+                            continue
                         was = pad.engaged
                         if not was:
                             pad.engage()

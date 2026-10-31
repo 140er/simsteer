@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import atexit
+import ctypes
 import logging
 import math
 import sys
@@ -11,6 +12,7 @@ from collections import deque
 from dataclasses import replace
 
 from simsteer.core.override import Commands, Output, Override, Physical, OVERRIDE_HOLD_S, clamp
+from simsteer.core.override import BRAKE_TAKEOVER
 from simsteer.runtime.input.physical import PhysicalWheel, RELAY_HZ, RELAY_MIN_HZ
 from simsteer.runtime.output.vjoy_feeder import VJoyFeeder
 from simsteer.runtime.output.wheel import WheelError
@@ -25,6 +27,35 @@ LOG = logging.getLogger(__name__)
 def percentile(values, p):
     ordered = sorted(values)
     return ordered[max(0, math.ceil(len(ordered) * p) - 1)] if ordered else 0.0
+
+
+class ConsoleExit:
+    """Console events ask the I/O owner to neutralize and release its device."""
+    def __init__(self, close, *, api=None):
+        callback_type = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(ctypes.c_int, ctypes.c_uint32)
+        def on_event(event):
+            if event not in (2, 5, 6):  # CLOSE, LOGOFF, SHUTDOWN
+                return 0
+            try:
+                close()
+            except Exception:
+                LOG.exception("Wheel console exit failed")
+            return 1
+        self.callback = callback_type(on_event)
+        if api is None:
+            api = ctypes.WinDLL("kernel32", use_last_error=True)
+            api.SetConsoleCtrlHandler.argtypes = [callback_type, ctypes.c_int]
+            api.SetConsoleCtrlHandler.restype = ctypes.c_int
+        self.set_handler = api.SetConsoleCtrlHandler
+        self.registered = bool(self.set_handler(self.callback, 1))
+        if not self.registered:
+            raise WheelError("Could not register wheel console exit handler")
+
+    def close(self):
+        if self.registered:
+            if not self.set_handler(self.callback, 0):
+                raise WheelError("Could not unregister wheel console exit handler")
+            self.registered = False
 
 
 class WheelIo(threading.Thread):
@@ -88,7 +119,9 @@ class WheelIo(threading.Thread):
                     self.physical, self.output = p, out
                     self.name_text, self.map_status = reader.name, reader.status
                     if reader.instance_proven:
-                        self.pending["wheel_instance"] = reader.instance_proven
+                        # Save cleared/rebuilt axes before the new identity.
+                        # A restart must never apply the previous instance's map.
+                        self.pending.update(wheel_axes=dict(reader.axes), wheel_instance=reader.instance_proven)
                     if reader.mapper and reader.mapper.done:
                         self.pending["wheel_axes"] = dict(reader.axes)
                     if last_tick is not None:
@@ -125,6 +158,7 @@ class WheelIo(threading.Thread):
 class PassthroughWheel:
     def __init__(self, settings, device_id=1, **factories):
         self.settings, self.device_id = settings, device_id
+        self._console = None
         self.io = WheelIo(settings, device_id, **factories)
         self.io.start()
         if not self.io.ready.wait(2):
@@ -133,6 +167,12 @@ class PassthroughWheel:
         if self.io.error:
             self.close()
             raise WheelError(self.io.error)
+        if sys.platform == "win32":
+            try:
+                self._console = ConsoleExit(self.close)
+            except Exception:
+                self.close()
+                raise
         atexit.register(self.close)
 
     @property
@@ -156,6 +196,10 @@ class PassthroughWheel:
         return self.io.output.reason
 
     @property
+    def pedal_status(self):
+        return self.io.map_status
+
+    @property
     def passthrough_live(self):
         return self.io.is_alive() and self.physical.ok and self.source == "PLAYER"
 
@@ -166,6 +210,11 @@ class PassthroughWheel:
     def _request(self, request):
         with self.io.lock:
             cmd = self.io.commands
+            if request == "engage":
+                p = self.physical
+                if not p.ok or p.brake is None or p.brake >= BRAKE_TAKEOVER:
+                    return
+                cmd = replace(cmd, steer=0.0, throttle=0.0, brake=0.0)
             self.io.commands = replace(cmd, serial=cmd.serial + 1, request=request,
                                        ai_at=time.monotonic(), forced={})
 
@@ -240,5 +289,9 @@ class PassthroughWheel:
         self.io.join(.45)
         if self.io.is_alive():
             raise WheelError("Wheel I/O did not stop")
-        self.stats()
-        atexit.unregister(self.close)
+        try:
+            self.stats()
+        finally:
+            if self._console:
+                self._console.close()
+            atexit.unregister(self.close)

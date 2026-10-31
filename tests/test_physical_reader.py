@@ -1,9 +1,28 @@
 import ctypes as c
+import sys
+
+import pytest
 
 from simsteer.app.settings import Settings
 from simsteer.runtime.ffb import dinput_out as di
 from simsteer.runtime.input.physical import PhysicalWheel
 from fakes_wheel import FakeDi, descriptor, profile
+
+
+@pytest.mark.parametrize("explicit", [True, False])
+def test_source_injection_and_late_bound_native_default(monkeypatch, explicit):
+    api = FakeDi(profile())
+    wheel = PhysicalWheel(di_factory=api) if explicit else PhysicalWheel()
+    # Install the source after constructing the reader. An explicit source
+    # works off Windows; the default resolves the native factory on open.
+    monkeypatch.setattr(sys, "platform", "linux" if explicit else "win32")
+    monkeypatch.setattr(di, "DirectInput", lambda: pytest.fail("explicit source ignored") if explicit else api())
+    monkeypatch.setattr(di, "_dev", api.call)
+    try:
+        assert wheel.open()
+        assert api.enumerations == 1
+    finally:
+        wheel.close()
 
 
 def reader(monkeypatch, *profiles, settings=None):
@@ -19,9 +38,10 @@ def test_full_format_and_selection_never_write_force(monkeypatch):
     other.inst, vjoy.inst = descriptor(3, vid=1), descriptor(4, vid=di.VJOY_VID, pid=di.VJOY_PID)
     wheel, api = reader(monkeypatch, a, b, other, vjoy)
     first = wheel.read(0)
-    assert first.ok and first.throttle is None
+    assert not first.ok and first.throttle is None
     b.axes[0] += 1000
     wheel.read(.002)
+    wheel.read(.052)
     assert wheel.instance_proven == str(b.inst.guidInstance)
     assert len(wheel.records) == 1
     assert [v[1] for v in api.calls if v[0] == "CreateDevice"] == [1, 2]
@@ -49,7 +69,7 @@ def test_saved_instance_only_and_missing_falls_back(monkeypatch, caplog):
 
 def test_lost_retry_interval_and_reenumeration(monkeypatch):
     p = profile()
-    wheel, api = reader(monkeypatch, p)
+    wheel, api = reader(monkeypatch, p, settings=Settings(wheel_instance=str(p.inst.guidInstance)))
     assert wheel.read(0).ok
     p.reads.append(di.DIERR_INPUTLOST)
     assert not wheel.read(.01).ok
@@ -74,15 +94,18 @@ def test_pedals_disabled_without_map_and_startup_throttle_latch(monkeypatch):
     sample = wheel.read(0)
     assert sample.throttle is sample.brake is sample.clutch is None
     assert wheel.status == "Check pedals"
-    p.axes[1] = 0
+    p.axes[1:4] = [0, 0, 32767]
     sample = wheel.read(.002)
+    assert sample.throttle == sample.brake == sample.clutch == 0
+    p.axes[2:4] = [20000, 0]
+    sample = wheel.read(.004)
     assert sample.throttle == 0 and sample.brake > 0 and sample.clutch == 1
     wheel.close()
 
 
 def test_pedal_map_publishes_only_after_explicit_flow(monkeypatch):
     p = profile()
-    wheel, _ = reader(monkeypatch, p)
+    wheel, _ = reader(monkeypatch, p, settings=Settings(wheel_instance=str(p.inst.guidInstance)))
     wheel.read(0)
     wheel.map_pedals(0)
     for index, slot in enumerate((1, 2, 3)):
@@ -97,13 +120,18 @@ def test_pedal_map_publishes_only_after_explicit_flow(monkeypatch):
 
 def test_instance_change_cancels_incomplete_map(monkeypatch):
     a, b = profile(1), profile(2)
-    wheel, _ = reader(monkeypatch, a, b)
+    wheel, api = reader(monkeypatch, a, settings=Settings(wheel_instance=str(a.inst.guidInstance)))
     wheel.read(0)
     wheel.map_pedals(0)
     a.axes[1] = 65535
     wheel.read(1)
+    wheel.close()
+    api.profiles = [b]
+    assert wheel.open()
+    assert not wheel.read(1.002).ok
     b.axes[0] += 1000
-    sample = wheel.read(1.002)
+    wheel.read(1.004)
+    sample = wheel.read(1.064)
     assert wheel.mapper.done and wheel.mapper.result == {}
     assert sample.throttle is sample.brake is sample.clutch is None
     wheel.close()

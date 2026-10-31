@@ -24,6 +24,8 @@ def engage_block(pad):
     if p is not None:
         if not p.ok:
             return "wheel not found"
+        if p.brake is None:
+            return "check pedals" if getattr(pad, "pedal_status", "") == "Check pedals" else "map pedals"
         if (p.brake or 0) >= BRAKE_TAKEOVER:
             return "release the brake"
     return ""

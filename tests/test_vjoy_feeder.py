@@ -22,14 +22,15 @@ def test_value_map_matches_existing_wheel(value):
                       (0x31, axis_value("throttle", abs(value))), (0x32, axis_value("brake", abs(value)))]
 
 
-def test_missing_clutch_and_close_reset_then_neutral_then_relinquish():
+def test_missing_clutch_and_close_neutral_then_relinquish_without_reset():
     dll = FakeVJoyDll(clutch=False)
     feeder = VJoyFeeder(dll=dll)
     feeder.write(Output(.7, .8, .9, 1))
     feeder.close()
     assert dll.values == {0x30: 0x4000, 0x31: 1, 0x32: 1}
     assert dll.calls[-1][0] == "RelinquishVJD"
-    assert [c[0] for c in dll.calls[-5:]] == ["ResetVJD", "SetAxis", "SetAxis", "SetAxis", "RelinquishVJD"]
+    assert [c[0] for c in dll.calls[-4:]] == ["SetAxis", "SetAxis", "SetAxis", "RelinquishVJD"]
+    assert not any(c[0] == "ResetVJD" for c in dll.calls)
 
 
 def test_acquire_failure_and_required_axes():

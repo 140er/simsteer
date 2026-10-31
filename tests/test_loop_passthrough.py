@@ -135,6 +135,39 @@ def test_capture_entry_failure_closes_relay(monkeypatch, tmp_path):
     assert device.closed
 
 
+@pytest.mark.parametrize("action", ["test_fire", "periodic_center"])
+@pytest.mark.parametrize("passthrough", [True, False])
+def test_passthrough_skips_test_fire_and_periodic_center(monkeypatch, tmp_path, action, passthrough):
+    import simsteer.runtime.loop as loop
+    device = FakeDeviceManager()
+    device.passthrough = passthrough
+    engages, centers, sleeps = [], [], []
+    def engage():
+        engages.append(True)
+        device.engaged = True
+    device.engage = engage
+    device.center = lambda: centers.append(True)
+    monkeypatch.setattr(loop, "DeviceManager", lambda **kw: device)
+    monkeypatch.setattr(loop.time, "sleep", lambda seconds: sleeps.append(seconds))
+    class Keys:
+        first = True
+        def poll(self):
+            if self.first and action == "test_fire":
+                self.first = False
+                return [ord("t")]
+            return []
+    clip = _make_clip(tmp_path / "clip", frames=21 if action == "periodic_center" else 1)
+    clock = ReplayClock()
+    assert loop.run(Settings(device="wheel", no_tuner=True), "ets2", source=ReplaySource(clip, clock),
+                    make_telemetry=lambda: ReplayTelemetry(clip, clock), clock=clock, keys=Keys(),
+                    model=FakeModel(), headless=True) == 0
+    if action == "test_fire":
+        assert bool(engages) == (not passthrough)
+        assert bool(sleeps) == (not passthrough)
+    else:
+        assert bool(centers) == (not passthrough)
+
+
 def test_passthrough_off_replay_matches_base_bytes(tmp_path, monkeypatch):
     import simsteer.runtime.loop as loop
     # Execute the exact parent loop against the same replay/model/state.

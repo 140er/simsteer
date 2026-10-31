@@ -15,7 +15,7 @@ from fakes_wheel import FakeVJoyDll, ScriptedPhysical
 
 
 def relay(reader=None, dll=None):
-    reader, dll = reader or ScriptedPhysical(), dll or FakeVJoyDll()
+    reader, dll = reader or ScriptedPhysical(Physical(0, 0, 0, 0, True)), dll or FakeVJoyDll()
     wheel = PassthroughWheel(Settings(), reader_factory=lambda: reader,
                              feeder_factory=lambda: VJoyFeeder(dll=dll))
     return wheel, reader, dll

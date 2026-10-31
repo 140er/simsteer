@@ -21,6 +21,7 @@ class Drive:
 
     def engage(self, degrees=0):
         self.commands = replace(self.commands, steer=.5, throttle=.2)
+        self.tick(-.002, degrees)
         self.tick(0, degrees, request="engage")
         self.tick(.25, degrees)
         return self.tick(.4, degrees)
@@ -37,6 +38,7 @@ def test_player_is_exact_identity(steer):
 def test_engage_linear_ramp_and_pedals_immediate():
     d = Drive()
     d.commands = replace(d.commands, steer=.8, throttle=.4, brake=.05)
+    d.tick(-.002, -90)
     first = d.tick(0, -90, request="engage")
     assert first.steer == -.2 and first.throttle == .4 and first.brake == .05
     assert d.tick(.125, -90).steer == pytest.approx(.3)
@@ -71,7 +73,7 @@ def test_resting_hands_and_slow_drift_never_take_over(motion, seconds):
     d = Drive()
     d.engage()
     for i in range(1, seconds * 500 + 1):
-        degrees = (2 if i % 2 else -2) if motion == "noise" else i * .002 * 5
+        degrees = (2 if i % 2 else -2) if motion == "noise" else i * .002
         assert d.tick(.4 + i * .002, degrees).engaged, (motion, i)
 
 

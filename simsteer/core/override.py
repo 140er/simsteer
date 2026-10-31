@@ -69,7 +69,7 @@ class Override:
         self.state, self.reason = "PLAYER", ""
         self.output = Output()
         self.last_at, self.serial, self.lost = None, -1, False
-        self.anchor = self.last_rim = self.rate = 0.0
+        self.anchor = self.engage_anchor = self.last_rim = self.rate = 0.0
         self.since = {}
         self.started = self.offset = self.duration = 0.0
         self.forced_axes = set()
@@ -109,9 +109,9 @@ class Override:
         if cmd.serial != self.serial:
             self.serial = cmd.serial
             if cmd.request == "engage" and brake < BRAKE_TAKEOVER:
-                start = self.output.steer if self.state in ("HANDBACK", "OVERRIDE") else rim
+                start = self.output.steer
                 self.state, self.reason, self.started, self.offset = "ENGAGING", "", now, start
-                self.anchor = self.last_rim = rim * self.rim_range_deg / 2
+                self.anchor = self.engage_anchor = self.last_rim = rim * self.rim_range_deg / 2
                 self.rate, self.since = 0.0, {}
             elif cmd.request in ("insert", "loop") and self.engaged:
                 self._handback(now, rim, cmd.request)
@@ -124,14 +124,12 @@ class Override:
             travel = abs(degrees - self.anchor)
             armed = now - self.started + 1e-9 >= TAKEOVER_ARM_S
             if not armed:
-                self.anchor = degrees
-            elif (travel < TAKEOVER_ANGLE_DEG / 2
-                  or (0 < abs(self.rate) < TAKEOVER_ANGLE_DEG / ANCHOR_TAU_S and travel < TAKEOVER_ANGLE_DEG)):
-                # Continue absorbing sustained slow drift: stopping at half
-                # the travel threshold would freeze a 5°/s drift into a grab.
+                self.anchor = self.engage_anchor = degrees
+            elif travel < TAKEOVER_ANGLE_DEG / 2:
                 self.anchor += (degrees - self.anchor) * (1 - math.exp(-dt / ANCHOR_TAU_S))
             steering = armed and (
-                travel + 1e-9 >= TAKEOVER_HARD_DEG
+                abs(degrees - self.engage_anchor) + 1e-9 >= TAKEOVER_HARD_DEG
+                or travel + 1e-9 >= TAKEOVER_HARD_DEG
                 or self._held("travel", travel + 1e-9 >= TAKEOVER_ANGLE_DEG, now, TAKEOVER_HOLD_S)
                 or (self._held("flick", abs(self.rate) >= TAKEOVER_RATE_DPS,
                                now, TAKEOVER_RATE_HOLD_S) and travel > TAKEOVER_RATE_MIN_DEG))

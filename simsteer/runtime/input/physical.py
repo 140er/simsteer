@@ -14,7 +14,8 @@ RELAY_HZ = 500
 RELAY_MIN_HZ = 250
 REACQUIRE_S = 0.5
 INSTANCE_DETECT_DEG = 2.0
-PEDAL_SANE_REST = 0.5
+INSTANCE_DETECT_HOLD_S = 0.05
+PEDAL_SANE_REST = 0.05
 LOG = logging.getLogger(__name__)
 
 
@@ -72,7 +73,7 @@ class DInputDevice:
 
 
 class PhysicalWheel:
-    def __init__(self, settings=None, *, di_factory=di.DirectInput, only_vid=di.FANATEC_VID):
+    def __init__(self, settings=None, *, di_factory=None, only_vid=di.FANATEC_VID):
         self.factory, self.only_vid = di_factory, only_vid
         self.saved = getattr(settings, "wheel_instance", "")
         self.axes = validate_axes(getattr(settings, "wheel_axes", {}))
@@ -88,9 +89,10 @@ class PhysicalWheel:
         return self.active["dev"].info.name if self.active else "No wheel"
 
     def open(self):
-        if self.factory is di.DirectInput and sys.platform != "win32":
+        factory = self.factory if self.factory is not None else di.DirectInput
+        if factory is di.DirectInput and sys.platform != "win32":
             return False
-        self.api = self.factory()
+        self.api = factory()
         candidates = [i for i in self.api.game_controllers()
                       if di.info_of(i).vid == self.only_vid and not di.info_of(i).is_vjoy]
         saved = [i for i in candidates if di.info_of(i).instance == self.saved]
@@ -100,12 +102,13 @@ class PhysicalWheel:
         for inst in saved or candidates:
             try:
                 dev = DInputDevice(self.api, inst)
-                self.records.append(dict(dev=dev, anchor=None, retry=None, failures=0))
+                self.records.append(dict(dev=dev, anchor=None, detect_at=None, detect_sign=0,
+                                         retry=None, failures=0))
             except (di.DIError, OSError) as e:
                 LOG.warning("Wheel open: %s", e)
-        self.active = self.records[0] if self.records else None
+        self.active = self.records[0] if saved and self.records else None
         self.pedals_held, self.reopen = None, False
-        return bool(self.active)
+        return bool(self.records)
 
     def read(self, now=None):
         now = time.monotonic() if now is None else now
@@ -131,7 +134,15 @@ class PhysicalWheel:
                 samples[id(rec)] = (axes, steer)
                 if rec["anchor"] is None:
                     rec["anchor"] = steer
-                if not self.saved and abs(steer - rec["anchor"]) * self.rim_range_deg / 2 > INSTANCE_DETECT_DEG:
+                delta = (steer - rec["anchor"]) * self.rim_range_deg / 2
+                moving = abs(delta) > INSTANCE_DETECT_DEG
+                sign = 1 if delta > 0 else -1
+                if not moving:
+                    rec["detect_at"] = None
+                elif rec["detect_at"] is None or rec["detect_sign"] != sign:
+                    rec["detect_at"], rec["detect_sign"] = now, sign
+                if (not self.saved and moving
+                        and now - rec["detect_at"] + 1e-9 >= INSTANCE_DETECT_HOLD_S):
                     if self.mapper:
                         self.mapper.done, self.mapper.result = True, {}
                         self.mapper.status = "Wheel selected; map pedals again"
@@ -144,6 +155,7 @@ class PhysicalWheel:
                     LOG.warning("Wheel lost: %s", e)
                 rec["retry"] = now + REACQUIRE_S
                 rec["failures"] += 1
+                rec["detect_at"] = None
                 if rec is self.active:
                     self.pedals_held = None
                 if rec["failures"] >= 3:
@@ -164,10 +176,12 @@ class PhysicalWheel:
             if self.mapper.done and self.mapper.result:
                 self.axes, self.pedals_held = self.mapper.result, None
         pedals = [AxisMap.mapped_pedal(self.raw_axes, self.axes.get(k)) for k in ("throttle", "brake", "clutch")]
+        away_from_rest = {name for name in ("throttle", "brake", "clutch")
+                          if (p := self.axes.get(name)) and
+                          abs(self.raw_axes[p["slot"]] - p["rest"]) / abs(p["full"] - p["rest"]) > PEDAL_SANE_REST}
         if self.pedals_held is None:
-            self.pedals_held = (pedals[0] or 0) > PEDAL_SANE_REST
-        if self.pedals_held and (pedals[0] or 0) < 0.05:
-            self.pedals_held = False
+            self.pedals_held = away_from_rest
+        self.pedals_held.intersection_update(away_from_rest)
         self.status = "Check pedals" if self.pedals_held else (self.mapper.status if self.mapper else "")
         if self.pedals_held or (self.mapper and not self.mapper.done):
             pedals = [None] * 3
@@ -177,6 +191,7 @@ class PhysicalWheel:
         if self.active and self.active["retry"] is None:
             dev = self.active["dev"]
             self.axes = {"steer": resolve_slots(dev.names)["steer"]}
+            self.pedals_held = None
             self.mapper = PedalMapper(now, self.raw_axes, dev.names, dev.ranges, self.axes["steer"])
 
     def close(self):
