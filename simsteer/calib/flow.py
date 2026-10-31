@@ -13,8 +13,8 @@ manual entry. Camera and Steering are LiveCalib and LiveParams, which
 learn from independent observations. The Check only judges.
 
 With the default simple warp, the Camera step measures the mount pose
-from zero and writes it once. That warp applies pitch only partly and
-yaw not at all, so a LiveCalib that kept composing its residual onto
+from zero and writes it once. That warp aligns the forward horizon but
+does not rotate off-axis rays or apply yaw, so composing residuals onto
 the written pose would feed on itself (on a synthetic drive with a 2.0
 degree pitch and 1.5 degree yaw both crept past 3.5 degrees in three
 minutes). The perspective warp applies the whole rotation, so there
@@ -40,6 +40,7 @@ from simsteer.app import audio
 from simsteer.calib.fov_source import FovReader
 from simsteer.calib.score import CheckStats, Verdict, evaluate
 from simsteer.calib.steering import OutputDirection, SteeringDirection
+from simsteer.core.calibration import SIMPLE_WARP_VERSION
 from simsteer.core.learners.livecalib import (
     BLOCK_SIZE, INPUTS_NEEDED, MIN_SPEED_FILTER_MPS, CalStatus,
 )
@@ -189,8 +190,32 @@ class CalibFlow:
         self._lock = threading.Lock()
         self._reset_state()
 
-        if not self._load():
+        loaded = self._load()
+        if (self.calib.simple_warp
+                and self.calib.simple_warp_version != SIMPLE_WARP_VERSION):
+            self._migrate_simple_warp()
+        elif not loaded:
             self._enter(Step.FOV)
+
+    def _migrate_simple_warp(self) -> None:
+        """Discard pose and Check evidence measured through the old warp.
+
+        Preserve FOV/crops and the device's steering fit. A completed FOV
+        resumes at Camera; an unfinished FOV still has to finish first.
+        The version is also saved per device so another device's old Done
+        cannot silently reuse its previous Check.
+        """
+        next_step = Step.FOV if self.step is Step.FOV else Step.CAMERA
+        self.lc.reset(reason="simple warp geometry changed")
+        self.calib.pitch_deg = self.calib.yaw_deg = 0.0
+        self.calib.simple_warp_version = SIMPLE_WARP_VERSION
+        self.attempts = 0
+        self.result = None
+        self.redo_note = ""
+        self.check = CheckStats()
+        if self._persist:
+            self.calib.save(game=self.game)
+        self._enter(next_step)
 
     def _reset_state(self) -> None:
         self._config_pending = False
@@ -718,6 +743,7 @@ class CalibFlow:
     def to_dict(self) -> dict:
         return {
             "version": CALIB_VERSION,
+            "simple_warp_version": self.calib.simple_warp_version,
             "game": self.game,
             "device": self.device,
             "step": self.step.value,
@@ -776,6 +802,11 @@ class CalibFlow:
             self.check = CheckStats.from_dict(d.get("check"))
         except (KeyError, ValueError, TypeError):
             return False
+        if (self.calib.simple_warp
+                and (self.calib.simple_warp_version != SIMPLE_WARP_VERSION
+                     or d.get("simple_warp_version", 1) != SIMPLE_WARP_VERSION)):
+            self._migrate_simple_warp()
+            return True
         if self.step is Step.FOV and self.fov_proposal is None:
             self._config_pending = self._fov_config is not None
         if self.step is Step.STEERING and not self.steering_fit:

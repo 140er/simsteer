@@ -168,15 +168,15 @@ def _crop_and_resize(bgr: np.ndarray,
     interpreted road pixels as sky and emitted garbage pose, which
     LiveCalib then rejected wholesale.
 
-    Source horizon defaults to the cropped frame's vertical midline
-    (correct for level cameras). pitch_deg shifts that — positive
+    Source horizon defaults to the original capture's optical center,
+    shifted by the top crop. pitch_deg shifts that — positive
     pitch (camera looking down) moves the horizon up in the source,
     so we sample further up to land it on the model's CY.
 
-    Used in 'simple_warp' mode (default). The expensive perspective
-    warp doesn't earn its complexity for screen-captured game frames
-    — there's no fisheye to undo, no real-camera mount offset to
-    rotate around.
+    Used in 'simple_warp' mode (default). This translates the horizon
+    without rotating the image: pitch alignment is exact at the forward
+    vanishing point, but off-axis rays retain perspective error. Yaw is
+    deliberately ignored; use the perspective path to correct it.
     """
     out_size = SBIGMODEL_INPUT_SIZE if bigmodel else MEDMODEL_INPUT_SIZE
     out_w, out_h = out_size
@@ -189,8 +189,8 @@ def _crop_and_resize(bgr: np.ndarray,
     # 1. Top/bottom crop — hide cab roof / hood. Clamped to 0..0.45 each.
     top_pct = max(0.0, min(0.45, float(calib.crop_top_pct)))
     bot_pct = max(0.0, min(0.45, float(calib.crop_bottom_pct)))
+    top_px = int(round(h_full * top_pct))
     if top_pct > 0.0 or bot_pct > 0.0:
-        top_px = int(round(h_full * top_pct))
         bot_px = int(round(h_full * bot_pct))
         bgr = bgr[top_px:h_full - bot_px, :]
 
@@ -210,15 +210,12 @@ def _crop_and_resize(bgr: np.ndarray,
         bgr = bgr[:, x0:x0 + crop_w]
         w = bgr.shape[1]
 
-    # 3. Locate source horizon. For a level camera (pitch=0) the
-    # horizon sits at the cropped frame's vertical midline. Positive
-    # pitch (camera angled DOWN) shifts the horizon UP in the image,
-    # so we adjust horizon_row upward. Pitch is in degrees; convert
-    # to pixels using the source focal length (square pixels →
-    # same fy as fx, fx = (w/2)/tan(hfov/2)).
-    fx = (w / 2.0) / math.tan(math.radians(src_hfov_deg / 2.0))
+    # 3. Cropping changes the pixel origin, not the capture's focal
+    # length. Use the ORIGINAL width with its HFOV and shift the original
+    # principal point by the top crop (not by half the remaining height).
+    fx = (w_full / 2.0) / math.tan(math.radians(src_hfov_deg / 2.0))
     pitch_rad = math.radians(float(calib.pitch_deg))
-    horizon_row = h / 2.0 - fx * math.tan(pitch_rad)
+    horizon_row = h_full / 2.0 - top_px - fx * math.tan(pitch_rad)
 
     # 4. Vertical crop sized to maintain 2:1 aspect with the
     # horizontal crop, POSITIONED so the source horizon lands at
@@ -253,10 +250,8 @@ def warp_to_model(bgr: np.ndarray,
     Two paths:
       - simple (default, `calib.simple_warp = True`): crop the source
         to the model's expected HFOV, aspect-correct vertical crop,
-        resize. No perspective transform, no rotation. Faster, easier
-        to reason about, and matches what you'd intuitively expect
-        when feeding a screen-captured game frame to a model — the
-        model sees the central forward view at the right zoom.
+        resize. Aligns the forward horizon using pitch, without a
+        perspective rotation. Yaw is ignored in this mode.
       - perspective (`calib.simple_warp = False`): the full openpilot-
         style warp: K_cam · view_from_device · R(rpy) · K_model^-1.
         Folds in LiveCalib's pitch/yaw rotation. Pre-existing, kept

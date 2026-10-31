@@ -43,6 +43,10 @@ _load_with_fallback = load_with_fallback
 
 CONFIG_PATH = state_path("calibration")
 
+# Version 2 fixes the simple warp's focal length and cropped optical
+# center. Old pose measurements must go through Camera again.
+SIMPLE_WARP_VERSION = 2
+
 
 @dataclass
 class Calibration:
@@ -101,10 +105,11 @@ class Calibration:
     # True (default): use the simple crop+resize path — no perspective
     # transform, just take the central HFOV slice the model expects,
     # crop to 2:1 aspect, resize. Cheaper and reads correctly for
-    # screen-captured game frames where there's no real lens to
-    # rectify. False: use the full openpilot-style perspective warp
+    # screen-captured game frames. Pitch translates the horizon; yaw
+    # is ignored. False: use the full openpilot-style perspective warp
     # with pitch/yaw rotation. Toggle via the Camera tab.
     simple_warp: bool = True
+    simple_warp_version: int = SIMPLE_WARP_VERSION
     # ---- legacy / unused (kept so old JSON loads don't error) ----
     # `model_*_fov_h_deg` were used by an older pre-warp pipeline; the
     # current warp reprojects to fixed medmodel / sbigmodel intrinsics
@@ -237,6 +242,14 @@ class Calibration:
         if path is not None and path.exists():
             try:
                 data = json.loads(path.read_text())
+                # Check before migration can replace an invalid saved pose.
+                require_finite("calibration.load", **data)
+                data.setdefault("simple_warp_version", 1)
+                if (data.get("simple_warp", True)
+                        and data["simple_warp_version"] != SIMPLE_WARP_VERSION):
+                    # Retain the version until the flow also invalidates the
+                    # old camera learner and scored check.
+                    data["pitch_deg"] = data["yaw_deg"] = 0.0
                 loaded = cls(**{k: v for k, v in data.items()
                                 if k in cls.__dataclass_fields__})
                 require_finite("calibration.load", **asdict(loaded))
