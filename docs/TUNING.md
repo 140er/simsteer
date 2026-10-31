@@ -36,6 +36,18 @@ A fresh setup, in order:
 
 ## Camera & Calibration
 
+The default simple warp uses the original capture width and HFOV to
+compute focal length. Top/bottom crops shift the optical center without
+changing that focal length. Pitch translates the forward horizon onto
+the model's expected row; yaw is ignored. Use the perspective warp for
+full pitch/yaw rotation, including rays away from the vanishing point.
+
+Simple-warp geometry version 2 invalidates older saved pitch/yaw and
+Camera sample history. On upgrade, a finished FOV resumes at **Camera**;
+an unfinished FOV restarts that step. FOV, crops and steering fits are
+preserved, and the Check must run again. Current-version Camera progress
+still resumes after quitting. Saved perspective calibrations are unchanged.
+
 | Knob | What it does |
 |---|---|
 | **Capture VFOV** | Vertical FOV of your capture. Set by the calibration's FOV step; change it here to enter it by hand. HFOV is derived from aspect. Never tuned continuously. |
