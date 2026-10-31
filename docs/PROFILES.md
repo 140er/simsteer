@@ -135,7 +135,7 @@ built-in default.
 | `passive_fit_safe` | bool | `false` | LiveParams may learn while disengaged. Otherwise only with `--passive-fit`. |
 | `longitudinal` | bool | `true` | SimSteer drives throttle and brake. Not read yet. |
 | `speed_source` | string | `telemetry` | `telemetry` or `model`. Not read yet. |
-| `synth_wheel_angle` | bool | `false` | The adapter derives the wheel angle from yaw rate. Not read yet. |
+| `synth_wheel_angle` | bool | `false` | The adapter derives wheel angle from yaw rate. Check labels this dependent evidence and cannot certify an independent steering fit from it. |
 
 ### `[liveparams]`
 
@@ -143,6 +143,64 @@ built-in default.
 |---|---|
 | `[liveparams.gates] profile` | `strict` (games that report the wheel angle) or `loose` (games where it is derived from yaw rate). |
 | `[liveparams.gamepad] seed`, `[liveparams.wheel] seed` | `[a, b, c]` in `axis = a*wheel + b*wheel*v^2 + c`, the starting steering fit for that device until `liveparams_<id>_<device>.json` exists. Without one, `[10, 0, 0]`. |
+
+A trusted fit needs at least 100 accepted samples, including 10 samples
+per turn with wheel magnitude at least 0.003 rad and a measured speed span
+of at least 3 m/s across those excited samples. Each 3 m/s speed bin must
+contain at least 10 excited samples before its measured speed range can
+contribute to that span; one outlier cannot establish it. Older saved bins
+without per-bin ranges use conservative inner bin edges. At one speed,
+`wheel` and `wheel*v^2` are collinear, so sample count cannot identify the
+two steering coefficients independently.
+Steering progress includes coverage; the HUD names the missing turn or speed
+variation. Older mature fits without coverage can attempt Check, and keep
+normal engagement only if Check passes. A failed Check resets them for
+Steering. A passed Check does not invent training coverage.
+
+### Check evidence
+
+Telemetry profiles require lane spread, absolute lane bias, lane excursions,
+speed ratio, steering saturation and an independent held-out steering fit.
+Profiles with `telemetry.kind = "none"` declare only the lane measurements
+and saturation; this smaller contract cannot certify speed or steering fit.
+The runtime still needs engaged driving with valid speed observations. Model
+speed alone cannot establish that independent motion evidence.
+Vision-only and yaw-derived profiles cannot reach Done under the current
+independent-motion and steering-fit requirements.
+
+Check freezes the fit before collecting validation observations and resumes
+that snapshot after a restart. Training innovations do not count. Lane
+changes are excluded; offsets beyond 1.8 m count as excursions. Opposite-sign
+offset changes over 2 m within five frames indicate ego-lane reassignment,
+bridging brief missing observations and smoothed transitions. Commanded lane
+changes clear that window; an uncommanded crossing
+fails the lane measurement. Required
+measurements need their minimum sample count and at least 80% of their
+offered observations. Check also needs 120 engaged seconds and at least
+20 steering samples in each direction. Results are `PASS`, `FAIL`, or
+`INSUFFICIENT_EVIDENCE`, with counts and denominators in the log.
+A measured failure takes precedence over missing evidence, including steering
+saturation when it prevents fit observations. Insufficient results have no
+score. Per-frame logs carry compact counts; full evidence is written when
+the outcome changes and at most once per second otherwise.
+
+Saved certification is bound to the camera geometry, output device and id,
+controller settings, profile capabilities, model hashes, adapter identity
+and certification schema. Model startup hashes the loaded files. Semantic
+changes to model inputs, decoding, tensor shapes or constants must increment
+`ADAPTER_VERSION` in `core/model_identity.py`, in source and packaged builds.
+Comments and formatting do not change that version or invalidate a Check. A
+detected output binding reversal revokes direction verification. Changed
+context requires an explicit Check again; missing evidence does not spend
+a failed-fit attempt. In perspective mode, camera-learning changes within
+0.5 degrees pitch/yaw and 5 cm height of the certified pose are tolerated;
+larger cumulative changes require Check again. FOV, crop, warp and control
+settings still invalidate immediately. This includes the k/l turn-in keys.
+A changed output device id requires a new stopped direction verification.
+An old state without a saved device id does not imply a device change.
+Earlier saved passes become `INSUFFICIENT_EVIDENCE`, with the previous result
+preserved as `legacy_result`. Camera and direction progress remain available.
+`FAILED` blocks engagement and neutralizes AI output until calibration restarts.
 
 ### `[[setup]]`
 

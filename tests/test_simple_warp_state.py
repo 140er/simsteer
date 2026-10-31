@@ -92,6 +92,24 @@ def test_old_device_flow_cannot_reuse_done_with_a_new_camera_file():
     assert current.result is None
 
 
+def test_simple_warp_migration_discards_all_saved_certificate_fields():
+    seed_legacy()
+    path = flow_path("ets2", "gamepad")
+    data = json.loads(path.read_text())
+    data.update(check_context={"camera": {"pitch_deg": 2.5}},
+                check_model=[4.2, 0.001, 0.01], check_requested=True,
+                legacy_result={"passed": True, "score": 0.87})
+    path.write_text(json.dumps(data))
+    current = flow(Calibration.load("ets2"))
+    migrated = current.to_dict()
+    assert migrated["check_context"] is None
+    assert migrated["check_model"] is None
+    assert migrated["legacy_result"] is None
+    assert not migrated["check_requested"]
+    assert not current.calibrated and not current.ai_steering_ready
+    assert json.loads(path.read_text()) == migrated
+
+
 def test_old_camera_without_flow_clears_learner():
     seed_legacy()
     flow_path("ets2", "gamepad").unlink()
@@ -116,21 +134,27 @@ def test_new_camera_progress_survives_restart_after_migration():
     assert resumed.progress == current.progress
 
 
-def test_current_simple_done_is_preserved():
+def test_current_simple_pose_survives_but_uncertified_done_requires_check():
     seed_legacy(legacy_camera=False, legacy_flow=False)
     current = flow(Calibration.load("ets2"))
-    assert current.step is Step.DONE
-    assert current.result["passed"]
+    # Current geometry preserves the pose, but an old Done has no certificate.
+    assert current.step is Step.CHECK
+    assert current.result["status"] == "INSUFFICIENT_EVIDENCE"
+    assert current.legacy_result["passed"]
+    assert not current.calibrated and not current.ai_steering_ready
     assert current.calib.pitch_deg == 2.5
     assert current.lc.cal_status == CalStatus.CALIBRATED
 
 
-def test_perspective_pose_and_done_are_preserved():
+def test_perspective_pose_survives_but_uncertified_done_requires_check():
     seed_legacy(simple=False)
     cal = Calibration.load("ets2")
     current = flow(cal)
-    assert current.step is Step.DONE
-    assert current.result["passed"]
+    # Perspective geometry needs no migration; certification still needs proof.
+    assert current.step is Step.CHECK
+    assert current.result["status"] == "INSUFFICIENT_EVIDENCE"
+    assert current.legacy_result["passed"]
+    assert not current.calibrated and not current.ai_steering_ready
     assert cal.pitch_deg == 2.5
     assert cal.yaw_deg == -0.7
     assert current.lc.cal_status == CalStatus.CALIBRATED

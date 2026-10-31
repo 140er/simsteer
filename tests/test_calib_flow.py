@@ -63,6 +63,17 @@ class FakeLiveParams:
         self.last_innovation = 0.0
         self.last_actual = 0.0
         self.wipes = 0
+        self.validation_model = None
+
+    @property
+    def validating(self):
+        return self.validation_model is not None
+
+    def begin_validation(self, coefficients=None):
+        self.validation_model = coefficients or (self.a_linear, self.b_quad, self.c_bias)
+
+    def end_validation(self):
+        self.validation_model = None
 
     def trusted(self) -> bool:
         return max(self.samples, self.session_samples) >= TRUSTED_MIN_SAMPLES
@@ -119,8 +130,14 @@ class Driver:
         for _ in range(n):
             self.t += 0.05
             o = dict(v=22.0, yaw_rate=0.0, wheel=0.0, driving=True, engaged=True,
-                     lane_offset=0.02, vx_model=22.0)
+                     lane_offset=0.02, vx_model=22.0, axis=0.15 * math.sin(self.t))
             o.update(obs)
+            if (self.flow.step is Step.CHECK
+                    and isinstance(self.flow.lp, FakeLiveParams)
+                    and self.flow.lp.predictions == self.flow._pred_seen):
+                # Supply independent validation observations. The former
+                # fixture passed without any steering-fit observations.
+                self.flow.lp.predict(0.005, actual=0.1)
             if self.flow.step is Step.FOV:
                 self.flow.feed_fov(np.zeros((2, 2, 3), np.uint8),
                                    model_vx(self.flow.calib.fov_h_deg), o["v"], 0.0)

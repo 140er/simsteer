@@ -756,7 +756,8 @@ class Tuner:
             if self.calib_flow and self.calib_flow.result:
                 result = self.calib_flow.result
                 values["calibration"] = (
-                    f"Score {result.get('score', 0):.2f}  {result.get('date', '')}"
+                    f"Score {result['score']:.2f}  {result.get('date', '')}"
+                    if result.get("score") is not None else "Check again"
                 ).strip()
             if self.calib_flow:
                 flow = self.calib_flow

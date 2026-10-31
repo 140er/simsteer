@@ -167,6 +167,9 @@ def test_trim_feedback_corrects_the_physical_wheel_for_either_input_sign(axis_si
     lp = LiveParams(game="ets2", device_kind="gamepad", clock=lambda: 100.0)
     lp.set_axis_sign(axis_sign)
     lp.samples = TRUSTED_MIN_SAMPLES
+    # This test isolates trim direction using a qualified fit fixture;
+    # sample count alone no longer establishes that qualification.
+    lp.coverage = {"4": [25, 25], "8": [25, 25]}
     controller = LateralController(ControllerConfig(), lp)
     command = controller.compute(_plan(0.0), 22.0, actual_wheel_angle=-0.005)
     assert controller.last_trim_frozen_reason == ""
