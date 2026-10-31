@@ -49,7 +49,7 @@ OFF_TRUCK_GAME_STEER = 972        # float -1..+1 — final game-applied steering
 OFF_TRUCK_WHEEL_STEERING = 1200   # float[16] radians, per wheel
 # 6th zone (vectors) starts at 1640. config_fv (228 bytes) -> truck_fv at 1868.
 # truck_fv layout: lv_acc(12) av_acc(12) acc(12) aa_acc(12) cabinAV(12) cabinAA(12)
-OFF_CABIN_AV_Y = 1920             # float rad/s, yaw rate of the cabin (z-axis)
+OFF_CABIN_AV_Y = 1920             # float rotations/s, cabin angular velocity Y
 
 
 class ScsTelemetry:
@@ -123,7 +123,8 @@ class ScsTelemetry:
 
     def yaw_rate_rad_s(self) -> float | None:
         """Cabin angular velocity around the vertical axis (rad/s)."""
-        return self._read_float(OFF_CABIN_AV_Y)
+        turns_per_s = self._read_float(OFF_CABIN_AV_Y)
+        return None if turns_per_s is None else turns_per_s * math.tau
 
     def close(self) -> None:
         self._page.close()

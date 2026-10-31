@@ -385,6 +385,8 @@ class CalibFlow:
             self.lc.rescale_for_fov(self.calib, self._fov_reference,
                                     self.calib.fov_h_deg)
             self._fov_reference = float(self.calib.fov_h_deg)
+            if self._persist:
+                self.calib.save(game=self.game)
             if self.step is Step.FOV:
                 self.fov_proposal = None
                 self._finish_fov("manual")
@@ -662,6 +664,9 @@ class CalibFlow:
                     return "Stop to check steering direction"
                 if output.active:
                     return "Checking steering direction: stay stopped"
+                if self.game == "ets2" and output.reason == output.SATURATED_RAW_REASON:
+                    return ("ETS2: steering mode likely relative; use Wheel (absolute) "
+                            "steering and 0% deadzone")
                 return output.reason or "Press INSERT to check steering direction"
             if self.redo_note and self.prompt_idx == 0 and self.prompt_s < 10.0:
                 return f"Redo: {self.redo_note}"
