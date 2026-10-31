@@ -146,11 +146,6 @@ HOTKEYS: list[Hotkey] = [
     Hotkey("wiggle_rb", "0", "Wiggle RB",
            "", "Binding (disengaged)", "overlay"),
 
-    # Test
-    Hotkey("test_fire", "T", "Test fire steering ±0.5",
-           "Sends a quick left-right axis sweep to confirm the virtual "
-           "pad is reaching the game. Force-engages briefly.",
-           "Diagnostics", "overlay", danger=True),
 ]
 
 
@@ -173,6 +168,8 @@ def by_id(hotkey_id: str) -> Hotkey | None:
 def hk_enabled(hotkey_id: str, settings: "Settings | None") -> bool:
     """True when the hotkey should fire. Default-true if settings is
     None (called before Settings is wired) or the id is unknown."""
+    if hotkey_id == "test_fire":
+        return False
     if settings is None:
         return True
     if hotkey_id in _DEVELOPER_ONLY and settings.hud_mode != "dev":

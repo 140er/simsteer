@@ -20,6 +20,7 @@ import math
 import mmap
 import struct
 import sys
+import time
 
 
 SHARED_MEM_NAME = "Local\\SCSTelemetry"
@@ -55,6 +56,8 @@ class ScsTelemetry:
 
     def __init__(self) -> None:
         self._mm: mmap.mmap | None = None
+        self._timestamp = None
+        self._progress_at = time.monotonic()
         if sys.platform != "win32":  # named mappings are a Windows API
             return
         try:
@@ -71,17 +74,29 @@ class ScsTelemetry:
 
     @property
     def available(self) -> bool:
-        return self._mm is not None
+        return self._is_active()
+
+    @property
+    def needs_reconnect(self) -> bool:
+        # Retain the progress clock across stalls. Reopening a frozen map
+        # would incorrectly grant another second of "fresh" telemetry.
+        return self._mm is None
 
     def _is_active(self) -> bool:
         if self._mm is None:
             return False
         sdk_active = self._mm[OFF_SDK_ACTIVE] != 0
+        if not sdk_active or self._mm[OFF_PAUSED]:
+            return False
         time_val = struct.unpack_from("<Q", self._mm, OFF_TIME)[0]
-        return sdk_active and time_val > 0
+        now = time.monotonic()
+        if time_val != self._timestamp:
+            self._timestamp = time_val
+            self._progress_at = now
+        return time_val > 0 and now - self._progress_at < 1.0
 
     def _read_float(self, offset: int) -> float | None:
-        if self._mm is None:
+        if not self.available:
             return None
         try:
             return float(struct.unpack_from("<f", self._mm, offset)[0])
@@ -123,10 +138,12 @@ class ScsTelemetry:
         yaw rate); ETS2 reports the real value so the arg is unused.
         """
         del wheelbase_m
-        if self._mm is None:
+        if not self.available:
             return None
         try:
             arr = struct.unpack_from("<4f", self._mm, OFF_TRUCK_WHEEL_STEERING)
+            if not all(math.isfinite(a) for a in arr):
+                return float("nan")  # preserve the fault for the loop's stop guard
             nz = [a for a in arr if abs(a) > 1e-6]
             mean_rot = float(sum(nz) / len(nz)) if nz else 0.0
             return mean_rot * 2.0 * math.pi

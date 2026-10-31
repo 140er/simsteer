@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from simsteer.core.finite import require_finite
+
 from simsteer.core.constants import (
     IDX_N,
     NUM_LANE_LINES,
@@ -76,11 +78,15 @@ def _softmax(x: np.ndarray) -> np.ndarray:
 
 def decode_pose(vision_flat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Ego-motion mean and linear std from a vision output alone."""
+    require_finite("vision", output=vision_flat)
     mu, log_std = _split_mu_std(_slice(vision_flat, "pose", VISION_SLICES))
-    return mu, np.exp(log_std)
+    std = np.exp(log_std)
+    require_finite("pose", mean=mu, std=std)
+    return mu, std
 
 
 def decode(vision_flat: np.ndarray, policy_flat: np.ndarray) -> Decoded:
+    require_finite("model", vision=vision_flat, policy=policy_flat)
     # --- Vision ---
     pose_raw = _slice(vision_flat, "pose", VISION_SLICES)         # 12 = mu(6) + std(6)
     pose_mu, pose_std = _split_mu_std(pose_raw)
@@ -134,7 +140,7 @@ def decode(vision_flat: np.ndarray, policy_flat: np.ndarray) -> Decoded:
     desire_raw = _slice(policy_flat, "desire_state", POLICY_SLICES)
     desire_state = _softmax(desire_raw)
 
-    return Decoded(
+    decoded = Decoded(
         plan=plan, plan_std=plan_std,
         lane_lines=ll_mu, lane_lines_prob=ll_prob,
         road_edges=re_mu,
@@ -145,6 +151,8 @@ def decode(vision_flat: np.ndarray, policy_flat: np.ndarray) -> Decoded:
         lead_prob=lead_prob,
         leads=leads_mu, leads_std=leads_std,
     )
+    require_finite("decoded", **vars(decoded))
+    return decoded
 
 
 MIN_SPEED = 1.0
@@ -208,6 +216,9 @@ def desired_curvature_lag_adjusted(
     `last_desired_curvature` is the value commanded on the previous
     frame; the caller carries this across frames.
     """
+    require_finite("curvature", plan=plan, speed=v_ego,
+                   delay=steer_actuator_delay, previous=last_desired_curvature,
+                   buffer=extra_buffer_s)
     v = max(v_ego, MIN_SPEED)
     buf = EXTRA_LAG_BUFFER_S if extra_buffer_s is None else float(extra_buffer_s)
     delay = max(float(steer_actuator_delay) + buf, 1e-3)
@@ -241,6 +252,7 @@ def desired_curvature_lag_adjusted(
         last_desired_curvature - max_delta,
         last_desired_curvature + max_delta,
     ))
+    require_finite("curvature", desired=desired_k, command=safe_desired_k)
     return safe_desired_k
 
 

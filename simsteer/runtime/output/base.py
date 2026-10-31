@@ -29,11 +29,12 @@ from typing import Literal
 
 from simsteer.runtime.output.gamepad import Gamepad, GamepadError
 from simsteer.runtime.output.wheel import Wheel, WheelError
+from simsteer.runtime.output.safety import OutputSafety, output_locked
 
 DeviceKind = Literal["gamepad", "wheel"]
 
 
-class DeviceManager:
+class DeviceManager(OutputSafety):
     """Single point of contact for whichever virtual controller is
     active. Public interface mirrors `Gamepad` / `Wheel` so callers
     can use a `DeviceManager` anywhere either was previously used."""
@@ -44,6 +45,7 @@ class DeviceManager:
         self._kind: DeviceKind | None = None
         self._device: Gamepad | Wheel | None = None
         self.last_error: str | None = None
+        self._init_safety()
         # Best effort — if initial_kind fails (e.g. no vJoy driver), the
         # caller can see `self.kind is None` and react.
         self.set_kind(initial_kind)
@@ -63,6 +65,7 @@ class DeviceManager:
     def is_wheel(self) -> bool:
         return self._kind == "wheel"
 
+    @output_locked
     def set_kind(self, kind: DeviceKind) -> bool:
         """Switch to a different output device. Disengages and releases
         the current one before acquiring the new one. Returns True on
@@ -70,6 +73,7 @@ class DeviceManager:
         sets `self.last_error`."""
         if kind == self._kind:
             return True
+        self.cancel_bind()
         # Save was-engaged state so a swap mid-drive doesn't drop control.
         was_engaged = bool(self._device and self._device.engaged)
         # Tear down current device first — vJoy needs exclusive access,
@@ -105,27 +109,36 @@ class DeviceManager:
     def engaged(self) -> bool:
         return bool(self._device and self._device.engaged)
 
+    @output_locked
     def engage(self) -> None:
+        self.cancel_bind()
         if self._device is not None:
             self._device.engage()
 
+    @output_locked
     def disengage(self) -> None:
+        self.cancel_bind()
         if self._device is not None:
             self._device.disengage()
 
+    @output_locked
     def toggle(self) -> bool:
+        self.cancel_bind()
         if self._device is None:
             return False
         return self._device.toggle()
 
+    @output_locked
     def center(self) -> None:
         if self._device is not None:
             self._device.center()
 
+    @output_locked
     def set_steering(self, x: float, force: bool = False) -> None:
         if self._device is not None:
             self._device.set_steering(x, force=force)
 
+    @output_locked
     def set_throttle_brake(self, throttle: float, brake: float,
                            force: bool = False) -> None:
         if self._device is not None:

@@ -57,6 +57,7 @@ Algorithm matches openpilot:
 from __future__ import annotations
 
 import json
+import logging
 import math
 import time
 from collections import deque
@@ -65,6 +66,8 @@ from enum import IntEnum
 from typing import TYPE_CHECKING
 
 import numpy as np
+
+from simsteer.core.finite import NonFiniteError, require_finite
 
 from simsteer.paths import state_path
 from simsteer.core.warp import euler_from_rot, rot_from_euler
@@ -274,6 +277,11 @@ class LiveCalib:
                wide_from_device_euler: np.ndarray | None = None,
                game_steer: float | None = None) -> None:
         self.last_rejection_reason = None
+        require_finite("livecalib.sample", pose=pose, road=road_transform,
+                       yaw=actual_yaw_rate, speed=v_ego, pose_std=pose_std,
+                       road_std=road_transform_std, wide=wide_from_device_euler,
+                       axis=game_steer, calibration=vars(calib))
+        self.validate_state()
         # Human-input gate: tracked even when we'd reject for other
         # reasons, so the cooldown starts the instant a yank happens
         # rather than the next time we'd otherwise pass.
@@ -649,11 +657,19 @@ class LiveCalib:
 
     # ----- persistence -----
 
+    def validate_state(self) -> None:
+        require_finite("livecalib.state", rpys=list(self._rpys), heights=list(self._heights),
+                       wide=self._wide_sum, wide_estimate=self.wide_from_device_estimate,
+                       block=self._block_rpy_sum, height=self._block_height_sum,
+                       previous_axis=self._last_game_steer, samples=self.samples,
+                       wide_n=self._wide_n, block_n=self._block_n, rejected=self.rejected)
+
     def save_state(self, game: str) -> None:
         """Serialize the committed block history (and the in-flight block
         accumulator) so a Quit/relaunch resumes calibration where it left
         off. Called on every block commit; failures are swallowed."""
         try:
+            self.validate_state()
             payload = {
                 "rpys": [[float(x) for x in r] for r in self._rpys],
                 "heights": [float(h) for h in self._heights],
@@ -670,7 +686,9 @@ class LiveCalib:
                 "cal_status": int(self.cal_status),
             }
             state_path("livecalib_state", game).write_text(
-                json.dumps(payload, indent=2))
+                json.dumps(payload, indent=2, allow_nan=False))
+        except NonFiniteError as exc:
+            logging.getLogger(__name__).warning("Not saving non-finite state: %s", exc)
         except OSError:
             pass
 
@@ -682,37 +700,35 @@ class LiveCalib:
             return
         try:
             data = json.loads(p.read_text())
-        except (json.JSONDecodeError, OSError):
+            require_finite("livecalib.load", state=data)
+        except (json.JSONDecodeError, OSError, NonFiniteError):
             return
         try:
-            for r in data.get("rpys", []):
-                arr = np.asarray(r, dtype=np.float64)
-                if arr.shape == (3,):
-                    self._rpys.append(arr)
-            for h in data.get("heights", []):
-                self._heights.append(float(h))
-            ws = data.get("wide_sum")
-            if ws is not None and len(ws) == 3:
-                self._wide_sum = np.asarray(ws, dtype=np.float64)
-            self._wide_n = int(data.get("wide_n", 0))
-            wfde = data.get("wide_from_device_estimate")
-            if wfde is not None and len(wfde) == 3:
-                self.wide_from_device_estimate = np.asarray(
-                    wfde, dtype=np.float64)
-            brs = data.get("block_rpy_sum")
-            if brs is not None and len(brs) == 3:
-                self._block_rpy_sum = np.asarray(brs, dtype=np.float64)
-            self._block_height_sum = float(data.get("block_height_sum", 0.0))
-            self._block_n = int(data.get("block_n", 0))
-            self.samples = int(data.get("samples", 0))
-            self.rejected = int(data.get("rejected", 0))
-            # Refresh status from the loaded history rather than trusting
-            # the saved enum — bounds may have changed between versions.
-            self._refresh_cal_status()
-        except (ValueError, TypeError):
-            # Bad shape / corrupt file → start fresh, leave _rpys etc as init.
-            self._rpys.clear()
-            self._heights.clear()
-            self._block_n = 0
-            self._block_rpy_sum[:] = 0.0
-            self._block_height_sum = 0.0
+            rpys = [np.asarray(r, dtype=np.float64) for r in data.get("rpys", [])]
+            heights = [float(h) for h in data.get("heights", [])]
+            wide = np.asarray(data.get("wide_sum", [0., 0., 0.]), dtype=np.float64)
+            estimate = data.get("wide_from_device_estimate")
+            if estimate is not None:
+                estimate = np.asarray(estimate, dtype=np.float64)
+            block = np.asarray(data.get("block_rpy_sum", [0., 0., 0.]), dtype=np.float64)
+            height = float(data.get("block_height_sum", 0.))
+            wide_n = int(data.get("wide_n", 0))
+            block_n = int(data.get("block_n", 0))
+            samples = int(data.get("samples", 0))
+            rejected = int(data.get("rejected", 0))
+            require_finite("livecalib.load", rpys=rpys, heights=heights, wide=wide,
+                           estimate=estimate, block=block, height=height)
+            if any(r.shape != (3,) for r in [*rpys, wide, block]):
+                return
+            if estimate is not None and estimate.shape != (3,):
+                return
+        except (ValueError, TypeError, OverflowError):
+            return
+        # Validate the whole snapshot before adopting any of it.
+        self._rpys = deque(rpys, maxlen=INPUTS_WANTED)
+        self._heights = deque(heights, maxlen=INPUTS_WANTED)
+        self._wide_sum, self._wide_n = wide, wide_n
+        self.wide_from_device_estimate = estimate
+        self._block_rpy_sum, self._block_height_sum = block, height
+        self._block_n, self.samples, self.rejected = block_n, samples, rejected
+        self._refresh_cal_status()

@@ -7,6 +7,7 @@ import ctypes
 import math
 import struct
 import sys
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -181,6 +182,10 @@ def scs_yaw(turns):
     tel = ScsTelemetry.__new__(ScsTelemetry)
     tel._mm = None if turns is None else bytearray(OFF_CABIN_AV_Y + 4)
     if turns is not None:
+        tel._mm[0] = 1  # active plugin, with a progressing timestamp
+        struct.pack_into("<Q", tel._mm, 8, 1)
+        tel._timestamp = None
+        tel._progress_at = time.monotonic()
         struct.pack_into("<f", tel._mm, OFF_CABIN_AV_Y, turns)
     return tel.yaw_rate_rad_s()
 
