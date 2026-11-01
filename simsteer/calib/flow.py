@@ -950,9 +950,7 @@ class CalibFlow:
                 reason = CameraBlockedReason(reason)
                 return f"Camera {reason.name}: {CAMERA_GUIDANCE[reason]}"
             return (f"Camera {self.lc.blocks * BLOCK_SIZE + self.lc._block_n}/"
-                    f"{CERTAIN_BLOCKS_NEEDED * BLOCK_SIZE} certain samples; "
-                    f"bootstrap {getattr(self.lc, 'bootstrap_samples', 0)}/"
-                    f"{INPUTS_NEEDED * BLOCK_SIZE}")
+                    f"{CERTAIN_BLOCKS_NEEDED * BLOCK_SIZE} certain samples")
         if self.step is Step.STEERING:
             if not self.direction.ready:
                 return "Drive gentle left and right bends manually"
