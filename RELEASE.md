@@ -128,6 +128,8 @@ follows [docs/SETUP.md](docs/SETUP.md). Without `-IncludeModels` they run
 - No auto-update — users need to download new releases manually.
 - Calibration is per-user, per-game — first-run wizard always shows on
   a fresh install.
+- Camera histories saved before the certainty checks were added are discarded
+  on upgrade. Users must repeat Camera and Check before engaging.
 
 ## Future (post-MVP)
 
