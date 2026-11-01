@@ -23,6 +23,8 @@ The approved scope is:
 
 ## Current evidence
 
+Evidence last updated: 1 November 2026.
+
 Merged code and completed product validation are separate milestones.
 Pending device or driving checks remain required even when code is merged.
 
@@ -34,9 +36,10 @@ Pending device or driving checks remain required even when code is merged.
 | Physical wheel probe | [#3](https://github.com/140er/simsteer/pull/3) is open; live wheel and pedal evidence is still needed before selecting the input backend. |
 | Source launch and signing | [#9](https://github.com/140er/simsteer/pull/9) is merged into V0.12. |
 | AC and Forza telemetry | [#10](https://github.com/140er/simsteer/pull/10) is open. Windows timing passes; real drives and Forza menu validation where the game is available, otherwise recorded as unavailable, independent review and final-head checks remain required. |
-| Guided calibration | [#11](https://github.com/140er/simsteer/pull/11) is merged into V0.12: calibration detects and corrects inverted steering and saves the correction per game and device. Real-game calibration drives remain pending, and the Check stage needs the certification work in [hardening](#v012-hardening) item FE-08. |
+| Guided calibration | [#11](https://github.com/140er/simsteer/pull/11) and certification [#20](https://github.com/140er/simsteer/pull/20) are merged into V0.12: calibration detects and corrects inverted steering and saves the correction per game and device. Real-game calibration drives remain pending. |
+| Output safety (0A, FE-01–03) | [#25](https://github.com/140er/simsteer/pull/25) is merged into V0.12; real-game and hardware validation remain required. |
 | Status bar, camera mod, live-run fixes, settings, model contract, wheel simulator, simple warp | [#13](https://github.com/140er/simsteer/pull/13), [#14](https://github.com/140er/simsteer/pull/14), [#15](https://github.com/140er/simsteer/pull/15), [#16](https://github.com/140er/simsteer/pull/16), [#17](https://github.com/140er/simsteer/pull/17), [#19](https://github.com/140er/simsteer/pull/19), [#21](https://github.com/140er/simsteer/pull/21) and [#24](https://github.com/140er/simsteer/pull/24) are merged into V0.12. |
-| Hardening | Two independent reviews of V0.12 (31 Oct) found output-safety, model-contract and certification gaps. [V0.12 hardening](#v012-hardening) lists every item; no engaged session runs before its P0 items merge. |
+| Hardening | The P0 code in [#19](https://github.com/140er/simsteer/pull/19), [#24](https://github.com/140er/simsteer/pull/24) and [#25](https://github.com/140er/simsteer/pull/25) is merged into V0.12. The model-contract and simple-warp reports used synthetic clips; recorded-frame reports still wait on FE-14. [V0.12 hardening](#v012-hardening) retains the remaining evidence gates. |
 
 ## Phases and dependencies
 
@@ -112,9 +115,9 @@ The status column is a snapshot; live PR status is on the PR pages.
 
 | ID | Item | Priority | Found by | Step / PR | Depends on | Status as of 31 Oct 2026, 14:00 CET |
 |---|---|---|---|---|---|---|
-| FE-01 | Finite guards from decode to device | P0 | both reviews | 0A | none | in progress |
-| FE-02 | Stop path that needs no successful frame, neutral on exit, no `os._exit` | P0 | both | 0A | none | in progress |
-| FE-03 | `T` test key off in player mode; bind wiggle through the loop's output path | P0 | both | 0A | none | in progress |
+| FE-01 | Finite guards from decode to device | P0 | both reviews | 0A, [#25](https://github.com/140er/simsteer/pull/25) | none | in progress |
+| FE-02 | Stop path that needs no successful frame, neutral on exit, no `os._exit` | P0 | both | 0A, [#25](https://github.com/140er/simsteer/pull/25) | none | in progress |
+| FE-03 | `T` test key off in player mode; bind wiggle through the loop's output path | P0 | both | 0A, [#25](https://github.com/140er/simsteer/pull/25) | none | in progress |
 | FE-04 | Model contract at the pinned release | P0 | both | 0B, [#19](https://github.com/140er/simsteer/pull/19) | none | merged; recorded-frames report waits on FE-14 |
 | FE-05 | Simple-warp pitch geometry | P0 | one | 0C, [#24](https://github.com/140er/simsteer/pull/24) | none | merged |
 | FE-06 | 20 Hz assumption and the FOV solver | P1 | both | 0D | FE-04, FE-05 | not started |
@@ -204,7 +207,8 @@ The status column is a snapshot; live PR status is on the PR pages.
   10.7 px off). Parametrised over pitch, FOV and aspect ratio.
 - Saved simple-warp pitch is invalidated by a schema change, so Camera
   measures again.
-- Offline real-model before/after report.
+- Offline real-model before/after report on recorded frames. Still open:
+  #24's report used a synthetic clip, so this waits on FE-14's clips.
 
 ### P1
 
@@ -362,6 +366,7 @@ The status column is a snapshot; live PR status is on the PR pages.
 | [#20](https://github.com/140er/simsteer/pull/20) | FE-08 | FE-08 acceptance, with the frozen fit or a named follow-up; maintainer confirms the FAILED policy; passing review and checks. |
 | [#21](https://github.com/140er/simsteer/pull/21) | FE-13 | Merged into V0.12 (simulated base); the bench lanes stay open under FE-13. |
 | [#24](https://github.com/140er/simsteer/pull/24) | FE-05 | Merged into V0.12. |
+| [#25](https://github.com/140er/simsteer/pull/25) | FE-01–03 | Merged into V0.12. Real-game and hardware evidence remains required under FE-15 and the release gates. |
 | [#22](https://github.com/140er/simsteer/pull/22) | FE-16 | Passing review and checks, plus one live Windows run of start, backup, restore and virtual display. No engaged-evidence claims. |
 | [#10](https://github.com/140er/simsteer/pull/10) | P0 base | Existing gates, plus signed AC speed, documented yaw sign and the `forza_port` test conflict fixed; merges after the P0 items. |
 | [#3](https://github.com/140er/simsteer/pull/3) | none | Unchanged; kept as a tool. |
