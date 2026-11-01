@@ -1232,6 +1232,10 @@ def main() -> int:
                         calib_hk_id = CALIB_KEY_HOTKEY_IDS.get(key)
                         if calib_hk_id and not hk(calib_hk_id):
                             continue
+                        if (calib_hk_id in ("mirror_sign", "reset_calib_defaults")
+                                and pad is not None and pad.engaged):
+                            print("calibration locked while engaged")
+                            continue
                         msg = handle_calibration_key(calib, key)
                         if msg is not None:
                             print(msg)

@@ -351,7 +351,7 @@ class Tuner:
             group,
             "Mirror lateral sign",
             lambda: self.calib.lateral_sign < 0,
-            lambda v: setattr(self.calib, "lateral_sign", -1.0 if v else 1.0),
+            self._set_mirror,
             obj=self.calib,
         )
         self._add_switch(
@@ -361,6 +361,11 @@ class Tuner:
             lambda v: setattr(self.calib, "simple_warp", v),
             obj=self.calib,
         )
+
+    def _set_mirror(self, value):
+        if self.device is not None and self.device.engaged:
+            return
+        self.calib.lateral_sign = -1.0 if value else 1.0
 
     def _build_steering(self, parent):
         group = self._make_group(parent, "Steering")
