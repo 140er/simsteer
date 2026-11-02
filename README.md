@@ -158,7 +158,7 @@ so leave this off unless you're scripting).
 | `R` | Recalibrate: wipes the camera pose and steering fit and restarts calibration at FOV. Force-disengages first. (overlay) |
 | `BACKSPACE` | Keep your FOV instead of the measured one (overlay, during calibration) |
 | `V` | Toggle model-view / capture-view (overlay) |
-| `M` | Mirror road overlay (also steering without wheel telemetry) |
+| `M` | Mirror road overlay (also steering without wheel telemetry); only while disengaged |
 | `[` `]` `,` `.` `;` `'` | Manual calibration tweaks (overlay) |
 | `1`-`0` | Wiggle controller inputs for ETS2 binding (overlay, while disengaged) |
 
