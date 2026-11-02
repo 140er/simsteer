@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from simsteer.app.manual import ManualInputs
 from simsteer.app.settings import Settings
@@ -132,3 +133,40 @@ def test_runtime_h_key_and_tuner_switch_share_state(monkeypatch, tmp_path):
     )
     assert modes == ["dev", "user", "user"]
     assert settings.hud_mode == Settings.load().hud_mode == "user"
+
+
+@pytest.mark.parametrize("field", ["pitch_deg", "fov_h_deg", "cy_frac"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_horizon_skips_non_finite_annotation(field, value):
+    from simsteer.ui.overlay import _draw_horizon_line
+
+    frame = np.zeros((180, 320, 3), np.uint8)
+    calib = Calibration(image_w=320, image_h=180)
+    setattr(calib, field, value)
+    before = vars(calib).copy()
+    _draw_horizon_line(frame, calib)
+    assert not frame.any()
+    assert vars(calib) == before
+    current = getattr(calib, field)
+    assert (np.isnan(current) and np.isnan(value)) or current == value
+
+
+def test_finite_horizon_keeps_existing_pixel_rendering():
+    import cv2
+    from simsteer.ui.overlay import _draw_horizon_line
+
+    frame = np.zeros((180, 320, 3), np.uint8)
+    expected = frame.copy()
+    calib = Calibration(image_w=320, image_h=180)
+    row = round(calib.cy)
+    cv2.line(expected, (0, row), (320, row), (255, 200, 0), 1, cv2.LINE_AA)
+    _draw_horizon_line(frame, calib)
+    np.testing.assert_array_equal(frame, expected)
+
+
+def test_finite_offscreen_horizon_remains_omitted():
+    from simsteer.ui.overlay import _draw_horizon_line
+
+    frame = np.zeros((180, 320, 3), np.uint8)
+    _draw_horizon_line(frame, Calibration(image_w=320, image_h=180, pitch_deg=80))
+    assert not frame.any()

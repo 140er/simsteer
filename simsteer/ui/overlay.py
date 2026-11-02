@@ -262,10 +262,16 @@ def _draw_horizon_line(out: np.ndarray, calib: Calibration) -> None:
     """Thin cyan horizontal line at v_horizon = cy - fy*tan(pitch).
     Lets the user visually verify whether their FOV/pitch matches the
     actual road horizon. If this line doesn't sit on the visible road's
-    vanishing point, the calibration is off."""
+    vanishing point, the calibration is off. Omit this optional marker
+    when its geometry is non-finite."""
     import math
+    if not (math.isfinite(calib.pitch_deg) and math.isfinite(calib.fov_h_deg)):
+        return
     p = math.radians(calib.pitch_deg)
-    v = int(round(calib.cy - calib.fy * math.tan(p)))
+    v = calib.cy - calib.fy * math.tan(p)
+    if not math.isfinite(v):
+        return
+    v = int(round(v))
     h, w = out.shape[:2]
     if 0 <= v < h:
         cv2.line(out, (0, v), (w, v), (255, 200, 0), 1, cv2.LINE_AA)
