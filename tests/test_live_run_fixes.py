@@ -93,7 +93,8 @@ def install_transport(monkeypatch, transport, *, ready_after=0):
             VIGEM_ERROR_NONE=0x20000000, VIGEM_ERROR_XUSB_USERINDEX_OUT_OF_RANGE=0xE0000014))))
     monkeypatch.setitem(sys.modules, "vgamepad.win.vigem_commons",
                         sys.modules["vgamepad.win"].vigem_commons)
-    monkeypatch.setattr(ctypes, "WinDLL", lambda name: SimpleNamespace(XInputGetState=get_state), raising=False)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, **kwargs: SimpleNamespace(
+        XInputGetState=get_state, SetConsoleCtrlHandler=lambda *args: True), raising=False)
     now = SimpleNamespace(t=0.)
 
     def sleep(seconds):
@@ -123,13 +124,28 @@ def test_item1_waits_for_own_xinput_slot_before_changed_report(monkeypatch):
     assert transport.sent == [(0,) * 6, (0, 0, 1, 0, 0, 0), (0,) * 6]
 
 
-def test_item1_readiness_timeout_releases_device_without_pulse(monkeypatch):
+@pytest.mark.parametrize("via_manager", [False, True], ids=["gamepad", "device_manager"])
+def test_item1_readiness_timeout_releases_device_without_pulse(monkeypatch, via_manager):
     transport = DelayedTransport()
     install_transport(monkeypatch, transport, ready_after=10000)
-    with pytest.raises(GamepadError):
-        Gamepad()
+    if via_manager:
+        from simsteer.runtime.output.base import DeviceManager
+        manager = DeviceManager()
+        try:
+            assert manager.device is None and manager.kind is None
+            assert not manager.engaged
+            error = manager.last_error
+        finally:
+            manager.shutdown_output()
+    else:
+        with pytest.raises(GamepadError) as exc:
+            Gamepad()
+        assert isinstance(exc.value.__cause__, GamepadError)
+        assert str(exc.value.__cause__) == "virtual gamepad did not become ready"
+        error = str(exc.value)
     assert not transport.attached and transport.removed
     assert all(report == (0,) * 6 for report in transport.sent)
+    assert error == "could not initialize a neutral virtual gamepad: virtual gamepad did not become ready"
 
 
 def test_item1_current_library_api_layout(monkeypatch):
@@ -172,10 +188,13 @@ def test_item1_creation_forces_change_then_full_neutral(monkeypatch, recreate):
 def test_item1_transport_failure_neutralizes_and_releases(monkeypatch, fail_at, fail_after_delivery):
     transport = BootTransport(fail_at, fail_after_delivery)
     install_transport(monkeypatch, transport)
-    with pytest.raises(GamepadError):
+    with pytest.raises(GamepadError) as exc:
         Gamepad()
     assert transport.sent[-1] == (0,) * 6  # finally always tries neutral
     assert transport.removed and not transport.attached
+    assert isinstance(exc.value.__cause__, OSError)
+    assert str(exc.value.__cause__) == "report transport failed"
+    assert str(exc.value) == "could not initialize a neutral virtual gamepad: report transport failed"
 
 
 def scs_yaw(turns):

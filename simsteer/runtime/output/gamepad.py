@@ -60,7 +60,7 @@ class Gamepad:
                 vigem_client.vigem_target_remove(self._pad._busp, self._pad._devicep)
             finally:
                 self._pad = None
-                raise GamepadError("could not initialize a neutral virtual gamepad") from e
+                raise GamepadError(f"could not initialize a neutral virtual gamepad: {e}") from e
 
     def _wait_for_ready(self) -> None:
         """Wait for this target's XInput slot before submitting reports.
