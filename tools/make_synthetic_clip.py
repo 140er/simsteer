@@ -155,7 +155,17 @@ class CameraModel:
         return np.stack([W / 2 + self.f * x1 / z2, H / 2 + self.f * y2 / z2], axis=1)
 
 
-def render_calib(s0: float, cam: CameraModel) -> np.ndarray:
+def dash_intervals(s0: float, near: float, far: float):
+    """Paint boundaries in fixed world coordinates, clipped to the view."""
+    period = DASH + GAP
+    for n in range(math.floor((s0 + near) / period), math.ceil((s0 + far) / period) + 1):
+        start = max(near, n * period - s0)
+        end = min(far, n * period + DASH - s0)
+        if end > start:
+            yield start, end
+
+
+def render_calib(s0: float, cam: CameraModel, *, continuous_dashes: bool = False) -> np.ndarray:
     img = np.empty((H, W, 3), np.uint8)
     horizon = int(round(H / 2 - cam.f * math.tan(cam.p)))
     horizon = max(1, min(H - 1, horizon))
@@ -180,6 +190,16 @@ def render_calib(s0: float, cam: CameraModel) -> np.ndarray:
     road = np.concatenate([edge_l, edge_r[::-1]]).astype(np.int32)
     cv2.fillPoly(img, [road], (95, 95, 100), lineType=cv2.LINE_AA)
     for lane_x, dashed in ((-1.5, False), (-0.5, True), (0.5, True), (1.5, False)):
+        if dashed and continuous_dashes:
+            for start, end in dash_intervals(s0, float(zs[0]), float(zs[-1])):
+                z_paint = np.concatenate([[start], zs[(zs > start) & (zs < end)], [end]])
+                x_paint = np.interp(z_paint, zs, centre) + lane_x * LANE_W
+                points = cam.project(x_paint, z_paint)
+                for i in range(len(points) - 1):
+                    width = max(1, int(round(cam.f * .15 / z_paint[i])))
+                    a, b = (tuple(int(round(c)) for c in point) for point in points[i:i + 2])
+                    cv2.line(img, a, b, (235, 235, 235), width, cv2.LINE_AA)
+            continue
         pts = cam.project(centre + lane_x * LANE_W, zs)
         for i in range(len(zs) - 1):
             if dashed and (s0 + zs[i]) % (DASH + GAP) > DASH:

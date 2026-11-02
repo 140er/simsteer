@@ -66,7 +66,7 @@ def test_road_diagnostics_are_developer_only():
 class Model:
     active_provider = policy_provider = "test"
 
-    def step(self, img, big_img=None, desire=None):
+    def step(self, img, big_img=None, desire=None, *, timestamp=None):
         vision = np.zeros(1576, np.float32)
         vision[107] = 1.2
         plan = road_prediction().plan
@@ -100,7 +100,7 @@ def test_runtime_h_key_and_tuner_switch_share_state(monkeypatch, tmp_path):
         modes.append(mode)
         # The flow's instruction already explains its engagement gate.
         assert state.calibration is not None
-        assert state.warnings == []
+        assert state.warnings == ["Frame history warming up"]
         original(self, img, state, mode)
 
     monkeypatch.setattr(loop.HudRenderer, "draw", draw)

@@ -111,6 +111,7 @@ class ReplaySource:
         self._stop = threading.Event()
         self._index = 0
         self.done = False
+        self.frame_timestamp: float | None = None
 
     def __enter__(self) -> "ReplaySource":
         self.start()
@@ -190,6 +191,7 @@ class ReplaySource:
             self.done = True
             raise item
         self.clock.advance_to(self._time_of(self._index))
+        self.frame_timestamp = self.clock.now()
         self._index += 1
         return item
 

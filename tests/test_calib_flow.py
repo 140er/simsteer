@@ -140,7 +140,7 @@ class Driver:
                 self.flow.lp.predict(0.005, actual=0.1)
             if self.flow.step is Step.FOV:
                 self.flow.feed_fov(np.zeros((2, 2, 3), np.uint8),
-                                   model_vx(self.flow.calib.fov_h_deg), o["v"], 0.0)
+                                   model_vx(self.flow.calib.fov_h_deg), o["v"], 0.0, pair_ok=True)
             self.flow.tick(Obs(now=self.t, dt=0.05, **o))
 
     def verify_direction(self) -> None:
@@ -368,7 +368,7 @@ def test_solver_without_vision_uses_the_estimate():
     cal = Calibration(fov_h_deg=95.0)
     out = None
     for _ in range(fov.ESTIMATE_SAMPLES):
-        out = s.update(None, cal, model_vx(95.0), 22.0, 0.0) or out
+        out = s.update(None, cal, model_vx(95.0), 22.0, 0.0, pair_ok=True) or out
     assert out == pytest.approx(TRUE_FOV)
 
 
@@ -394,7 +394,7 @@ def test_candidate_measurement_handles_periodic_motion_and_resume(resume_at):
     solver = FovSolver(vision, views)
     cal = Calibration(fov_h_deg=95.0)
     for frame in range(500):
-        solver.update(np.array([frame]), cal, model_vx(95.0), 22.0, 0.0)
+        solver.update(np.array([frame]), cal, model_vx(95.0), 22.0, 0.0, pair_ok=True)
         if frame == resume_at:
             saved = solver.to_dict()
             solver = FovSolver(vision, views)
@@ -421,7 +421,7 @@ def test_crossing_needs_a_consistent_local_response(responses, expected):
     solver = FovSolver(vision, views)
     cal = Calibration(fov_h_deg=95.0)
     for _ in range(500):
-        solver.update(np.zeros((1, 1)), cal, model_vx(95.0), 22.0, 0.0)
+        solver.update(np.zeros((1, 1)), cal, model_vx(95.0), 22.0, 0.0, pair_ok=True)
         if solver.done:
             break
     assert solver.result == pytest.approx(expected)
