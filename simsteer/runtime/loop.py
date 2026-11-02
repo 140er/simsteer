@@ -412,7 +412,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                 if live_params.device_kind != flow.device:
                     stop_output("Output device changed")
                     flow.switch_device(live_params.device_kind)
-                if not headless and not window_open:
+                # Replace placeholder dimensions only on the first real capture.
+                if not headless and (not window_open or (fresh_frame and n_frames == 1)):
                     h, w = frame.shape[:2]
                     win_w = min(w, settings.max_width)
                     _setup_window_or_exit(win_w, int(round(h * win_w / w)))
