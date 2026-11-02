@@ -518,7 +518,9 @@ class LiveCalib:
             self._refresh_cal_status()
             if self.writes_enabled:
                 self._write_pose(calib)
-        elif (self._game is not None
+        # Status refresh must not skip periodic progress saves; a committed
+        # block has already reset _block_n, preventing a duplicate save.
+        if (self._game is not None
                 and self._block_n % 20 == 0
                 and self._block_n > 0):
             # Periodic in-flight save (~once per second at 20 Hz). Caps
