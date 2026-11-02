@@ -12,7 +12,8 @@ from simsteer.calib.flow import CAMERA_NO_PROGRESS_S, CalibFlow, CameraOutcome, 
 from simsteer.core.calibration import Calibration
 from simsteer.core.finite import NonFiniteError
 from simsteer.core.learners.livecalib import (
-    BLOCK_SIZE, CERTAINTY_BOOTSTRAP_BLOCKS, CERTAIN_BLOCKS_NEEDED,
+    AUTO_RESET_INVALID_BLOCKS, BLOCK_SIZE, CERTAINTY_BOOTSTRAP_BLOCKS,
+    CERTAIN_BLOCKS_NEEDED, PITCH_MAX_DEG,
     CalStatus, CameraBlockedReason, LiveCalib,
 )
 from simsteer.core.learners.liveparams import LiveParams
@@ -324,3 +325,119 @@ def test_full_replay_cannot_write_user_calibration(data_dir):
     result, _ = replay([path], "samples")
     assert result["accepted"] == 500
     assert not (data_dir / "calibration.json").exists()
+
+
+def test_partial_progress_waiting_for_bootstrap_survives_resume(data_dir):
+    learner, calib = LiveCalib(game="ets2", clock=lambda: 0.), Calibration()
+    initial_pose = (calib.pitch_deg, calib.yaw_deg, calib.height_m)
+    path = data_dir / "livecalib_state_ets2.json"
+    for _ in range(200):
+        sample(learner, calib)
+    assert learner.blocks == 2 and learner.samples == 200
+    assert learner.cal_status is CalStatus.UNCALIBRATED
+    for _ in range(20):
+        sample(learner, calib)
+    assert learner.samples == 220 and learner._block_n == 20
+    assert learner.bootstrap_samples == 220
+    assert learner.cal_status is CalStatus.UNCALIBRATED
+    assert not learner.writes_enabled and not learner._wrote_to_calib
+    assert not (data_dir / "calibration_ets2.json").exists()
+    assert not (data_dir / "calibration.json").exists()
+    assert (calib.pitch_deg, calib.yaw_deg, calib.height_m) == initial_pose
+    saved = json.loads(path.read_text())
+    assert saved["samples"] == 220
+    assert saved["block_n"] == 20 and saved["bootstrap_samples"] == 220
+    np.testing.assert_allclose(saved["block_rpy_sum"], learner._block_rpy_sum)
+    assert saved["block_height_sum"] == pytest.approx(learner._block_height_sum)
+    restored = LiveCalib(game="ets2", clock=lambda: 0.)
+    assert restored.samples == 220 and restored._block_n == 20
+    assert restored.bootstrap_samples == 220
+    assert restored.cal_status is CalStatus.UNCALIBRATED
+    assert not restored.writes_enabled and not restored._wrote_to_calib
+    np.testing.assert_allclose(restored._block_rpy_sum, learner._block_rpy_sum)
+    assert restored._block_height_sum == pytest.approx(learner._block_height_sum)
+    for _ in range(79):
+        sample(restored, calib)
+    assert restored.samples == 299 and restored.cal_status is CalStatus.UNCALIBRATED
+    assert not restored.writes_enabled and not restored._wrote_to_calib
+    assert not (data_dir / "calibration_ets2.json").exists()
+    assert (calib.pitch_deg, calib.yaw_deg, calib.height_m) == initial_pose
+    sample(restored, calib)
+    assert restored.samples == 300 and restored.cal_status is CalStatus.CALIBRATED
+    assert restored.writes_enabled and restored._wrote_to_calib
+    assert (data_dir / "calibration_ets2.json").exists()
+
+
+def test_partial_progress_invalid_history_survives_without_reset_or_pose_write(data_dir):
+    seed = LiveCalib(clock=lambda: 0.).state_dict()
+    seed.update(rpys=[[0., math.radians(PITCH_MAX_DEG + 1.), 0.]] * 2,
+                heights=[1.2, 1.2], samples=200, bootstrap_samples=300,
+                bootstrap_height_sum=360., bootstrap_height_n=300,
+                cal_status=int(CalStatus.INVALID))
+    assert "_consecutive_invalid_blocks" not in seed
+    path = data_dir / "livecalib_state_ets2.json"
+    path.write_text(json.dumps(seed))
+    learner, calib = LiveCalib(game="ets2", clock=lambda: 0.), Calibration()
+    assert learner.cal_status is CalStatus.INVALID and learner.blocks == 2
+    assert learner._consecutive_invalid_blocks == 0  # Runtime counter is not persisted.
+    learner._consecutive_invalid_blocks = AUTO_RESET_INVALID_BLOCKS - 1
+    invalid_count = learner._consecutive_invalid_blocks
+    assert 0 < invalid_count < AUTO_RESET_INVALID_BLOCKS
+    generation = learner.reset_generation
+    initial_pose = (calib.pitch_deg, calib.yaw_deg, calib.height_m)
+    assert learner.last_reset_reason is None
+    assert not learner.writes_enabled and not learner._wrote_to_calib
+    for _ in range(20):
+        sample(learner, calib)
+    assert learner.samples == 220 and learner._block_n == 20
+    assert learner.cal_status is CalStatus.INVALID and learner.blocks == 2
+    assert learner._consecutive_invalid_blocks == invalid_count
+    assert learner.reset_generation == generation and learner.last_reset_reason is None
+    assert not learner.writes_enabled and not learner._wrote_to_calib
+    assert not (data_dir / "calibration_ets2.json").exists()
+    assert not (data_dir / "calibration.json").exists()
+    assert (calib.pitch_deg, calib.yaw_deg, calib.height_m) == initial_pose
+    saved = json.loads(path.read_text())
+    assert saved["samples"] == 220 and saved["block_n"] == 20
+    assert saved["cal_status"] == int(CalStatus.INVALID)
+    np.testing.assert_allclose(saved["block_rpy_sum"], learner._block_rpy_sum)
+    assert saved["block_height_sum"] == pytest.approx(learner._block_height_sum)
+    assert "_consecutive_invalid_blocks" not in saved
+    restored = LiveCalib(game="ets2", clock=lambda: 0.)
+    assert restored.samples == 220 and restored._block_n == 20
+    assert restored.cal_status is CalStatus.INVALID and restored.blocks == 2
+    assert restored._consecutive_invalid_blocks == 0  # Restore does not seed this counter.
+    assert restored.reset_generation == generation and restored.last_reset_reason is None
+    assert not restored.writes_enabled and not restored._wrote_to_calib
+    assert not (data_dir / "calibration_ets2.json").exists()
+    np.testing.assert_allclose(restored._block_rpy_sum, learner._block_rpy_sum)
+    assert restored._block_height_sum == pytest.approx(learner._block_height_sum)
+
+
+def test_partial_progress_keeps_twenty_sample_cadence_without_duplicate_commit(data_dir, monkeypatch):
+    learner, calib = LiveCalib(game="ets2", clock=lambda: 0.), Calibration()
+    for _ in range(200):
+        sample(learner, calib)
+    saves = []
+    original_save = learner.save_state
+
+    def counted_save(game):
+        saves.append(learner.samples)
+        original_save(game)
+
+    monkeypatch.setattr(learner, "save_state", counted_save)
+    path = data_dir / "livecalib_state_ets2.json"
+    for _ in range(19):
+        sample(learner, calib)
+    assert saves == [] and json.loads(path.read_text())["samples"] == 200
+    sample(learner, calib)
+    assert saves == [220]
+    assert json.loads(path.read_text())["block_n"] == 20
+    for _ in range(19):
+        sample(learner, calib)
+    assert saves == [220] and json.loads(path.read_text())["samples"] == 220
+    for _ in range(61):
+        sample(learner, calib)
+    assert saves == [220, 240, 260, 280, 300]
+    saved = json.loads(path.read_text())
+    assert saved["samples"] == 300 and saved["block_n"] == 0
