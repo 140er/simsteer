@@ -213,7 +213,8 @@ def test_item2_scs_yaw_crosses_camera_and_fov_thresholds():
     assert not _usable(10., scs_yaw(0.01))
 
 
-def run_frames(monkeypatch, tmp_path, frames, observations, *, log=True, on_push=None):
+def run_frames(monkeypatch, tmp_path, frames, observations, *, log=True, on_push=None,
+               headless=True):
     import simsteer.runtime.loop as loop
 
     state = SimpleNamespace(i=-1)
@@ -227,7 +228,8 @@ def run_frames(monkeypatch, tmp_path, frames, observations, *, log=True, on_push
             on_push(frame, calib)
         return None, None
 
-    monkeypatch.setattr(loop, "FrameQueue", lambda: SimpleNamespace(push=push))
+    # The window-sizing tests also render the capture view without model buffers.
+    monkeypatch.setattr(loop, "FrameQueue", lambda: SimpleNamespace(push=push, last_yuv=None))
 
     class Source:
         done = False
@@ -253,7 +255,8 @@ def run_frames(monkeypatch, tmp_path, frames, observations, *, log=True, on_push
     assert loop.run(loop.Settings(no_tuner=True, no_gamepad=True), "ets2",
                     source=Source(), make_telemetry=lambda: tel, clock=clock,
                     model=SimpleNamespace(step=lambda *a, **k: (None, None)),
-                    headless=True, log_path=str(path) if log else None) == 0
+                    headless=headless, keys=loop.NoKeys(),  # No native keyboard polling in UI tests.
+                    log_path=str(path) if log else None) == 0
     return lc, [json.loads(s) for s in path.read_text().splitlines()] if log else []
 
 
@@ -406,3 +409,41 @@ def test_item6_absolute_response_succeeds_and_genuine_takeover_still_rejects():
     assert flow.measure_output(speed=0., observed=-.1, user_axis=.4, dt=.05) == 0.
     assert not flow.output_direction.active and not flow.output_direction.ready
     assert "Release steering" in flow.hint(0.) and "relative" not in flow.hint(0.)
+
+
+@pytest.mark.parametrize("empty_start", [0, 2])
+@pytest.mark.parametrize("max_width", [800, 2000])
+@pytest.mark.parametrize("headless", [False, True])
+def test_overlay_uses_first_real_capture_dimensions(
+    monkeypatch, tmp_path, empty_start, max_width, headless
+):
+    import simsteer.runtime.loop as loop
+
+    setups, shown, closed = [], [], []
+    settings = loop.Settings(no_tuner=True, no_gamepad=True, max_width=max_width)
+    monkeypatch.setattr(loop, "Settings", lambda **kwargs: settings)
+    monkeypatch.setattr(loop, "setup_window", lambda *size: setups.append(size))
+    monkeypatch.setattr(loop.cv2, "setWindowTitle", lambda *args: None)
+    monkeypatch.setattr(loop.cv2, "destroyAllWindows", lambda: closed.append(True))
+    monkeypatch.setattr(loop, "draw_overlay", lambda frame, *args, **kwargs: frame)
+    monkeypatch.setattr(loop, "show_scaled", lambda *args: shown.append(True))
+    monkeypatch.setattr(loop, "HudRenderer", lambda: SimpleNamespace(draw=lambda *a, **k: None))
+    frames = [None] * empty_start + [
+        np.zeros((1200, 1600, 3), np.uint8),
+        None,
+        np.zeros((720, 1280, 3), np.uint8),
+    ]
+    observations = [dict(decoded=healthy_decoded(), speed=10., yaw=0.) for _ in frames]
+    run_frames(monkeypatch, tmp_path, frames, observations, log=False, headless=headless)
+
+    width = min(1600, max_width)
+    actual_size = (width, round(1200 * width / 1600))
+    if headless:
+        assert not setups and not shown and not closed
+    else:
+        if empty_start:
+            assert setups == [(640, 360), actual_size]
+        else:
+            assert setups == [actual_size]
+        assert len(shown) == len(frames)
+        assert closed == [True]
