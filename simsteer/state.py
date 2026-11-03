@@ -132,6 +132,9 @@ class _SnapshotWriter:
             try:
                 _write_snapshot(path, payload)
             except StateIOUnavailable:
+                # Disk writes receive no caller deadline, so this is defensive
+                # against injected/future failures. Let the worker terminate;
+                # finally wakes waiters and deadline-bound flush detects it.
                 raise
             except Exception:
                 state_warning(path, "not saved; check storage and retry")

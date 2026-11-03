@@ -970,8 +970,6 @@ class CalibFlow:
     @owned(forwards_deadline=True)
     def restart(self, reason: str, *, deadline=None) -> None:
         """Wipe the camera pose and steering fit and start over at FOV."""
-        if self.calib.simple_warp:
-            self.calib.pitch_deg = self.calib.yaw_deg = 0.0
         self.lc.reset(reason=reason)
         self._reset_steering()
         self.attempts = 0

@@ -222,6 +222,9 @@ def test_detached_dataclass_replacement_has_no_owner():
     candidate.pitch_deg = 5.
     current.calib.fov_h_deg = current.calib.fov_h_deg
     assert consume(owner)
+    current.calib.fov_h_deg += 1.
+    assert not owner.trusted and owner.epoch is None
+    assert not consume(owner)
 
 
 @pytest.mark.parametrize("factory", [lambda: "", lambda: None, lambda: "X" * 32])
@@ -443,3 +446,51 @@ def test_failed_ordinary_delete_or_silent_failed_delete_cannot_start_epoch(monke
     monkeypatch.setattr(lc_module, "delete_state", lambda *args, **kw: None)
     current.lc.reset()
     assert owner.epoch is None
+
+
+@pytest.mark.parametrize("simple_warp", [True, False], ids=["simple", "perspective"])
+def test_restart_keeps_baseline_reset_then_fov_geometry(simple_warp, monkeypatch):
+    current, owner = trusted()
+    current.calib.simple_warp = simple_warp
+    geometry = asdict(current.calib)
+    assert abs(geometry["pitch_deg"]) > .5 and abs(geometry["yaw_deg"]) > .25
+    generation = current.lc.reset_generation
+    current.step = Step.DONE
+    current.result = {"passed": True}
+    current.attempts = 3
+    trace, reset_epochs = [], []
+    reset, enter = current.lc.reset, current._enter
+
+    def observed_reset(*args, **kwargs):
+        trace.append(("reset", (current.calib.pitch_deg, current.calib.yaw_deg)))
+        result = reset(*args, **kwargs)
+        reset_epochs.append(owner.epoch)
+        return result
+
+    def observed_enter(step, *args, **kwargs):
+        trace.append(("enter", step))
+        return enter(step, *args, **kwargs)
+
+    monkeypatch.setattr(current.lc, "reset", observed_reset)
+    monkeypatch.setattr(current, "_enter", observed_enter)
+    current.restart("explicit restart test")
+
+    # The existing reset must see the measured pose; FOV entry owns zeroing.
+    assert trace == [("reset", (geometry["pitch_deg"], geometry["yaw_deg"])),
+                     ("enter", Step.FOV)]
+    expected = geometry | ({"pitch_deg": 0., "yaw_deg": 0.} if simple_warp else {})
+    assert asdict(current.calib) == expected
+    assert current.lc.reset_generation == generation + 1
+    assert current.lc.samples == current.lc.blocks == current.lc._block_n == 0
+    assert current.lc.bootstrap_samples == 0
+    assert current.lc.cal_status == CalStatus.UNCALIBRATED
+    assert current.step is Step.FOV and current.result is None and current.attempts == 0
+    assert not current.calibrated and not current.ai_steering_ready
+    assert reset_epochs[0] is not None
+    # Simple-warp FOV zeroing revokes the reset epoch; perspective keeps it pending.
+    if simple_warp:
+        assert owner.epoch is None
+    else:
+        assert owner.epoch == reset_epochs[0]
+    assert not owner.trusted and not consume(owner)
+    assert_released(owner)
