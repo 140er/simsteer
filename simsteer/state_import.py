@@ -10,7 +10,7 @@ from pathlib import Path
 
 from simsteer.paths import bundle_dir, data_dir, is_frozen
 from simsteer.state import (
-    atomic_save_bytes, atomic_save_json, flush_state, read_json_object, snapshot_exists,
+    StateIOUnavailable, atomic_save_bytes, atomic_save_json, flush_state, read_json_object, snapshot_exists,
     state_warning, take_state_warnings,
 )
 
@@ -28,6 +28,8 @@ def _normalized(source: Path) -> dict | bytes | None:
     if source.suffix == ".flag":
         try:
             return source.read_bytes()
+        except StateIOUnavailable:
+            raise
         except OSError:
             state_warning(source, "unreadable; keeping original")
             return None
@@ -57,6 +59,8 @@ def _normalized(source: Path) -> dict | bytes | None:
         value = read_json_object(source)
         CalibFlow.validate_snapshot(value)
         return value
+    except StateIOUnavailable:
+        raise
     except (OSError, ValueError, TypeError, OverflowError):
         state_warning(source, "unreadable; using defaults")
         return None
@@ -71,6 +75,8 @@ def _commit(path: Path, value: dict | bytes) -> bool:
         if isinstance(value, bytes):
             return path.read_bytes() == value
         return read_json_object(path) == value
+    except StateIOUnavailable:
+        raise
     except (OSError, ValueError):
         return False
 
@@ -106,6 +112,8 @@ def import_legacy_state(source: Path | None = None, destination: Path | None = N
             if manifest["complete"]:
                 return False
             names = manifest["pending"]
+        except StateIOUnavailable:
+            raise
         except (OSError, ValueError, KeyError, TypeError):
             state_warning(marker, "unreadable; import paused")
             return False

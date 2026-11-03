@@ -53,7 +53,7 @@ from simsteer.core.finite import NonFiniteError, require_finite
 
 from simsteer.paths import load_with_fallback, state_path
 from simsteer.state import (
-    atomic_save_json, bounded_int, bounded_number, delete_state,
+    StateIOUnavailable, atomic_save_json, bounded_int, bounded_number, delete_state,
     read_json_object, snapshot_exists, state_warning,
 )
 
@@ -867,7 +867,7 @@ class LiveParams:
             self.save()
             self._dirty = 0
 
-    def reset(self, wipe_disk: bool = False, clear_axis_sign: bool = False) -> None:
+    def reset(self, wipe_disk: bool = False, clear_axis_sign: bool = False, *, deadline=None) -> None:
         """Wipe in-memory RLS state to the per-(game, device) seed.
         With `wipe_disk=True`, also remove the persisted JSON so the
         next session starts fresh — used by the overlay `R` hotkey
@@ -921,7 +921,9 @@ class LiveParams:
                 key = f"{self.game}_{self.device_kind}"
             try:
                 p = state_path("liveparams", key)
-                delete_state(p)
+                delete_state(p, **({"deadline": deadline} if deadline is not None else {}))
+            except StateIOUnavailable:
+                raise
             except OSError:
                 pass
 
@@ -937,15 +939,15 @@ class LiveParams:
         self.P = np.diag(self._gates["P_init"])
         self._consecutive_bad_fit = 0
 
-    def set_axis_sign(self, sign: int) -> None:
+    def set_axis_sign(self, sign: int, *, deadline=None) -> None:
         """Use the independently measured input direction as the seed.
         A trusted fit otherwise cannot promptly escape an inverted axis."""
         if sign not in (-1, 1):
             raise ValueError("axis sign must be -1 or 1")
         self.axis_sign = sign
         if self.a_linear * sign <= 0:
-            self.reset(wipe_disk=True)
-        self.save()
+            self.reset(wipe_disk=True, **({"deadline": deadline} if deadline is not None else {}))
+        self.save(**({"deadline": deadline} if deadline is not None else {}))
 
     # ----- persistence -----
 
@@ -1099,7 +1101,7 @@ class LiveParams:
                        axis=list(self._axis_buf), speed=list(self._v_buf),
                        commands=list(self._commanded_buf), samples=self.samples)
 
-    def save(self, path: Path | None = None) -> None:
+    def save(self, path: Path | None = None, *, deadline=None) -> None:
         if path is None:
             # Always write to the per-(game, device) path so the next
             # load picks up THIS device's fit, not the other one's.
@@ -1121,7 +1123,9 @@ class LiveParams:
                 "coverage_speed_min": self.coverage_speed_min,
                 "coverage_speed_max": self.coverage_speed_max,
                 "legacy_fit": self.legacy_fit,
-            })
+            }, **({"deadline": deadline} if deadline is not None else {}))
+        except StateIOUnavailable:
+            raise
         except NonFiniteError as exc:
             logging.getLogger(__name__).warning("Not saving non-finite state: %s", exc)
         except OSError:

@@ -81,14 +81,14 @@ def state_path(base_name: str, game: str | None = None) -> Path:
     return root / f"{base_name}.json"
 
 
-def load_with_fallback(base_name: str, game: str | None) -> Path | None:
+def load_with_fallback(base_name: str, game: str | None, *, deadline=None) -> Path | None:
     """Resolve the path to load FROM: per-game first, then legacy.
     Returns None if neither file exists (caller uses defaults)."""
     game_path = state_path(base_name, game)
-    if snapshot_exists(game_path):
+    if snapshot_exists(game_path, **({"deadline": deadline} if deadline is not None else {})):
         return game_path
     legacy = state_path(base_name, None)
-    if snapshot_exists(legacy):
+    if snapshot_exists(legacy, **({"deadline": deadline} if deadline is not None else {})):
         return legacy
     return None
 

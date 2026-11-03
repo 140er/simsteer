@@ -20,6 +20,40 @@ _notices: dict[Path, str] = {}
 _notice_lock = threading.Lock()
 
 
+class StateIOUnavailable(OSError):
+    """The snapshot worker cannot make progress within the caller's deadline."""
+
+
+class StateDeadline(float):
+    """An absolute monotonic deadline, with an injectable clock for tests."""
+
+    def __new__(cls, value, clock=time.monotonic):
+        result = super().__new__(cls, value)
+        result.clock = clock
+        return result
+
+
+def _remaining(deadline):
+    remaining = deadline - getattr(deadline, "clock", time.monotonic)()
+    if remaining <= 0:
+        raise StateIOUnavailable("snapshot deadline expired")
+    return remaining
+
+
+@contextmanager
+def _state_lock(lock, deadline):
+    if deadline is None:
+        lock.acquire()
+    elif not lock.acquire(timeout=_remaining(deadline)):
+        raise StateIOUnavailable("snapshot lock unavailable")
+    try:
+        if deadline is not None:
+            _remaining(deadline)
+        yield
+    finally:
+        lock.release()
+
+
 def state_warning(path: Path, reason: str) -> None:
     message = f"{path.stem.split('_')[0].capitalize()} {reason}"
     logging.getLogger(__name__).warning(message)
@@ -50,6 +84,8 @@ def _write_snapshot(path: Path, payload: str | bytes | None) -> bool:
             os.fsync(stream.fileno())
         os.replace(temporary, path)
         return True
+    except StateIOUnavailable:
+        raise
     except OSError:
         state_warning(path, "not saved; check storage and retry")
         return False
@@ -57,6 +93,8 @@ def _write_snapshot(path: Path, payload: str | bytes | None) -> bool:
         if temporary is not None:
             try:
                 temporary.unlink(missing_ok=True)
+            except StateIOUnavailable:
+                raise
             except OSError:
                 pass
 
@@ -70,8 +108,15 @@ class _SnapshotWriter:
         self.thread = threading.Thread(target=self._run, name="state-writer", daemon=True)
         self.thread.start()
 
-    def submit(self, path, payload):
-        with self.condition:
+    def _available(self, deadline):
+        if deadline is not None:
+            _remaining(deadline)
+            if not self.thread.is_alive() or self.closing:
+                raise StateIOUnavailable("snapshot worker unavailable")
+
+    def submit(self, path, payload, *, deadline=None):
+        with _state_lock(self.condition, deadline):
+            self._available(deadline)
             self.pending[path] = payload
             self.condition.notify_all()
 
@@ -86,6 +131,8 @@ class _SnapshotWriter:
                 self.active = path
             try:
                 _write_snapshot(path, payload)
+            except StateIOUnavailable:
+                raise
             except Exception:
                 state_warning(path, "not saved; check storage and retry")
             finally:
@@ -93,11 +140,17 @@ class _SnapshotWriter:
                     self.active = None
                     self.condition.notify_all()
 
-    def flush(self, path=None):
-        with self.condition:
-            self.condition.wait_for(lambda: (
+    def flush(self, path=None, *, deadline=None):
+        with _state_lock(self.condition, deadline):
+            self._available(deadline)
+            def finished():
+                return (
                 not self.pending and self.active is None if path is None
-                else path not in self.pending and self.active != path))
+                else path not in self.pending and self.active != path)
+            while not finished():
+                self._available(deadline)
+                self.condition.wait(None if deadline is None else _remaining(deadline))
+                self._available(deadline)
 
     def close(self):
         with self.condition:
@@ -137,15 +190,18 @@ def with_background_saves(function):
     return wrapped
 
 
-def _submit_snapshot(path, payload):
-    with _writer_lock:
+def _submit_snapshot(path, payload, *, deadline=None):
+    with _state_lock(_writer_lock, deadline):
         if _writer is not None:
-            _writer.submit(path, payload)
+            if deadline is None:
+                _writer.submit(path, payload)
+            else:
+                _writer.submit(path, payload, deadline=deadline)
             return True
         return _write_snapshot(path, payload)
 
 
-def atomic_save_json(path: Path, value) -> bool:
+def atomic_save_json(path: Path, value, *, deadline=None) -> bool:
     """Snapshot on the caller; fsync and replace on the session's writer.
 
     Pending snapshots of the same file coalesce. Outside a driving session,
@@ -156,12 +212,12 @@ def atomic_save_json(path: Path, value) -> bool:
     except (ValueError, TypeError, OverflowError):
         state_warning(path, "not saved; check storage and retry")
         return False
-    return _submit_snapshot(path, payload)
+    return _submit_snapshot(path, payload, deadline=deadline)
 
 
-def delete_state(path: Path) -> None:
+def delete_state(path: Path, *, deadline=None) -> None:
     # A deletion follows any in-flight save and supersedes queued snapshots.
-    _submit_snapshot(path, None)
+    _submit_snapshot(path, None, deadline=deadline)
 
 
 def atomic_save_bytes(path: Path, value: bytes) -> bool:
@@ -169,15 +225,18 @@ def atomic_save_bytes(path: Path, value: bytes) -> bool:
     return _submit_snapshot(path, value)
 
 
-def flush_state(path: Path | None = None) -> None:
-    with _writer_lock:
+def flush_state(path: Path | None = None, *, deadline=None) -> None:
+    with _state_lock(_writer_lock, deadline):
         writer = _writer
     if writer is not None:
-        writer.flush(path)
+        if deadline is None:
+            writer.flush(path)
+        else:
+            writer.flush(path, deadline=deadline)
 
 
-def snapshot_exists(path: Path) -> bool:
-    flush_state(path)
+def snapshot_exists(path: Path, *, deadline=None) -> bool:
+    flush_state(path, deadline=deadline)
     return path.exists()
 
 
@@ -189,6 +248,8 @@ def _clean_stale_temps(path: Path) -> None:
         try:
             if sibling.stat().st_mtime < cutoff:
                 sibling.unlink(missing_ok=True)
+        except StateIOUnavailable:
+            raise
         except OSError:
             pass
 
@@ -197,9 +258,9 @@ def _reject_constant(value):
     raise ValueError("non-finite JSON number")
 
 
-def read_json_object(path: Path, *, allow_non_finite: bool = False) -> dict:
+def read_json_object(path: Path, *, allow_non_finite: bool = False, deadline=None) -> dict:
     """Read state; provenance-aware loaders may defer finite validation."""
-    flush_state(path)
+    flush_state(path, deadline=deadline)
     _clean_stale_temps(path)
     raw = json.loads(path.read_text(encoding="utf-8"),
                      parse_constant=float if allow_non_finite else _reject_constant)
