@@ -26,6 +26,7 @@ Reset the fit (`Reset RLS` button in tuner) after a swap.
 from __future__ import annotations
 
 from typing import Literal
+from threading import RLock
 
 from simsteer.runtime.output.gamepad import Gamepad, GamepadError
 from simsteer.runtime.output.wheel import Wheel, WheelError
@@ -40,11 +41,17 @@ class DeviceManager(OutputSafety):
     can use a `DeviceManager` anywhere either was previously used."""
 
     def __init__(self, initial_kind: DeviceKind = "gamepad",
-                 vjoy_device_id: int = 1) -> None:
+                 vjoy_device_id: int = 1, *, passthrough=False, settings=None) -> None:
+        if settings is None and passthrough:
+            from simsteer.app.settings import Settings
+            settings = Settings()
         self._vjoy_id = vjoy_device_id
+        self._passthrough, self._settings = passthrough, settings
         self._kind: DeviceKind | None = None
         self._device: Gamepad | Wheel | None = None
         self.last_error: str | None = None
+        self._lifecycle_lock = RLock()
+        self._shutdown_requested = False
         self._init_safety()
         # Best effort — if initial_kind fails (e.g. no vJoy driver), the
         # caller can see `self.kind is None` and react.
@@ -77,12 +84,18 @@ class DeviceManager(OutputSafety):
     def is_wheel(self) -> bool:
         return self._kind == "wheel"
 
-    @output_locked
     def set_kind(self, kind: DeviceKind) -> bool:
+        # Never hold the output lock while waiting for the relay owner.
+        with self._lifecycle_lock:
+            return self._set_kind(kind)
+
+    def _set_kind(self, kind: DeviceKind) -> bool:
         """Switch to a different output device. Disengages and releases
         the current one before acquiring the new one. Returns True on
         success; on failure leaves whatever was active untouched and
         sets `self.last_error`."""
+        if self._closed or self._shutdown_requested:
+            return False
         if kind == self._kind:
             return True
         self.cancel_bind()
@@ -91,18 +104,22 @@ class DeviceManager(OutputSafety):
         # Tear down current device first — vJoy needs exclusive access,
         # ViGEm doesn't care but it's cleaner.
         if self._device is not None:
-            try:
-                self._device.disengage()
-            except Exception:
-                pass
-            self._device = None
-            self._kind = None
+            self.release_device()
         # Acquire new device.
         try:
             if kind == "gamepad":
-                self._device = Gamepad()
+                self._device = self.write_output(lambda _: Gamepad())
             elif kind == "wheel":
-                self._device = Wheel(device_id=self._vjoy_id)
+                if self._passthrough:
+                    from simsteer.runtime.output.passthrough import PassthroughWheel
+                    self._device = PassthroughWheel(self._settings, self._vjoy_id,
+                                                     write_output=self.write_output)
+                    if not self._device.available:
+                        self._device.close()
+                        self._device = None
+                        print("No Fanatec wheel; using plain vJoy")
+                if self._device is None:
+                    self._device = self.write_output(lambda _: Wheel(device_id=self._vjoy_id))
             else:
                 self.last_error = f"unknown device kind: {kind}"
                 return False
@@ -111,8 +128,8 @@ class DeviceManager(OutputSafety):
             return False
         self._kind = kind
         self.last_error = None
-        if was_engaged:
-            self._device.engage()
+        if was_engaged and not self.passthrough:
+            self.engage()
         return True
 
     # ----- delegate the controller API -----
@@ -122,16 +139,90 @@ class DeviceManager(OutputSafety):
         return bool(self._device and self._device.engaged)
 
     @output_locked
-    def engage(self) -> None:
+    def engage(self) -> bool | None:
         self.cancel_bind()
         if self._device is not None:
-            self._device.engage()
+            return self._device.engage()
 
     @output_locked
     def disengage(self) -> None:
         self.cancel_bind()
-        if self._device is not None:
+        if self.passthrough:
+            self._device.stop_output()
+        elif self._device is not None:
             self._device.disengage()
+
+    @output_locked
+    def insert_disengage(self) -> None:
+        if not self.engaged:
+            return
+        self.cancel_bind()
+        if self.passthrough:
+            self._device.disengage("insert")
+        else:
+            self.disengage()
+
+    @property
+    def passthrough(self):
+        return hasattr(self._device, "passthrough_live")
+
+    @property
+    def passthrough_live(self):
+        return getattr(self._device, "passthrough_live", False)
+
+    @property
+    def physical(self):
+        return getattr(self._device, "physical", None)
+
+    @property
+    def last_reason(self):
+        return getattr(self._device, "last_reason", "")
+
+    @property
+    def pedal_status(self):
+        return getattr(self._device, "pedal_status", "")
+
+    @property
+    def source(self):
+        return getattr(self._device, "source", None)
+
+    def stats(self, **kwargs):
+        return self._device.stats(**kwargs) if self.passthrough else {}
+
+    def map_pedals(self):
+        return self._device.map_pedals() if self.passthrough else False
+
+    def release_device(self):
+        """Release for a swap; permanent exit uses shutdown_output()."""
+        with self._lifecycle_lock:
+            if self._device:
+                if self.passthrough:
+                    self._device.close()
+                else:
+                    self.write_output(lambda dev: getattr(dev, "close", dev.disengage)())
+                with self._output_lock:
+                    self._device, self._kind = None, None
+
+    def shutdown_output(self):
+        with self._lifecycle_lock:
+            with self._output_lock:
+                if self._closed:
+                    return
+                self._shutdown_requested = True
+                relay = self.passthrough
+                if relay:
+                    self._device.io.stopping.set()
+            try:
+                if relay:
+                    self._device.close()
+            finally:
+                # The owner handles relay release, even after a timed-out join.
+                super().shutdown_output(close_device=not relay)
+
+    @output_locked
+    def resume_output(self):
+        if self.passthrough:
+            self._device.resume_output()
 
     @output_locked
     def toggle(self) -> bool:

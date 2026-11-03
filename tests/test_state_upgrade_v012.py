@@ -92,5 +92,7 @@ def test_v012_saved_values_are_preserved(name, step, through_import, tmp_path, m
         restored = asdict(Calibration.load(game="ets2"))
     else:
         restored = asdict(Settings.load())
+        raw = {"wheel_passthrough": True, "rim_range_deg": 900,
+               "wheel_instance": "", "wheel_axes": {}, **raw}
     assert restored == raw
     assert not take_state_warnings(target)

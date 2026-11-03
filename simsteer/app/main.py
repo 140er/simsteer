@@ -56,6 +56,8 @@ def _build_parser(game_ids: list[str]) -> argparse.ArgumentParser:
                          "whose profile does not allow it.")
     ap.add_argument("--vjoy-device", type=int, default=None,
                     help="vJoy device index when --device wheel.")
+    ap.add_argument("--no-passthrough", action="store_true",
+                    help="disable physical wheel relay for this run.")
     ap.add_argument("--no-tuner", action="store_true",
                     help="don't open the tuner window.")
     ap.add_argument("--max-width", type=int, default=None,
@@ -186,6 +188,8 @@ def _main(args: argparse.Namespace, games: Registry, clip: Path | None) -> int:
         settings.override(passive_fit=True)
     if args.vjoy_device is not None:
         settings.override(vjoy_device=args.vjoy_device)
+    if args.no_passthrough:
+        settings.override(wheel_passthrough=False)
     if args.no_tuner:
         settings.override(no_tuner=True)
     if args.max_width is not None:

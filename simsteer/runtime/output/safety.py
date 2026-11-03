@@ -1,7 +1,7 @@
 """Exit neutralization and serialized binding requests for the output manager.
 
 Every device writer must hold the manager's output lock. Public output
-methods and binding ticks do so already; a future relay thread must submit
+methods, binding ticks and relay threads submit
 through write_output(), including neutral/handback writes. Direct backend
 or raw-device writes outside that lock are forbidden.
 
@@ -13,7 +13,7 @@ from __future__ import annotations
 import atexit
 import ctypes
 from functools import wraps
-from threading import RLock
+from threading import RLock, get_ident
 
 from simsteer.runtime.output.binding import Binding
 
@@ -22,16 +22,30 @@ def output_locked(method):
     @wraps(method)
     def call(self, *args, **kwargs):
         with self._output_lock:
-            if self._closed:
+            if self._closed or getattr(self, "_shutdown_requested", False):
                 return None
-            return method(self, *args, **kwargs)
+            return self.write_output(lambda _: method(self, *args, **kwargs))
     return call
 
 
-class OutputSafety:
-    def _init_safety(self):
+class OutputGate:
+    """The shared writer path, also usable by a standalone relay."""
+    def __init__(self):
         self._output_lock = RLock()
         self._closed = False
+
+    def write_output(self, writer, *, cleanup=False):
+        """Serialize output; cleanup permits the owner's final neutral/release."""
+        with self._output_lock:
+            io = getattr(getattr(self, "device", None), "io", None)
+            final_release = cleanup and io is not None and io.stopping.is_set() and io.ident == get_ident()
+            if not self._closed or final_release:
+                return writer(getattr(self, "device", None))
+
+
+class OutputSafety(OutputGate):
+    def _init_safety(self):
+        OutputGate.__init__(self)
         self._binding = Binding()
         self._console_handler = None
         self._console_registered = False
@@ -53,27 +67,28 @@ class OutputSafety:
         # Preserve normal interrupt/exit processing after neutralization.
         return False
 
-    def shutdown_output(self):
+    def shutdown_output(self, *, close_device=True):
         with self._output_lock:
             if self._closed:
                 return
-            self._closed = True
             try:
-                self._binding.cancel(self)
+                def finish(_):
+                    try:
+                        self._binding.cancel(self)
+                    finally:
+                        if close_device and self.device is not None:
+                            self.device.disengage()
+                            close = getattr(self.device, "close", None)
+                            if close is not None:
+                                close()
+                self.write_output(finish)
             finally:
-                try:
-                    if self.device is not None:
-                        self.device.disengage()
-                        close = getattr(self.device, "close", None)
-                        if close is not None:
-                            close()
-                finally:
-                    atexit.unregister(self.shutdown_output)
-                    if self._console_registered:
-                        self._kernel.SetConsoleCtrlHandler(self._console_handler, False)
-                        self._console_registered = False
-                        # Keep the ctypes trampoline alive even if close() is
-                        # currently executing inside this very callback.
+                self._closed = True
+                atexit.unregister(self.shutdown_output)
+                if self._console_registered:
+                    self._kernel.SetConsoleCtrlHandler(self._console_handler, False)
+                    self._console_registered = False
+                    # Keep the ctypes trampoline alive inside this callback.
 
     @output_locked
     def request_bind(self, kind):
@@ -82,6 +97,8 @@ class OutputSafety:
         self._binding.cancel(self)
         self._binding.request = (kind, self.device)
         self._binding.status = "Binding in 4 s"
+        # An explicit manual bind remains usable in paused/static menus.
+        getattr(self.device, "resume_output", lambda: None)()
         return True
 
     @property
@@ -91,12 +108,6 @@ class OutputSafety:
     @property
     def binding_status(self):
         return self._binding.status
-
-    @output_locked
-    def write_output(self, writer):
-        """Run a device writer under the same lock and shutdown latch."""
-        if self.device is not None:
-            return writer(self.device)
 
     @output_locked
     def cancel_bind(self):

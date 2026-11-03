@@ -10,6 +10,7 @@ MIN_EACH_TURN = 20
 MIN_WHEEL_RAD = 0.001
 MIN_CORRELATION = 0.85
 WINDOW = 400
+CHECK_RIM_MOVE_DEG = 5.0
 
 
 class _Evidence:
@@ -164,6 +165,8 @@ class OutputDirection:
         self._raw_response = self._raw_sample_s = 0.0
         self._raw_sign: int | None = None
         self._command = 0.0
+        self._rim_start = None
+        self._rim_range_deg = 900
 
     @property
     def ready(self) -> bool:
@@ -177,7 +180,7 @@ class OutputDirection:
             return min(0.95, (self._pulse + self._pulse_s / self.PULSE_S) / 4)
         return 0.0
 
-    def _hold_reason(self, speed, observed, user_axis, manual_override) -> str:
+    def _hold_reason(self, speed, observed, user_axis, manual_override, player_axis=None) -> str:
         if speed is None or not math.isfinite(speed):
             return "Steering check needs speed telemetry"
         if abs(speed) >= self.STOP_SPEED_MPS:
@@ -186,11 +189,19 @@ class OutputDirection:
             return "Steering check needs steering telemetry"
         if manual_override:
             return "Release steering to check direction"
+        if player_axis is not None and self._rim_start is not None:
+            if (not math.isfinite(player_axis)
+                    or abs(player_axis - self._rim_start) * self._rim_range_deg / 2 > CHECK_RIM_MOVE_DEG):
+                return "Release steering to check direction"
         # Raw game input includes the virtual device, possibly delayed or
         # scaled by the game. Its polarity is unknown until a settled sample.
         raw = observed if user_axis is None else user_axis
         if not math.isfinite(raw):
             return "Steering check needs steering telemetry"
+        # The separate physical rim now detects corrections. An off-centre
+        # rim is valid at start; the legacy raw-input checks stay below.
+        if player_axis is not None:
+            return ""
         limit = max(self.PLAYER_THRESHOLD, self.RAW_MAX_GAIN * abs(self._command))
         if abs(raw) > limit:
             if self.active and self._command and abs(raw) >= 0.9 and abs(raw) > 4 * abs(self._command):
@@ -204,9 +215,11 @@ class OutputDirection:
             self._raw_sign = raw_sign
         return ""
 
-    def start(self, *, speed, observed, user_axis=None, manual_override=False) -> bool:
+    def start(self, *, speed, observed, user_axis=None, manual_override=False,
+              player_axis=None, rim_range_deg=900) -> bool:
         self.cancel()
-        self.reason = self._hold_reason(speed, observed, user_axis, manual_override)
+        self._rim_start, self._rim_range_deg = player_axis, rim_range_deg
+        self.reason = self._hold_reason(speed, observed, user_axis, manual_override, player_axis)
         if self.ready or self.reason:
             return False
         self.evidence = _Evidence(0.03, min_samples=4, min_each_turn=2)
@@ -226,10 +239,10 @@ class OutputDirection:
             self.evidence = _Evidence(0.03, min_samples=4, min_each_turn=2)
 
     def tick_stopped(self, *, speed, observed, dt, user_axis=None,
-                     manual_override=False) -> float:
+                     manual_override=False, player_axis=None) -> float:
         if not self.active:
             return 0.0
-        reason = self._hold_reason(speed, observed, user_axis, manual_override)
+        reason = self._hold_reason(speed, observed, user_axis, manual_override, player_axis)
         if reason:
             self.cancel(reason)
             return 0.0

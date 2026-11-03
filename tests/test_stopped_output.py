@@ -15,6 +15,34 @@ from simsteer.core.learners.liveparams import LiveParams
 from test_steering_direction import _bends, _flow, _plan, _probe_output
 
 
+def test_physical_rim_six_degrees_cancels_stopped_check():
+    output = OutputDirection(lag_frames=5)
+    assert output.start(speed=0, observed=0, player_axis=0)
+    assert output.tick_stopped(speed=0, observed=0, dt=.05, player_axis=0)
+    assert output.tick_stopped(speed=0, observed=.1, user_axis=.1,
+                               dt=.05, player_axis=6 / 450) == 0
+    assert not output.active and output.reason == "Release steering to check direction"
+
+
+def test_stationary_off_centre_rim_passes_without_masking_game_raw_response():
+    output = OutputDirection(lag_frames=5)
+    rim, command = -30 / 450, 0
+    assert output.start(speed=0, observed=rim, user_axis=rim, player_axis=rim)
+    for _ in range(260):
+        command = output.tick_stopped(speed=0, observed=-command, user_axis=-command,
+                                       dt=.05, player_axis=rim)
+        if output.ready:
+            break
+    assert output.ready and output.sign == -1
+
+
+def test_rim_loss_cancels_stopped_check():
+    output = OutputDirection(lag_frames=5)
+    assert output.start(speed=0, observed=0, player_axis=0)
+    assert output.tick_stopped(speed=0, observed=0, dt=.05, player_axis=float("nan")) == 0
+    assert not output.active
+
+
 def run_plant(monkeypatch, tmp_path, *, polarity=-1, convention=1, inversion=1,
               fps=20, lag_s=0.25, smoothing_s=0.0, moving=False,
               interrupt=None, no_probe=False, drive_s=0.0, flip=False,
