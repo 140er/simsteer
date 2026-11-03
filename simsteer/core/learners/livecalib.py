@@ -69,11 +69,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from simsteer.core.shared_geometry import owned
 from simsteer.core.finite import NonFiniteError, require_finite
 
 from simsteer.paths import state_path
 from simsteer.state import (
-    atomic_save_json, bounded_int, bounded_number, delete_state,
+    StateIOUnavailable, flush_state, atomic_save_json, bounded_int, bounded_number, delete_state,
     read_json_object, snapshot_exists, state_warning,
 )
 from simsteer.core.warp import euler_from_rot, rot_from_euler
@@ -356,6 +357,7 @@ class LiveCalib:
 
     # ----- ingest -----
 
+    @owned("read")
     def record_blocked(self, reason: CameraBlockedReason) -> None:
         self.last_rejection_reason = reason
         self.blocked_counts[reason] += 1
@@ -368,6 +370,7 @@ class LiveCalib:
                 and self.clock() - self._last_diagnostic_save >= 5.0):
             self.save_state(self._game)
 
+    @owned("producer")
     def update(self, calib: "Calibration",
                pose: np.ndarray | None,
                road_transform: np.ndarray | None,
@@ -527,6 +530,7 @@ class LiveCalib:
             # worst-case progress loss on a Quit to ~1 s.
             self.save_state(self._game)
 
+    @owned("helper")
     def _commit_block(self, calib: "Calibration") -> None:
         """Block is full — fold the running averages into history.
 
@@ -593,6 +597,7 @@ class LiveCalib:
         if self._game is not None:
             self.save_state(self._game)
 
+    @owned("helper")
     def _write_pose(self, calib: "Calibration") -> None:
         if self.writes_enabled:
             first_write = not self._wrote_to_calib
@@ -615,6 +620,7 @@ class LiveCalib:
                 calib.save(game=self._game)
                 self._blocks_since_save = 0
 
+    @owned("helper")
     def _refresh_cal_status(self) -> None:
         n = len(self._rpys)
         if n == 0:
@@ -661,7 +667,8 @@ class LiveCalib:
 
     # ----- recovery -----
 
-    def reset(self, reason: str | None = None) -> None:
+    @owned("reset", forwards_deadline=True)
+    def reset(self, reason: str | None = None, *, deadline=None) -> None:
         """Wipe all calibration state and remove the on-disk snapshot.
 
         Called from three places:
@@ -671,6 +678,7 @@ class LiveCalib:
 
         Leaves `last_reset_reason` set so the HUD can surface why the
         bar suddenly returned to 0%."""
+        self._geometry_reset_ok = False
         self._block_rpy_sum[:] = 0.0
         self._block_height_sum = 0.0
         self._block_n = 0
@@ -709,10 +717,18 @@ class LiveCalib:
         if self._game is not None:
             try:
                 p = state_path("livecalib_state", self._game)
-                delete_state(p)
+                delete_state(p, **({"deadline": deadline} if deadline is not None else {}))
+                if deadline is not None:
+                    flush_state(p, deadline=deadline)
+                    if p.exists():
+                        return
+            except StateIOUnavailable:
+                raise
             except OSError:
-                pass
+                return
+        self._geometry_reset_ok = True
 
+    @owned("rescale")
     def rescale_for_fov(self, calib: "Calibration", old_fov_deg: float,
                         new_fov_deg: float) -> None:
         """Carry the pose history over to a new capture FOV instead of
@@ -779,6 +795,7 @@ class LiveCalib:
 
     # ----- persistence -----
 
+    @owned("read")
     def validate_state(self) -> None:
         require_finite("livecalib.state", rpys=list(self._rpys), heights=list(self._heights),
                        wide=self._wide_sum, wide_estimate=self.wide_from_device_estimate,
@@ -790,6 +807,7 @@ class LiveCalib:
                        bootstrap_height=self._bootstrap_height_sum, bootstrap_n=self._bootstrap_height_n,
                        reset_generation=self.reset_generation)
 
+    @owned("read")
     def state_dict(self) -> dict:
         self.validate_state()
         return {
@@ -816,26 +834,32 @@ class LiveCalib:
             "cal_status": int(self.cal_status),
         }
 
-    def save_state(self, game: str) -> None:
+    @owned("read", forwards_deadline=True)
+    def save_state(self, game: str, *, deadline=None) -> None:
         try:
-            atomic_save_json(state_path("livecalib_state", game), self.state_dict())
+            atomic_save_json(state_path("livecalib_state", game), self.state_dict(),
+                             **({"deadline": deadline} if deadline is not None else {}))
             self._last_diagnostic_save = self.clock()
+        except StateIOUnavailable:
+            raise
         except NonFiniteError as exc:
             logging.getLogger(__name__).warning("Not saving non-finite state: %s", exc)
         except OSError:
             pass
 
-    def load_state(self, game: str, path=None) -> bool:
+    @owned("load", forwards_deadline=True)
+    def load_state(self, game: str, path=None, *, deadline=None) -> bool:
         """Restore the block history saved by `save_state`. No-op if no
         state file exists (fresh user / fresh game)."""
         p = path if path is not None else state_path("livecalib_state", game)
-        if not snapshot_exists(p):
+        if not snapshot_exists(p, **({"deadline": deadline} if deadline is not None else {})):
             return False
         try:
             # Provenance is checked first: older histories are ignored
             # silently, including an invalid version number. Current state
             # must pass both finite and typed checks before adoption.
-            data = read_json_object(p, allow_non_finite=True)
+            data = read_json_object(p, allow_non_finite=True,
+                                    **({"deadline": deadline} if deadline is not None else {}))
             if (type(data.get("certainty_state_version")) is not int
                     or data["certainty_state_version"] != CERTAINTY_STATE_VERSION):
                 return False
@@ -880,6 +904,8 @@ class LiveCalib:
             blocked_counts = blocked_counts_from_state(data.get("blocked_counts", {}))
             reason = data.get("last_rejection_reason")
             reason = CameraBlockedReason(reason) if reason is not None else None
+        except StateIOUnavailable:
+            raise
         except (OSError, ValueError, TypeError, OverflowError):
             state_warning(p, "unreadable; using defaults")
             return False
@@ -931,4 +957,6 @@ class LiveCalib:
             setattr(self, name, sum(count for gate, count in blocked_counts.items()
                                    if _REJECTION_COUNTERS.get(gate) == name))
         self._refresh_cal_status()
+        if p == state_path("livecalib_state", game) and data == self.state_dict():
+            self._canonical_origin = p
         return True

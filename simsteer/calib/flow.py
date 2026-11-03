@@ -33,6 +33,7 @@ import threading
 from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from contextlib import nullcontext
 from datetime import date
 from enum import Enum
 
@@ -41,14 +42,15 @@ from simsteer.calib.fov_source import FovReader
 from simsteer.calib.score import CheckPolicy, CheckStats, Verdict, certified_result, evaluate
 from simsteer.calib.steering import OutputDirection, SteeringDirection
 from simsteer.core.calibration import SIMPLE_WARP_VERSION
+from simsteer.core.shared_geometry import owned, active_deadline, bind_geometry
 from simsteer.core.learners.livecalib import (
     BLOCK_SIZE, INPUTS_NEEDED, CERTAIN_BLOCKS_NEEDED, MIN_SPEED_FILTER_MPS, CalStatus,
     CAMERA_GUIDANCE, CameraBlockedReason, blocked_counts_from_state,
 )
-from simsteer.core.learners.liveparams import TRUSTED_MIN_SAMPLES
+from simsteer.core.learners.liveparams import TRUSTED_MIN_SAMPLES, LiveParams
 from simsteer.core.model_identity import pinned_model_identity
 from simsteer.paths import state_path
-from simsteer.state import atomic_save_json, bounded_int, bounded_number, read_json_object, state_warning
+from simsteer.state import StateIOUnavailable, atomic_save_json, bounded_int, bounded_number, read_json_object, state_warning
 from simsteer.runtime.fov import (
     CANDIDATE_OFFSETS, CANDIDATE_SAMPLES, ESTIMATE_SAMPLES, FovSolver,
 )
@@ -237,16 +239,20 @@ class CalibFlow:
         self._today = today
         self._restart_request: str | None = None
         self._lock = threading.Lock()
-        self._reset_state()
+        self._geometry_owner = bind_geometry(
+            calib, live_calib, game, model_identity, persist=persist, flow=self)
+        owner = self._geometry_owner
+        with owner.operation() if owner is not None else nullcontext():
+            self._reset_state()
+            loaded = self._load()
+            if (self.calib.simple_warp
+                    and self.calib.simple_warp_version != SIMPLE_WARP_VERSION):
+                self._migrate_simple_warp(**({"deadline": owner.active_deadline} if owner else {}))
+            elif not loaded:
+                self._enter(Step.FOV)
 
-        loaded = self._load()
-        if (self.calib.simple_warp
-                and self.calib.simple_warp_version != SIMPLE_WARP_VERSION):
-            self._migrate_simple_warp()
-        elif not loaded:
-            self._enter(Step.FOV)
-
-    def _migrate_simple_warp(self) -> None:
+    @owned(forwards_deadline=True)
+    def _migrate_simple_warp(self, *, device_version=SIMPLE_WARP_VERSION, deadline=None) -> None:
         """Discard pose and Check evidence measured through the old warp.
 
         Preserve FOV/crops and the device's steering fit. A completed FOV
@@ -255,9 +261,15 @@ class CalibFlow:
         cannot silently reuse its previous Check.
         """
         next_step = Step.FOV if self.step is Step.FOV else Step.CAMERA
-        self.lc.reset(reason="simple warp geometry changed")
-        self.calib.pitch_deg = self.calib.yaw_deg = 0.0
-        self.calib.simple_warp_version = SIMPLE_WARP_VERSION
+        owner = self._geometry_owner
+        preserve = (self.calib.simple_warp_version == SIMPLE_WARP_VERSION
+                    and owner is not None and owner.can_preserve_legacy_device(
+                        shared_version=self.calib.simple_warp_version, device_version=device_version))
+        if not preserve:
+            self.calib.pitch_deg = self.calib.yaw_deg = 0.0
+            self.calib.simple_warp_version = SIMPLE_WARP_VERSION
+            self.lc.reset(reason="simple warp geometry changed",
+                          **({"deadline": deadline} if owner else {}))
         self.attempts = 0
         self.result = None
         self.legacy_result = None
@@ -267,9 +279,10 @@ class CalibFlow:
         self.redo_note = ""
         self.check = CheckStats()
         if self._persist:
-            self.calib.save(game=self.game)
-        self._enter(next_step)
+            self.calib.save(game=self.game, **({"deadline": deadline} if owner else {}))
+        self._enter(next_step, **({"deadline": deadline} if owner else {}))
 
+    @owned()
     def _reset_state(self) -> None:
         self._config_pending = False
         self.step = Step.FOV
@@ -302,6 +315,7 @@ class CalibFlow:
         self._last_check_log_signature = None
         self._reset_camera_progress()
 
+    @owned()
     def _reset_camera_progress(self) -> None:
         self._camera_no_progress_s = 0.0
         self._camera_progress_mark = self.lc.blocks * BLOCK_SIZE + self.lc._block_n
@@ -313,6 +327,7 @@ class CalibFlow:
         self._camera_discard_s: float | None = None
         self._camera_discard_jumps = 0
 
+    @owned()
     def switch_device(self, device: str) -> None:
         """Keep the tuner's flow reference, but load this device's state."""
         if device == self.device:
@@ -334,6 +349,7 @@ class CalibFlow:
     # ----- state -----
 
     @property
+    @owned()
     def steps(self) -> list[Step]:
         out = [Step.FOV, Step.CAMERA]
         if self.steering_fit:
@@ -342,15 +358,18 @@ class CalibFlow:
         return out
 
     @property
+    @owned()
     def calibrating(self) -> bool:
         return self.step in TITLES
 
     @property
+    @owned()
     def calibrated(self) -> bool:
         return (self.step is Step.DONE and certified_result(self.result, self._check_context)
                 and self.lc.cal_status == CalStatus.CALIBRATED
                 and contexts_match(self._check_context, self._context()))
 
+    @owned()
     def _context(self) -> dict:
         # Normalize tuples to JSON lists, so a saved certificate compares
         # identically after loading. Include the actual mutable config.
@@ -361,6 +380,7 @@ class CalibFlow:
             "model": self.model_identity,
         }))
 
+    @owned()
     def confirm_check(self) -> None:
         """An explicit engage request acknowledges an invalidated check."""
         if self._vehicle_pending():
@@ -371,6 +391,7 @@ class CalibFlow:
         if self.step is Step.CHECK:
             self._check_requested = True
 
+    @owned()
     def _invalidate_check(self, reason: str) -> None:
         old_controls = (self._check_context or {}).get("controls", {})
         old_controls = old_controls if isinstance(old_controls, dict) else {}
@@ -389,6 +410,7 @@ class CalibFlow:
         else:
             self._enter(Step.CHECK)
 
+    @owned()
     def _vehicle_pending(self) -> bool:
         """Keep a known-vehicle certificate while its reader is starting."""
         saved = self._check_context or {}
@@ -399,6 +421,7 @@ class CalibFlow:
         return (old_vehicle is not None and "vehicle" in controls
                 and controls["vehicle"] is None)
 
+    @owned()
     def _context_matches_pending(self) -> bool:
         current = self._context()
         if self._vehicle_pending():
@@ -406,6 +429,7 @@ class CalibFlow:
         return contexts_match(self._check_context, current)
 
     @property
+    @owned()
     def camera_learning(self) -> bool:
         """Whether LiveCalib should take samples this frame. It learns
         during FOV too, and a new FOV rescales what it has."""
@@ -417,6 +441,7 @@ class CalibFlow:
             return self.lc.cal_status != CalStatus.CALIBRATED
         return False
 
+    @owned()
     def _zero_pose_for_camera(self) -> None:
         """With the simple warp, measure the pose from zero (see above)."""
         if (getattr(self.calib, "simple_warp", True)
@@ -425,14 +450,17 @@ class CalibFlow:
             self.calib.pitch_deg = self.calib.yaw_deg = 0.0
 
     @property
+    @owned()
     def gate_override(self) -> dict | None:
         return STEERING_GATE_OVERRIDE if self.step is Step.STEERING else None
 
     @property
+    @owned()
     def probe_wanted(self) -> bool:
         return self.step is Step.STEERING and self.ai_steering_ready
 
     @property
+    @owned()
     def ai_steering_ready(self) -> bool:
         return (self.step in (Step.STEERING, Step.CHECK, Step.DONE)
                 and self.lc.cal_status == CalStatus.CALIBRATED
@@ -442,12 +470,14 @@ class CalibFlow:
                 and (not self.steering_fit
                      or (self.direction.ready and self.output_direction.ready)))
 
+    @owned()
     def device_axis(self, game_axis: float) -> float:
         """Map the desired game input to the device only after measurement."""
         if not self.ai_steering_ready:
             return 0.0
         return game_axis * self.output_direction.sign if self.steering_fit else game_axis
 
+    @owned()
     def observe_output(self, **observation) -> bool:
         if not self.steering_fit or not self.direction.ready:
             return False
@@ -462,6 +492,7 @@ class CalibFlow:
             return True
         return False
 
+    @owned()
     def measure_output(self, **observation) -> float:
         was_ready = self.output_direction.ready
         command = self.output_direction.tick_stopped(**observation)
@@ -477,6 +508,7 @@ class CalibFlow:
         return command
 
     @property
+    @owned()
     def steering_sign(self) -> float:
         """Model curvature to game wheel; independent of HUD projection."""
         if self.steering_fit:
@@ -485,6 +517,7 @@ class CalibFlow:
         return self.calib.lateral_sign
 
     @property
+    @owned()
     def progress(self) -> float:
         if self.step is Step.FOV:
             return 1.0 if self.fov_proposal is not None else self.fov_solver.progress
@@ -503,6 +536,7 @@ class CalibFlow:
             return min(1.0, self.check.engaged_seconds / CHECK_SECONDS)
         return 1.0
 
+    @owned()
     def eta_s(self) -> float | None:
         rate = self._rate.per_s()
         if self.step is Step.FOV:
@@ -522,9 +556,11 @@ class CalibFlow:
             return max(0.0, CHECK_SECONDS - self.check.engaged_seconds)
         return None
 
+    @owned()
     def _lp_samples(self) -> int:
         return max(self.lp.samples, self.lp.session_samples)
 
+    @owned()
     def engage_block(self) -> str:
         """Why engaging is not allowed yet, or "" when it is."""
         if self.step is Step.FAILED:
@@ -550,6 +586,7 @@ class CalibFlow:
 
     # ----- per frame -----
 
+    @owned()
     def tick(self, o: Obs) -> None:
         self._now = o.now
         dt = min(max(o.dt, 0.0), MAX_DT_S)
@@ -588,6 +625,7 @@ class CalibFlow:
             self.save()
 
     @property
+    @owned()
     def camera_outcome(self) -> CameraOutcome:
         if self.result and self.result.get("camera_outcome") == CameraOutcome.NO_PROGRESS:
             return CameraOutcome.NO_PROGRESS
@@ -595,6 +633,7 @@ class CalibFlow:
             return CameraOutcome.CALIBRATED
         return CameraOutcome.COLLECTING
 
+    @owned()
     def camera_diagnostics(self) -> dict:
         reason = getattr(self.lc, "last_rejection_reason", None)
         return {"status": self.camera_outcome.value,
@@ -615,6 +654,7 @@ class CalibFlow:
                 "discard_jumps": self._camera_discard_jumps,
                 "no_progress_counts": dict(self._camera_blocked_counts)}
 
+    @owned()
     def _tick_camera(self, o: Obs, dt: float) -> None:
         if self.lc.cal_status == CalStatus.CALIBRATED:
             print("calib: camera done")
@@ -675,6 +715,7 @@ class CalibFlow:
         self._check_context = self._check_model = None
         self._enter(Step.FAILED)
 
+    @owned()
     def feed_fov(self, frame, vx_model: float | None, v_ego: float | None,
                  yaw_rate: float | None, perf_counter=None) -> None:
         if self.step is not Step.FOV or self.fov_proposal is not None:
@@ -701,6 +742,7 @@ class CalibFlow:
             self.fov_proposal = round(fov, 1)
             self.save()
 
+    @owned()
     def accept_fov(self) -> bool:
         if self.step is not Step.FOV or self.fov_proposal is None:
             return False
@@ -709,6 +751,7 @@ class CalibFlow:
         self._finish_fov("measured")
         return True
 
+    @owned()
     def keep_fov(self) -> bool:
         if self.step is not Step.FOV or self.fov_proposal is None:
             return False
@@ -716,6 +759,7 @@ class CalibFlow:
         self._finish_fov("kept")
         return True
 
+    @owned()
     def _apply_fov(self, fov: float) -> None:
         old = float(self.calib.fov_h_deg)
         new = round(float(fov), 1)
@@ -727,11 +771,13 @@ class CalibFlow:
         if self._persist:
             self.calib.save(game=self.game)
 
+    @owned()
     def _finish_fov(self, source: str) -> None:
         self.fov_source = source
         print(f"calib: fov {self.calib.fov_h_deg:.1f} ({source})")
         self._advance()
 
+    @owned()
     def _tick_steering(self, o: Obs, dt: float) -> None:
         if not self.direction.ready:
             self.direction.update(
@@ -740,7 +786,9 @@ class CalibFlow:
                 manual=not o.engaged and o.telemetry_ok,
                 lane_change=o.lane_change)
             if self.direction.ready:
-                self.lp.set_axis_sign(self.direction.axis_sign)
+                self.lp.set_axis_sign(self.direction.axis_sign,
+                                      **({"deadline": active_deadline(self)}
+                                         if self._geometry_owner is not None and isinstance(self.lp, LiveParams) else {}))
                 print(f"calib: steering direction verified "
                       f"(model={self.direction.model_sign:+d}, "
                       f"input={self.direction.axis_sign:+d}, "
@@ -780,6 +828,7 @@ class CalibFlow:
         if done or self.prompt_s >= prompt.timeout_s:
             self._next_prompt()
 
+    @owned()
     def _next_prompt(self) -> None:
         self.prompt_idx += 1
         self.prompt_s = self.regime_s = 0.0
@@ -787,6 +836,7 @@ class CalibFlow:
         if self.prompt_idx < len(PROMPTS):
             self.lp.reset_covariance_only()
 
+    @owned()
     def _tick_check(self, o: Obs, dt: float) -> None:
         if not self._check_requested:
             return
@@ -816,6 +866,7 @@ class CalibFlow:
                 or (self.check.seconds + 1e-6 >= CHECK_SECONDS and not self.check.sat_n)):
             self._finish_check(evaluate(self.check, self.check_policy))
 
+    @owned()
     def _finish_check(self, verdict: Verdict) -> None:
         self.result = {**verdict.to_dict(), "date": self._today(),
                        "fov_source": self.fov_source, "context": self._check_context}
@@ -850,19 +901,22 @@ class CalibFlow:
 
     # ----- transitions -----
 
-    def _set_step(self, step: Step) -> None:
+    @owned(forwards_deadline=True)
+    def _set_step(self, step: Step, *, deadline=None) -> None:
         if step is not Step.CHECK:
             self.lp.end_validation()
         self.step = step
         self._rate.clear()
-        self.save()
+        self.save(**({"deadline": deadline} if deadline is not None else {}))
 
-    def _advance(self) -> None:
+    @owned(forwards_deadline=True)
+    def _advance(self, *, deadline=None) -> None:
         order = [Step.FOV, Step.CAMERA, Step.STEERING, Step.CHECK]
         nxt = order[order.index(self.step) + 1] if self.step in order[:-1] else Step.CHECK
-        self._enter(nxt)
+        self._enter(nxt, **({"deadline": deadline} if deadline is not None else {}))
 
-    def _enter(self, step: Step) -> None:
+    @owned(forwards_deadline=True)
+    def _enter(self, step: Step, *, deadline=None) -> None:
         if step in (Step.FOV, Step.CAMERA):
             self._reset_camera_progress()
         if step is Step.FOV:
@@ -871,26 +925,26 @@ class CalibFlow:
             self._fov_reference = float(self.calib.fov_h_deg)
             self._zero_pose_for_camera()
             self._config_pending = self._fov_config is not None
-            self._set_step(step)
+            self._set_step(step, **({"deadline": deadline} if deadline is not None else {}))
             return
         if step is Step.CAMERA:
-            self._set_step(step)
+            self._set_step(step, **({"deadline": deadline} if deadline is not None else {}))
             if self.lc.cal_status == CalStatus.CALIBRATED:
-                self._advance()
+                self._advance(**({"deadline": deadline} if deadline is not None else {}))
             else:
                 self._zero_pose_for_camera()
             return
         if step is Step.STEERING:
             if not self.steering_fit:
-                self._enter(Step.CHECK)
+                self._enter(Step.CHECK, **({"deadline": deadline} if deadline is not None else {}))
                 return
             self.prompt_idx = 0
             self._check_requested = True
             self.prompt_s = self.regime_s = 0.0
             self.lane_changes = 0
-            self._set_step(step)
+            self._set_step(step, **({"deadline": deadline} if deadline is not None else {}))
             if self.lp.trusted() and self.ai_steering_ready:
-                self._advance()
+                self._advance(**({"deadline": deadline} if deadline is not None else {}))
             return
         if step is Step.CHECK:
             self.check = CheckStats()
@@ -899,7 +953,7 @@ class CalibFlow:
             self.lp.begin_validation()
             self._check_model = self.lp.validation_model
             self._pred_seen = getattr(self.lp, "predictions", 0)
-        self._set_step(step)
+        self._set_step(step, **({"deadline": deadline} if deadline is not None else {}))
 
     # ----- restart -----
 
@@ -913,7 +967,8 @@ class CalibFlow:
             reason, self._restart_request = self._restart_request, None
         return reason
 
-    def restart(self, reason: str) -> None:
+    @owned(forwards_deadline=True)
+    def restart(self, reason: str, *, deadline=None) -> None:
         """Wipe the camera pose and steering fit and start over at FOV."""
         self.lc.reset(reason=reason)
         self._reset_steering()
@@ -925,14 +980,18 @@ class CalibFlow:
         print(f"calib: restart ({reason})")
         self._enter(Step.FOV)
 
+    @owned()
     def _reset_steering(self) -> None:
-        self.lp.reset(wipe_disk=True, clear_axis_sign=True)
+        self.lp.reset(wipe_disk=True, clear_axis_sign=True,
+                      **({"deadline": active_deadline(self)}
+                         if self._geometry_owner is not None and isinstance(self.lp, LiveParams) else {}))
         self.direction = SteeringDirection(self.lp.lag_frames)
         self.output_direction = OutputDirection(self.lp.lag_frames,
                                                 int(self.calib.lateral_sign))
 
     # ----- HUD -----
 
+    @owned()
     def hint(self, v_ego: float | None, engaged: bool = True) -> str:
         if self.step is Step.FOV:
             if self.fov_proposal is not None:
@@ -1002,6 +1061,7 @@ class CalibFlow:
             return f"{self.result.get('reason', '')}. R restarts"
         return ""
 
+    @owned()
     def panel(self, v_ego: float | None, engaged: bool = True) -> Panel | None:
         if self.calibrating:
             order = self.steps
@@ -1022,6 +1082,7 @@ class CalibFlow:
                          0.0, "failed")
         return None
 
+    @owned()
     def log_fields(self) -> dict:
         verdict = (evaluate(self.check, self.check_policy).to_dict()
                    if self.step is Step.CHECK and self._check_requested else
@@ -1056,6 +1117,7 @@ class CalibFlow:
 
     # ----- persistence -----
 
+    @owned()
     def to_dict(self) -> dict:
         camera = self.camera_diagnostics()
         # Omit inactive deadlines in new snapshots; older saves use null.
@@ -1087,19 +1149,24 @@ class CalibFlow:
             "check_requested": self._check_requested,
         }
 
-    def save(self) -> None:
+    @owned(forwards_deadline=True)
+    def save(self, *, deadline=None) -> None:
         self._last_save = self._now
         if not self._persist:
             return
-        atomic_save_json(flow_path(self.game, self.device), self.to_dict())
+        atomic_save_json(flow_path(self.game, self.device), self.to_dict(),
+                         **({"deadline": deadline} if deadline is not None else {}))
 
-    def _load(self) -> bool:
+    @owned(forwards_deadline=True)
+    def _load(self, *, deadline=None) -> bool:
         if not self._persist:
             return False
         p = flow_path(self.game, self.device)
         try:
-            d = read_json_object(p)
+            d = read_json_object(p, **({"deadline": deadline} if deadline is not None else {}))
             return self._restore(d)
+        except StateIOUnavailable:
+            raise
         except FileNotFoundError:
             return False
         except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
@@ -1152,6 +1219,7 @@ class CalibFlow:
             for coefficient in model:
                 bounded_number(coefficient, -1e12, 1e12)
 
+    @owned()
     def _restore(self, d: dict) -> bool:
         self.validate_snapshot(d)
         if (d.get("version") not in (2, 3, 4, 5, CALIB_VERSION) or d.get("game") != self.game
@@ -1202,7 +1270,9 @@ class CalibFlow:
         if (self.calib.simple_warp
                 and (self.calib.simple_warp_version != SIMPLE_WARP_VERSION
                      or d.get("simple_warp_version", 1) != SIMPLE_WARP_VERSION)):
-            self._migrate_simple_warp()
+            owner = self._geometry_owner
+            self._migrate_simple_warp(device_version=d.get("simple_warp_version", 1),
+                                     **({"deadline": owner.active_deadline} if owner else {}))
             return True
         if self.step is Step.FOV and self.fov_proposal is None:
             self._config_pending = self._fov_config is not None
@@ -1222,7 +1292,9 @@ class CalibFlow:
             self._enter(Step.CHECK)
         elif self.steering_fit:
             if self.direction.ready:
-                self.lp.set_axis_sign(self.direction.axis_sign)
+                self.lp.set_axis_sign(self.direction.axis_sign,
+                                      **({"deadline": active_deadline(self)}
+                                         if self._geometry_owner is not None and isinstance(self.lp, LiveParams) else {}))
             if (self.step in (Step.CHECK, Step.DONE) and not self.lp.trusted()
                     and not getattr(self.lp, "legacy_fit", False)):
                 self._invalidate_check("steering coverage missing")

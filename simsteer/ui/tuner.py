@@ -6,6 +6,8 @@ thread; the loop publishes an immutable HUD snapshot without calling Tk.
 
 from __future__ import annotations
 
+from simsteer.state import StateIOUnavailable
+
 import math
 import os
 import threading
@@ -804,6 +806,8 @@ class Tuner:
                 obj.save()
             self._saved()
             return True
+        except StateIOUnavailable:
+            raise
         except OSError:
             self._saved("Save failed", RED)
             return False

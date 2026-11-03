@@ -29,10 +29,11 @@ from pathlib import Path
 
 import numpy as np
 
+from simsteer.core.shared_geometry import owned
 from simsteer.core.finite import NonFiniteError, require_finite
 
 from simsteer.paths import load_with_fallback, state_path
-from simsteer.state import snapshot_exists, atomic_save_json, dataclass_values, read_json_object, state_warning
+from simsteer.state import StateIOUnavailable, snapshot_exists, atomic_save_json, dataclass_values, read_json_object, state_warning
 
 # Back-compat aliases: existing call sites and tools (tools/test_per_game_state.py)
 # import these names from pilot.calibration. The canonical implementations live
@@ -120,6 +121,17 @@ class Calibration:
     model_wide_fov_h_deg: float = 120.0
     synthesize_wider_fov: bool = False
 
+    def __setattr__(self, name, value):
+        owner = self.__dict__.get("_geometry_owner")
+        if owner is None:
+            object.__setattr__(self, name, value)
+            return
+        with owner.operation():
+            if (name in self.__dataclass_fields__ and getattr(self, name) != value
+                    and not (owner._producer and name in ("pitch_deg", "yaw_deg", "height_m"))):
+                owner.revoke("camera geometry edited")
+            object.__setattr__(self, name, value)
+
     # ---- rpyCalib accessor for the model-input warp ----
 
     def rpy_calib_rad(self) -> tuple[float, float, float]:
@@ -138,6 +150,7 @@ class Calibration:
             math.tan(math.radians(self.fov_h_deg) / 2) * self.image_h / self.image_w))
 
     @fov_v_deg.setter
+    @owned()
     def fov_v_deg(self, value: float) -> None:
         """Set FOV by its vertical angle. Most games (AC, Forza, GTA,
         BeamNG, Project Cars) expose VFOV in their settings — this
@@ -230,17 +243,18 @@ class Calibration:
     @classmethod
     def load(cls, game: str | None = None,
              path: Path | None = None,
-             fov_h_deg: float | None = None) -> "Calibration":
+             fov_h_deg: float | None = None, *, deadline=None) -> "Calibration":
         """Load this game's calibration. Falls back to the legacy
         single-file `calibration.json` if a per-game file doesn't
         exist yet (smooth migration), then to the defaults with the
         game profile's `fov_h_deg` seed. Pass `path` to override the
         resolution entirely (used in tests)."""
         if path is None:
-            path = load_with_fallback("calibration", game)
-        if path is not None and snapshot_exists(path):
+            path = load_with_fallback("calibration", game, **({"deadline": deadline} if deadline is not None else {}))
+        if path is not None and snapshot_exists(path, **({"deadline": deadline} if deadline is not None else {})):
             try:
-                data = dataclass_values(cls, read_json_object(path))
+                raw = read_json_object(path, **({"deadline": deadline} if deadline is not None else {}))
+                data = dataclass_values(cls, raw)
                 # Check before migration can replace an invalid saved pose.
                 require_finite("calibration.load", **data)
                 data.setdefault("simple_warp_version", 1)
@@ -253,11 +267,18 @@ class Calibration:
                                 if k in cls.__dataclass_fields__})
                 require_finite("calibration.load", **asdict(loaded))
                 loaded.validate()
+                if (path == state_path("calibration", game) and raw == asdict(loaded)
+                        and type(raw.get("simple_warp_version")) is int
+                        and raw["simple_warp_version"] == SIMPLE_WARP_VERSION):
+                    loaded._canonical_origin = path
                 return loaded
+            except StateIOUnavailable:
+                raise
             except (OSError, ValueError, TypeError, OverflowError):
                 state_warning(path, "unreadable; using defaults")
         return cls() if fov_h_deg is None else cls(fov_h_deg=fov_h_deg)
 
+    @owned()
     def validate(self) -> None:
         if not (0 < self.image_w <= 32768 and 0 < self.image_h <= 32768
                 and 0 < self.fov_h_deg < 180 and 0 < self.height_m <= 100
@@ -268,8 +289,9 @@ class Calibration:
                 and self.simple_warp_version > 0):
             raise ValueError("invalid camera geometry")
 
+    @owned(forwards_deadline=True)
     def save(self, game: str | None = None,
-             path: Path | None = None) -> None:
+             path: Path | None = None, *, deadline=None) -> None:
         if path is None:
             path = state_path("calibration", game)
         try:
@@ -277,8 +299,9 @@ class Calibration:
         except NonFiniteError:
             logging.getLogger(__name__).warning("Not saving non-finite calibration")
             return
-        atomic_save_json(path, asdict(self))
+        atomic_save_json(path, asdict(self), **({"deadline": deadline} if deadline is not None else {}))
 
+    @owned()
     def update_for_frame(self, frame_shape: tuple[int, int]) -> None:
         """Sync image_w/image_h to the frame we're actually capturing."""
         h, w = frame_shape[:2]
