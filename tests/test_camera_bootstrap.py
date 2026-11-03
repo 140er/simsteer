@@ -336,7 +336,7 @@ def test_partial_progress_waiting_for_bootstrap_survives_resume(data_dir):
     assert learner.blocks == 2 and learner.samples == 200
     assert learner.cal_status is CalStatus.UNCALIBRATED
     for _ in range(20):
-        sample(learner, calib)
+        sample(learner, calib, pose=np.array([10., .1, -.1]))
     assert learner.samples == 220 and learner._block_n == 20
     assert learner.bootstrap_samples == 220
     assert learner.cal_status is CalStatus.UNCALIBRATED
@@ -347,6 +347,7 @@ def test_partial_progress_waiting_for_bootstrap_survives_resume(data_dir):
     saved = json.loads(path.read_text())
     assert saved["samples"] == 220
     assert saved["block_n"] == 20 and saved["bootstrap_samples"] == 220
+    assert np.any(saved["block_rpy_sum"])
     np.testing.assert_allclose(saved["block_rpy_sum"], learner._block_rpy_sum)
     assert saved["block_height_sum"] == pytest.approx(learner._block_height_sum)
     restored = LiveCalib(game="ets2", clock=lambda: 0.)
@@ -355,6 +356,7 @@ def test_partial_progress_waiting_for_bootstrap_survives_resume(data_dir):
     assert restored.cal_status is CalStatus.UNCALIBRATED
     assert not restored.writes_enabled and not restored._wrote_to_calib
     np.testing.assert_allclose(restored._block_rpy_sum, learner._block_rpy_sum)
+    np.testing.assert_allclose(restored._bootstrap_rpy_sum, learner._bootstrap_rpy_sum)
     assert restored._block_height_sum == pytest.approx(learner._block_height_sum)
     for _ in range(79):
         sample(restored, calib)
@@ -388,7 +390,7 @@ def test_partial_progress_invalid_history_survives_without_reset_or_pose_write(d
     assert learner.last_reset_reason is None
     assert not learner.writes_enabled and not learner._wrote_to_calib
     for _ in range(20):
-        sample(learner, calib)
+        sample(learner, calib, pose=np.array([10., .1, -.1]))
     assert learner.samples == 220 and learner._block_n == 20
     assert learner.cal_status is CalStatus.INVALID and learner.blocks == 2
     assert learner._consecutive_invalid_blocks == invalid_count
@@ -400,6 +402,7 @@ def test_partial_progress_invalid_history_survives_without_reset_or_pose_write(d
     saved = json.loads(path.read_text())
     assert saved["samples"] == 220 and saved["block_n"] == 20
     assert saved["cal_status"] == int(CalStatus.INVALID)
+    assert np.any(saved["block_rpy_sum"])
     np.testing.assert_allclose(saved["block_rpy_sum"], learner._block_rpy_sum)
     assert saved["block_height_sum"] == pytest.approx(learner._block_height_sum)
     assert "_consecutive_invalid_blocks" not in saved
