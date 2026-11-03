@@ -19,3 +19,6 @@ echo "== pytest"
 "$py" -m pytest tests -q -p no:cacheprovider
 echo "== simsteer --help"
 "$py" -m simsteer --help
+echo "== test-rig imports and CLI"
+"$py" scripts/check_windows_imports.py
+"$py" -m tools.testrig --help
