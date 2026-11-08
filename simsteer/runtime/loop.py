@@ -96,6 +96,8 @@ DESIRE_LANE_CHANGE_RIGHT = 4
 KEY_BACKSPACE = 8
 
 MIN_HEALTHY_FPS = 8.0
+# Healthy run time (s) before the capture-detail advisory may show.
+SAMPLING_NOTICE_HEALTHY_S = 0.5
 DISENGAGED_RECENTER_EVERY_N = 20
 # DirectML compiles its kernels on the first few inferences (<5 fps);
 # don't enforce the fps auto-disengage until past this many frames.
@@ -505,7 +507,11 @@ def run(settings: Settings, game: GameProfile | str, *,
                             flow.feed_fov(frame, vx, v_real, actual_yaw,
                                           time.perf_counter)
                             fov_vision_s = flow.fov_solver.vision_s - before
-                        if flow.step is not Step.FOV and not sampling_warned:
+                        # Advisory only once the pipeline has run cleanly for a
+                        # moment, so startup faults keep the banner to themselves.
+                        if (flow.step is not Step.FOV and not sampling_warned
+                                and healthy_since is not None
+                                and now_perf - healthy_since >= SAMPLING_NOTICE_HEALTHY_S):
                             notice = sampling_warning(frame.shape[1], calib.fov_h_deg)
                             if notice and not current_fault and now_perf >= banner_until:
                                 print(notice)
