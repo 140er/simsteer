@@ -1,8 +1,7 @@
 """Audit numeric model geometry from a run log or incident recording.
 
 Replay a clip with --log-jsonl run.jsonl first; this tool needs the model
-outputs, not its images. Works with any game's telemetry. Inspired by
-SpysyWeeb/Beamng-onnx (MIT), commit 1e717af.
+outputs, not its images. Works with any game's telemetry.
 """
 
 from __future__ import annotations

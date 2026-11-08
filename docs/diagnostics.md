@@ -108,6 +108,5 @@ scheduler delays. `--instrument` times the diagnostics calls within the loop;
 absence of those calls using identical fake-clock inputs. The latter also fills
 the ring to its 600-sample cap and measures its retained Python object size.
 
-Ideas ported from SpysyWeeb/Beamng-onnx (MIT), commits 1e717af, f9921fe,
-02209e6, 6865aa6, and 4323812. The MIT license and copyright notice are
-preserved in `LICENSE`.
+These ideas were adapted from an MIT-licensed fork; the commit messages
+credit it. The MIT license and copyright notice are preserved in `LICENSE`.

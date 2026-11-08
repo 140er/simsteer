@@ -1,7 +1,6 @@
 """Bounded numeric flight recorder and observational loop timings.
 
-Ideas from SpysyWeeb/Beamng-onnx (MIT), commits 1e717af, f9921fe,
-02209e6, 6865aa6 and 4323812. No images or free-form fault text are retained.
+No images or free-form fault text are retained.
 """
 
 from __future__ import annotations
