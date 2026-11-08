@@ -77,7 +77,8 @@ The lateral pipeline:
 model plan curvature k
   → desired_curvature_lag_adjusted(k, lookahead_s + anticipation)   # openpilot's pure-pursuit + rate limit
   → k × steer_authority
-  → atan(k · wheelbase)                = target wheel angle
+  → bounded tire-slip feed-forward (learned from wheel/yaw telemetry)
+  → atan(k · understeer_ff · wheelbase) = target wheel angle
   → LiveParams.axis_for_wheel_angle()  = feed-forward axis
   → + closed-loop trim + axis_bias
   → clip to ±steer_max
@@ -94,7 +95,62 @@ model plan curvature k
 
 **Timing intuition**: the controller steers toward the plan's yaw at
 `lookahead + anticipation` seconds ahead. Lookahead is the physical
-delay (don't fiddle); anticipation is where you dial early/late feel.
+delay: set it from measured command-to-wheel lag, rather than using it
+to hide a steady curvature deficit. The existing 0.30 s default is
+retained; no fork-specific measured delay is installed. Anticipation
+is where you dial early/late feel. With `curvature_anticipation_cap`
+(default `true`), the anticipation magnitude stays within the plan's
+peak curvature over 1.5 times the effective lookahead, including the
+interpolated endpoint. `curvature_anticipation_cap_min_curvature`
+(default 0.0015 m⁻¹) restricts this to curves, preserving heading
+recovery on straight roads and heading-only plans. The jerk limiter follows the cap, so an abrupt
+plan change still unwinds at the allowed rate.
+
+### Tire-slip feed-forward
+
+The wheel can reach its commanded angle while the vehicle still turns
+less than expected. This is tire understeer, separate from the rack's
+axis-to-wheel mapping. On sustained curves the controller estimates:
+
+```
+|tan(measured_wheel) / wheelbase| / |measured_yaw / speed|
+    = 1 + speed_gate * understeer_gradient * speed²
+```
+
+The gradient starts at zero on every engagement and is never persisted
+to a vehicle constant file. Missing wheel/yaw telemetry, a cold rack fit,
+or a disabled estimator gives a multiplier of 1.0. A wheel synthesized
+from yaw yields a neutral gradient; it cannot identify tire slip.
+The estimator can decrease its boost wherever the speed gate is active,
+including partial-gate speeds. It never writes LiveParams a/b/c.
+
+| ControllerConfig field | Default | Meaning |
+|---|---|---|
+| `understeer_enabled` | `true` | Enable telemetry-based tire-slip estimation/application. |
+| `understeer_v_lo` / `understeer_v_hi` | 10 / 22 m/s | Linear speed gate; no boost at/below lo. |
+| `understeer_gradient_max` | 0.003 s²/m² | Hard bound on the learned gradient. |
+| `understeer_cap` | 1.8 | Hard cap on the applied curvature multiplier. |
+| `understeer_steady_s` | 1.0 s | Required sustained-curve window before updating. |
+| `understeer_learn_s` | 8.0 s | Estimator exponential time constant. |
+| `understeer_min_curvature` | 0.0015 m⁻¹ | Minimum demand, measured wheel curvature and yaw curvature. |
+| `understeer_steady_fraction` | 0.15 | Maximum window range relative to mean curvature or speed. |
+| `feedback_min_speed` | 8 m/s | Minimum speed for both feedback learners. |
+
+Lane changes, saturation (including trim/bias and the previous output),
+intervention, low speed and cold/bad rack fits freeze learning and clear
+the sustained-curve window. Transient or reversing curves also freeze
+the gradient; an existing estimate can still supply feed-forward while
+the curve settles. Wheel/yaw ratios outside 0.4–2.5 are rejected as
+implausible. Estimates and trim reset on disengagement. Updates run
+once per model frame using explicit elapsed time; the 100 Hz executor
+continues to limit the complete output independently.
+
+Diagnostics on `LateralController`: `last_understeer_gradient`,
+`last_understeer_ff`, `last_understeer_delivery` (yaw/wheel curvature
+magnitude ratio), `last_understeer_frozen_reason`,
+`last_curvature_error` (demand magnitude minus yaw-curvature magnitude),
+and `last_lookahead_s`. `last_curvature` remains the pre-compensation
+model demand; `last_target_wheel` includes compensation.
 
 ---
 
@@ -178,15 +234,17 @@ can't see (rack-fit residual, model plan bias).
 | Knob | Default | Notes |
 |---|---|---|
 | **Enable** | on | Master toggle. |
-| **Trim gain** | 0.005 | Axis per (rad·s) of LPF'd error. Higher = faster correction. |
+| **Trim gain** | 0.5 | Axis per (rad·s) of LPF'd error; corrects milliradian residuals in seconds. |
 | **Trim clip** | 0.05 | Hard cap on the trim — it can only ever *nudge*. |
+| `wheel_trim_max_curvature` | 0.0015 m⁻¹ | Freeze when either desired or measured wheel curvature exceeds this. |
 
-This is the conservative cousin of openpilot's PID-on-lateral-accel: it
-runs ~40× slower than the wheel actuator (~10 s integrator + 60 s leak)
-and **freezes itself during every transient regime** — corners
-(`|target_wheel| > 0.05`), lane changes, saturation, cold/recovering
-RLS, intervention, and below 8 m/s. That's why it doesn't re-create the
-old PID's habit of fighting LiveParams. The HUD `axis:` line shows
+Trim learns bias only on straights, freezing even in gentle sweepers
+(`|curvature| > 0.0015 m⁻¹`). This prevents lag-induced windup from
+returning as curve-exit overshoot. It also freezes during lane changes,
+saturation, cold/recovering RLS, intervention, and below
+`feedback_min_speed`. The error LPF's `wheel_trim_error_lpf_alpha=0.05`
+is specified at 20 Hz and converted using elapsed time; the existing
+`wheel_trim_leak_s=60` and clip remain in force. The HUD `axis:` line shows
 `trim`, `bias`, and whether the integrator is `ACTIVE` or
 `FROZEN[reason]`.
 

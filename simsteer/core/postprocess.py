@@ -187,6 +187,8 @@ def desired_curvature_lag_adjusted(
     extra_buffer_s: float | None = None,
     dt: float = DT_MDL,
     lat_jerk_max_mps3: float | None = None,
+    anticipation_cap: bool = True,
+    anticipation_cap_min_curvature: float = 0.0015,
 ) -> float:
     """Lag-adjusted desired curvature, ported from openpilot's
     `selfdrive/controls/lib/drive_helpers.py:get_lag_adjusted_curvature`.
@@ -220,7 +222,8 @@ def desired_curvature_lag_adjusted(
     """
     require_finite("curvature", plan=plan, speed=v_ego,
                    delay=steer_actuator_delay, previous=last_desired_curvature,
-                   buffer=extra_buffer_s, dt=dt, jerk=lat_jerk_max_mps3)
+                   buffer=extra_buffer_s, dt=dt, jerk=lat_jerk_max_mps3,
+                   cap_min=anticipation_cap_min_curvature)
     v = max(v_ego, MIN_SPEED)
     buf = EXTRA_LAG_BUFFER_S if extra_buffer_s is None else float(extra_buffer_s)
     delay = max(float(steer_actuator_delay) + buf, 1e-3)
@@ -240,6 +243,19 @@ def desired_curvature_lag_adjusted(
     cur_k = float(yaw_rate_col[0]) / v_plan_0
 
     desired_k = 2.0 * avg_k - cur_k
+
+    # Lead the timing without asking for a tighter turn than the plan.
+    # Include the interpolated window endpoint: the time grid is sparse
+    # and simply masking it can miss a tightening curve at the boundary.
+    if anticipation_cap:
+        horizon = min(1.5 * delay, float(t_idxs[-1]))
+        ks = yaw_rate_col / np.maximum(v_plan_col, MIN_SPEED)
+        window = np.append(ks[t_idxs <= horizon], np.interp(horizon, t_idxs, ks))
+        k_cap = float(np.max(np.abs(window)))
+        # A straight/heading-only plan has no curve envelope. Preserve
+        # its heading recovery instead of clamping useful steering to 0.
+        if k_cap >= anticipation_cap_min_curvature:
+            desired_k = float(np.clip(desired_k, -k_cap, k_cap))
 
     if lat_jerk_max_mps3 is not None:
         from simsteer.core.steering import limit_curvature

@@ -3,7 +3,7 @@
 LATERAL — feed-forward + slow steady-state trim:
 
     desired_k    = desired_curvature_from_plan(v_ego, lookahead_s)
-    target_wheel = wheel_sign * atan(desired_k * wheelbase * authority)
+    target_wheel = wheel_sign * atan(desired_k * wheelbase * authority * tire_ff)
     axis_ff      = LiveParams.axis_for_wheel_angle(target_wheel, v_ego)
     axis_trim    = leaky_integrator(LPF(target_wheel - actual_wheel))
     axis         = clip(axis_ff + axis_trim + axis_bias, ±steer_max)
@@ -29,10 +29,12 @@ error. It corrects steady-state offsets that the FF stack alone
 can't see (LiveParams bias, residual rack-fit error, model plan
 offset). An earlier PID was removed for fighting LiveParams during
 transients — this trim is built to specifically *not* re-create
-that failure mode: ~10 s integrator τ + 60 s leak τ (40× slower
-than the wheel actuator), frozen during every transient regime
+that failure mode: filtered, bounded bias correction + 60 s leak τ,
+frozen during every transient regime
 (corners, lane changes, saturation, intervention, cold RLS, low
 speed), and hard-clipped to ±wheel_trim_clip so it can only nudge.
+The separate tire-slip feed-forward starts neutral and learns only
+from sustained measured wheel/yaw curvature. It never changes the rack.
 
 LONGITUDINAL — accel feed-forward + light P on speed error, mapped to
 trigger pedals:
@@ -51,6 +53,7 @@ in its velocity prediction; we just follow it.
 from __future__ import annotations
 
 import math
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -118,6 +121,28 @@ class ControllerConfig:
     # Negative subtracts from lookahead — the function floors total
     # delay at 1 ms so negative values can't break the math.
     curvature_anticipation_s: float = 0.0
+    # Bound the anticipation magnitude to the plan's peak curvature over
+    # 1.5 times the effective lookahead. Applied before the jerk limit.
+    curvature_anticipation_cap: bool = True
+    # Apply the cap only to real curves (1/m), preserving straight-road
+    # heading recovery when yaw-rate predictions are zero or near zero.
+    curvature_anticipation_cap_min_curvature: float = 0.0015
+
+    # Tire-slip compensation, separate from the measured steering rack.
+    # Starts neutral; only sustained wheel/yaw telemetry can teach it.
+    understeer_enabled: bool = True
+    # Speed ramp (m/s). No boost below lo, full learned boost above hi.
+    understeer_v_lo: float = 10.0
+    understeer_v_hi: float = 22.0
+    # Hard bounds on the learned gradient (s²/m²) and applied multiplier.
+    understeer_gradient_max: float = 0.003
+    understeer_cap: float = 1.8
+    # Seconds of steady curvature before learning, and estimator time constant.
+    understeer_steady_s: float = 1.0
+    understeer_learn_s: float = 8.0
+    # Ignore near-straights; reject variation above this fraction in the window.
+    understeer_min_curvature: float = 0.0015
+    understeer_steady_fraction: float = 0.15
 
     # Steering contribution to lateral jerk (v² * curvature rate).
     # None retains the legacy speed-interpolated curvature rate table.
@@ -130,8 +155,7 @@ class ControllerConfig:
 
     # Closed-loop trim on wheel-angle error. Re-added after the
     # earlier PID was removed for fighting LiveParams during
-    # transients — this version operates ~40× slower than the
-    # wheel actuator (~10 s integrator τ + 60 s leak τ) and freezes
+    # transients — this version filters error, bounds output and freezes
     # during every transient regime (corners, lane changes,
     # saturation, intervention, cold RLS, low speed). Output is
     # hard-clipped to ±wheel_trim_clip so even if it goes wrong it
@@ -143,10 +167,15 @@ class ControllerConfig:
     # where axis_trim is the dynamic correction and axis_bias is the
     # static user knob — both serve their own role.
     wheel_trim_enabled: bool = True
-    # Integrator gain. Output (axis) per (rad·s) of LPF'd error. With
-    # gain=0.005, a sustained 0.1 rad error grows trim by 0.0005/s —
-    # ~10 s to traverse the full clip range. Slow on purpose.
-    wheel_trim_gain: float = 0.005
+    # Axis per (rad·s) of LPF'd error. Real residuals are milliradians:
+    # 0.005 took minutes to cancel them. 0.5 responds in seconds, still
+    # well below the actuator bandwidth; the curve gate prevents windup.
+    wheel_trim_gain: float = 0.5
+    # Learn bias on straights only, including gentle sweepers in the
+    # freeze region. Curves use the independent tire-slip feed-forward.
+    wheel_trim_max_curvature: float = 0.0015
+    # Minimum speed for feedback learning (m/s); avoid parking dynamics.
+    feedback_min_speed: float = 8.0
     # Hard clip on the integrator output. ±0.05 axis is enough to
     # cancel a typical steady-state offset without ever dominating
     # the FF axis.
@@ -272,7 +301,16 @@ class ControllerConfig:
             try:
                 cfg = cls(**{**asdict(cfg), **dataclass_values(cls, read_json_object(path))})
                 if not (cfg.wheelbase_m > 0 and cfg.default_speed > 0
-                        and cfg.max_speed_mps > 0 and 0 <= cfg.steer_max <= 1):
+                        and cfg.max_speed_mps > 0 and 0 <= cfg.steer_max <= 1
+                        and 0 <= cfg.understeer_v_lo < cfg.understeer_v_hi
+                        and 1 <= cfg.understeer_cap <= 2
+                        and 0 <= cfg.understeer_gradient_max <= .01
+                        and cfg.understeer_steady_s >= 0 and cfg.understeer_learn_s > 0
+                        and cfg.understeer_min_curvature > 0
+                        and 0 < cfg.understeer_steady_fraction < 1
+                        and cfg.feedback_min_speed > 0
+                        and cfg.wheel_trim_max_curvature > 0
+                        and cfg.curvature_anticipation_cap_min_curvature > 0):
                     raise ValueError("invalid controller limits")
             except (OSError, ValueError, TypeError, OverflowError):
                 state_warning(path, "unreadable; using defaults")
@@ -316,6 +354,17 @@ class LateralController:
         # Last-frame trim freeze reason — for HUD diagnostics. Empty
         # string when the integrator was running.
         self.last_trim_frozen_reason = ""
+        self._reset_understeer()
+
+    def _reset_understeer(self) -> None:
+        self.last_understeer_gradient = 0.0
+        self.last_understeer_ff = 1.0
+        self.last_understeer_delivery = 1.0
+        self.last_understeer_frozen_reason = "cold"
+        self.last_curvature_error = 0.0
+        self.last_lookahead_s = max(.001, self.cfg.lookahead_s + self.cfg.curvature_anticipation_s)
+        self._feedback_time = 0.0
+        self._curve_history: deque[tuple[float, ...]] = deque(maxlen=512)
 
     def reset(self) -> None:
         """Drop derived state. Call on disengage/re-engage transitions
@@ -329,20 +378,117 @@ class LateralController:
         self.axis_trim_state = 0.0
         self.lpf_wheel_error = 0.0
         self.last_trim_frozen_reason = ""
+        self._reset_understeer()
+
+    def _feedback_freeze_reason(self, speed: float, axis: float) -> str:
+        """Shared transient gates for rack trim and tire-slip learning."""
+        if speed < self.cfg.feedback_min_speed:
+            return "slow"
+        if self.last_in_lane_change:
+            return "lc"
+        if max(abs(axis), abs(self.last_axis)) >= 0.85 * self.cfg.steer_max:
+            return "sat"
+        if self.live_params._consecutive_bad_fit > 10:
+            return "rls-bad"
+        if not self.live_params.trusted():
+            return "cold"
+        if self.live_params.clock() - self.live_params.last_intervened_ts < 1.0:
+            return "user"
+        return ""
+
+    def _understeer_factors(self, speed: float) -> tuple[float, float]:
+        cfg = self.cfg
+        weight = max(0., min(1., (speed - cfg.understeer_v_lo)
+                             / max(cfg.understeer_v_hi - cfg.understeer_v_lo, .001)))
+        ff = max(1., min(cfg.understeer_cap,
+                        1. + weight * self.last_understeer_gradient * speed * speed))
+        return weight, ff
+
+    def _understeer(self, curvature: float, speed: float, wheel: float | None,
+                   yaw: float | None, dt: float, frozen: str) -> float:
+        """Estimate tire slip from simultaneous measured wheel and yaw.
+
+        The rack command is deliberately absent from the regression.
+        Magnitudes accommodate telemetry yaw/wheel sign conventions;
+        signed curvature and wheel stability still reject turn reversals.
+        A wheel synthesized from yaw gives a neutral estimate, not a
+        second learner fighting the same rack fit.
+        """
+        cfg = self.cfg
+        self._feedback_time += dt
+        weight, ff = self._understeer_factors(speed)
+        if not cfg.understeer_enabled:
+            frozen = "off"
+        elif wheel is None or yaw is None:
+            frozen = "no-telemetry"
+        elif weight <= 0.:
+            frozen = "slow"
+        self.last_understeer_ff = 1.0
+        self.last_curvature_error = 0.0
+        if frozen:
+            self._curve_history.clear()
+            self.last_understeer_frozen_reason = frozen
+            # Hold the estimate through maneuvers and saturation, just
+            # like bias trim. Removing/reapplying boost at a saturation
+            # threshold would itself create a steering oscillation.
+            if frozen in ("lc", "sat", "user"):
+                self.last_understeer_ff = ff
+            return self.last_understeer_ff
+
+        wheel_k = math.tan(wheel) / cfg.wheelbase_m
+        measured_k = abs(yaw) / speed
+        self.last_curvature_error = abs(curvature) - measured_k
+        self._curve_history.append((self._feedback_time, curvature, wheel_k,
+                                    measured_k, speed))
+        cutoff = self._feedback_time - max(0., cfg.understeer_steady_s)
+        while len(self._curve_history) > 2 and self._curve_history[1][0] <= cutoff:
+            self._curve_history.popleft()
+        history = np.asarray(self._curve_history)
+        steady = (len(history) >= 2 and history[-1, 0] - history[0, 0]
+                  >= cfg.understeer_steady_s)
+        for column in (1, 2, 3):
+            values = history[:, column]
+            mean = abs(float(values.mean()))
+            steady &= (mean >= cfg.understeer_min_curvature
+                       and float(np.ptp(values)) <= cfg.understeer_steady_fraction * mean)
+        steady &= float(np.ptp(history[:, 4])) <= cfg.understeer_steady_fraction * speed
+        self.last_understeer_frozen_reason = "transient"
+        if steady:
+            # Solve wheel_k / measured_k = 1 + weight * gradient * v².
+            # Divide out the partial speed gate so over-delivery at
+            # intermediate speeds can reduce an earlier learned boost.
+            ratio = abs(wheel_k) / measured_k
+            # Broad telemetry plausibility bounds, independent of the
+            # output cap: a low boost cap must still permit learning.
+            if .4 <= ratio <= 2.5:
+                target = max(0., min(cfg.understeer_gradient_max,
+                                     (ratio - 1.) / (weight * speed * speed)))
+                alpha = -math.expm1(-dt / max(cfg.understeer_learn_s, .001))
+                self.last_understeer_gradient += alpha * (
+                    target - self.last_understeer_gradient)
+                self.last_understeer_delivery = 1. / ratio
+                self.last_understeer_frozen_reason = ""
+            else:
+                self.last_understeer_frozen_reason = "outlier"
+        _, self.last_understeer_ff = self._understeer_factors(speed)
+        return self.last_understeer_ff
 
     def compute(self, decoded: Decoded, v_ego: float,
                 actual_wheel_angle: float | None = None,
                 lane_change_command_active: bool = False,
-                dt: float = 0.05, wheel_sign: float = 1.0) -> float:
-        """Plan -> gamepad axis. `actual_wheel_angle` (rad) feeds the
-        closed-loop trim integrator; pass None to disable feedback
-        for this frame. `dt` (s) drives curvature limiting and trim —
+                dt: float = 0.05, wheel_sign: float = 1.0,
+                actual_yaw_rate: float | None = None) -> float:
+        """Plan -> gamepad axis. Wheel angle (rad) feeds straight bias
+        trim; wheel plus yaw rate (rad/s) feeds tire-slip estimation.
+        Missing telemetry disables the corresponding feedback for this
+        frame. `dt` (s) drives curvature limiting and both learners —
         defaults to 0.05 s (20 Hz) for callers that don't measure it."""
         cfg = self.cfg
         require_finite("lateral", plan=decoded.plan, desire=decoded.desire_state,
-                       speed=v_ego, wheel=actual_wheel_angle, dt=dt,
+                       speed=v_ego, wheel=actual_wheel_angle, yaw=actual_yaw_rate, dt=dt,
                        sign=wheel_sign, config=vars(cfg), previous=self.last_desired_k_raw,
-                       trim=self.axis_trim_state, error=self.lpf_wheel_error)
+                       trim=self.axis_trim_state, error=self.lpf_wheel_error,
+                       gradient=self.last_understeer_gradient)
         dt = max(0., dt)
         if v_ego < cfg.min_speed:
             self.last_curvature = 0.0
@@ -350,6 +496,10 @@ class LateralController:
             self.last_axis = 0.0
             self.last_in_lane_change = False
             self.last_authority = 0.0
+            self._curve_history.clear()
+            self.last_trim_frozen_reason = "slow"
+            self.last_understeer_frozen_reason = "slow"
+            self.last_understeer_ff = 1.0
             return 0.0
 
         # Plan-following via openpilot's `get_lag_adjusted_curvature`:
@@ -367,7 +517,10 @@ class LateralController:
             last_desired_curvature=self.last_desired_k_raw,
             extra_buffer_s=cfg.curvature_anticipation_s,
             dt=dt, lat_jerk_max_mps3=cfg.lat_jerk_max_mps3,
+            anticipation_cap=cfg.curvature_anticipation_cap,
+            anticipation_cap_min_curvature=cfg.curvature_anticipation_cap_min_curvature,
         )
+        self.last_lookahead_s = max(.001, cfg.lookahead_s + cfg.curvature_anticipation_s)
         self.last_desired_k_raw = k_raw
         k_total = k_raw
 
@@ -392,7 +545,16 @@ class LateralController:
 
         # Convert the model target before the rack fit and feedback, so
         # bias and measured wheel angle stay in the game's convention.
-        target_wheel = wheel_sign * math.atan(k_total * cfg.wheelbase_m)
+        _, previous_ff = self._understeer_factors(v_ego)
+        if not cfg.understeer_enabled or actual_wheel_angle is None or actual_yaw_rate is None:
+            previous_ff = 1.0
+        predicted_wheel = wheel_sign * math.atan(k_total * previous_ff * cfg.wheelbase_m)
+        nominal_axis = self.live_params.axis_for_wheel_angle(predicted_wheel, v_ego=v_ego)
+        freeze_reason = self._feedback_freeze_reason(
+            v_ego, nominal_axis + self.axis_trim_state + cfg.axis_bias)
+        ff = self._understeer(k_total, v_ego, actual_wheel_angle,
+                             actual_yaw_rate, dt, freeze_reason)
+        target_wheel = wheel_sign * math.atan(k_total * ff * cfg.wheelbase_m)
         self.last_target_wheel = target_wheel
 
         # FF axis from LiveParams inversion. v_ego enters the speed-
@@ -408,32 +570,19 @@ class LateralController:
         # in the ControllerConfig fields above for the rationale).
         if cfg.wheel_trim_enabled and actual_wheel_angle is not None:
             wheel_error = target_wheel - float(actual_wheel_angle)
-            self.lpf_wheel_error = (
-                (1.0 - cfg.wheel_trim_error_lpf_alpha) * self.lpf_wheel_error
-                + cfg.wheel_trim_error_lpf_alpha * wheel_error)
+            alpha = 1. - (1. - cfg.wheel_trim_error_lpf_alpha) ** (dt / .05)
+            self.lpf_wheel_error += alpha * (wheel_error - self.lpf_wheel_error)
 
             # Gate freeze reasons (first match wins; "" = running).
             # Each maps to a transient regime where wheel-error is
             # dominated by lag, not by the steady-state offset the
             # trim is meant to correct.
-            intervened_recently = (
-                self.live_params.clock() - self.live_params.last_intervened_ts < 1.0)
-            if v_ego < 8.0:
-                freeze_reason = "slow"
-            elif abs(target_wheel) > 0.05:
+            freeze_reason = self._feedback_freeze_reason(
+                v_ego, axis_ff + self.axis_trim_state + cfg.axis_bias)
+            if not freeze_reason and max(abs(k_total), abs(
+                    math.tan(actual_wheel_angle) / cfg.wheelbase_m)
+                    ) > cfg.wheel_trim_max_curvature:
                 freeze_reason = "corner"
-            elif self.last_in_lane_change:
-                freeze_reason = "lc"
-            elif abs(axis_ff) > 0.85:
-                freeze_reason = "sat"
-            elif self.live_params._consecutive_bad_fit > 10:
-                freeze_reason = "rls-bad"
-            elif not self.live_params.trusted():
-                freeze_reason = "cold"
-            elif intervened_recently:
-                freeze_reason = "user"
-            else:
-                freeze_reason = ""
 
             if not freeze_reason:
                 axis_sign = (1.0 if self.live_params.effective_scale_at(v_ego) >= 0
