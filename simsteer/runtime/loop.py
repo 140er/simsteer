@@ -71,6 +71,7 @@ from simsteer.runtime.output.base import DeviceManager
 from simsteer.runtime.output.steering import SteeringOutput
 from simsteer.runtime.replay import LiveClock
 from simsteer.runtime.telemetry import Telemetry, vehicle_context
+from simsteer.runtime.speedscale import SpeedScale
 from simsteer.ui.hud import (
     COL_ACCENT_BLUE, COL_ACCENT_GREEN, COL_ACCENT_RED, HudRenderer, HudState,
 )
@@ -191,6 +192,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                              clock=clock.now)
     lat_ctrl = LateralController(ctrl_cfg, live_params)
     long_ctrl = LongitudinalController(ctrl_cfg)
+    speed_scale = SpeedScale(game_id, ctrl_cfg)
     live_calib = LiveCalib(game=game_id, clock=clock.now)
 
     # --- Session-wide, game-agnostic resources ---
@@ -223,7 +225,9 @@ def run(settings: Settings, game: GameProfile | str, *,
             steering_fit_for(profile), profile.capabilities.synth_wheel_angle),
         model_identity=getattr(model, "certification_identity", None),
         certification_context=lambda: {
-            "controller": asdict(ctrl_cfg), "device": settings.device,
+            # Longitudinal residual learning does not change steering certification.
+            "controller": {k: v for k, v in asdict(ctrl_cfg).items()
+                           if k != "speed_scale_max"}, "device": settings.device,
             "device_id": settings.vjoy_device,
             "binding": getattr(pad, "binding_identity", None),
             **vehicle_context(tel),
@@ -544,6 +548,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                                 engaged=pad.engaged,
                                 lp_trusted=live_params.trusted(),
                                 calibrating=flow.probe_wanted)
+                        long_ctrl.speed_scale = speed_scale.update(
+                            flow, tel, vx, control_dt, healthy=not current_fault)
                         ai_throttle, ai_brake = long_ctrl.compute(decoded, v_ego)
                         require_finite("longitudinal", throttle=ai_throttle, brake=ai_brake)
                         if not flow.ai_steering_ready:
@@ -905,6 +911,7 @@ def run(settings: Settings, game: GameProfile | str, *,
             if pad is not None:
                 stop_output(user_stop=True)
                 getattr(pad, "shutdown_output", pad.disengage)()
+            speed_scale.save()
             live_params.save()
             live_calib.save_state(game_id)
             calib.save(game=game_id)
@@ -971,6 +978,7 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
          (180, 200, 255)),
         (f"throttle {throttle_out:.2f} brake {brake_out:.2f}   "
          f"v_tgt={long_ctrl.last_v_target:5.1f} a_cmd={long_ctrl.last_a_cmd:+.2f}"
+         f" scale={long_ctrl.speed_scale:.3f}"
          f"{'  AEB!' if long_ctrl.last_aeb else ''}", (200, 200, 255)),
         (f"corner v_safe="
          f"{'inf' if long_ctrl.last_v_safe_corner == float('inf') else f'{long_ctrl.last_v_safe_corner:.1f}'}"
