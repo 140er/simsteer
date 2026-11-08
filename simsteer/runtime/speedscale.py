@@ -1,6 +1,5 @@
 """Residual vision-speed calibration, downstream of FOV and camera learning.
 
-Ideas ported from SpysyWeeb/Beamng-onnx (MIT), commits 24f4c23, 02c57b7.
 The decoded pose and plan stay in model units; only longitudinal targets
 use this conversion. A measured FOV may already remove the entire bias.
 """
@@ -82,7 +81,7 @@ class SpeedScale:
             return min(ceiling, max(1.0, self.value))
         key = vehicle_context(telemetry).get("vehicle") or ""
         camera = asdict(flow.calib)
-        camera.pop("lateral_sign")
+        camera.pop("lateral_sign", None)
         context = hashlib.sha256(json.dumps(
             {"camera": camera, "model": flow.model_identity},
             sort_keys=True).encode()).hexdigest()
