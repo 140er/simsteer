@@ -532,7 +532,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                         ai_steer = lat_ctrl.compute(
                             decoded, v_ego, actual_wheel_angle=wheel_angle,
                             lane_change_command_active=lane_change.active, dt=control_dt,
-                            wheel_sign=flow.steering_sign)
+                            wheel_sign=flow.steering_sign,
+                            actual_yaw_rate=actual_yaw if tel.available else None)
                         require_finite("lateral", output=ai_steer)
                         ai_steer = flow.device_axis(ai_steer)
                         steer = manual.steer if manual.steer_override else ai_steer
