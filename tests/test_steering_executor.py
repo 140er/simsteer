@@ -50,6 +50,18 @@ def test_final_command_jerk_bound_including_bias_and_reversals(speed, gain, bias
         previous, last = axis, now
 
 
+def test_low_rack_gain_clamps_wheel_instead_of_faulting():
+    # gain .5 maps a full axis to 2 rad, past tan()'s usable range.
+    executor = SteeringExecutor(smoothing_s=0.)
+    axes = []
+    for i in range(400):
+        if i % 10 == 0:  # fresh 10 Hz plans keep the target alive
+            executor.submit(target(axis=1., speed=1., gain=.5), i * .01)
+        axes.append(executor.tick((i + 1) * .01))
+    assert all(axis is not None and math.isfinite(axis) for axis in axes)
+    assert axes[-1] == pytest.approx(.5 * 1.5)
+
+
 def test_variable_frame_intervals_and_missed_frame_do_not_change_executor_clock():
     executor = SteeringExecutor()
     updates = {0: .3, 4: -.3, 11: .3, 21: -.3}

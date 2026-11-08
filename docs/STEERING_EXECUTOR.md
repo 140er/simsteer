@@ -74,7 +74,7 @@ It does not establish real Windows scheduling precision or driving
 stability. A real-rig check is pending; in particular, verify response
 lag, corner tracking, probe learning and driver takeover.
 
-[PR #28](https://github.com/140er/simsteer/pull/28) targets V0.12 and
+PR #28 targets V0.12 and
 changes the model/FOV time base. It overlaps in `runtime/loop.py`,
 `core/postprocess.py` and safety tests. This change leaves capture,
 model history and FOV timing alone; integration must retain both its

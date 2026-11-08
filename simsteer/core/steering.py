@@ -8,6 +8,7 @@ from simsteer.core.finite import NonFiniteError, require_finite
 
 STEERING_PERIOD_S = .01
 STEERING_TIMEOUT_S = .25
+MAX_WHEEL_RAD = 1.5
 
 
 def limit_curvature(desired: float, previous: float, speed: float, dt: float,
@@ -16,6 +17,11 @@ def limit_curvature(desired: float, previous: float, speed: float, dt: float,
 
     This is a constant-speed bound; acceleration also contributes to the
     vehicle's total lateral jerk. It is not a vehicle certification.
+    As in openpilot's clip_curvature, the bound loosens as 1/v² and
+    speed is floored at 1 m/s, so near standstill it barely limits:
+    city turns need fast steering, and the controller outputs nothing
+    below its min_speed. No curvature magnitude clamp is applied
+    because full lock on long-wheelbase vehicles exceeds openpilot's.
     """
     require_finite("curvature_limit", desired=desired, previous=previous,
                    speed=speed, dt=dt, jerk=max_jerk)
@@ -79,9 +85,10 @@ class SteeringExecutor:
             # Bound the final command, including trim/probe and authority.
             # Limiting in axis space alone would depend on the rack ratio.
             def curvature(axis):
+                # A low rack gain can map a full axis past any real lock;
+                # clamp short of tan()'s pole instead of faulting.
                 wheel = (axis - target.rack_bias) / target.rack_gain
-                if abs(wheel) >= 1.5:
-                    raise NonFiniteError("steering_tick.rack_range")
+                wheel = max(-MAX_WHEEL_RAD, min(MAX_WHEEL_RAD, wheel))
                 return math.tan(wheel) / target.wheelbase
 
             previous = curvature(self.axis)
