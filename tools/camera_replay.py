@@ -57,6 +57,8 @@ def _replay(paths: list[Path], kind: str, *, game: str) -> tuple[dict, list[dict
         calib = Calibration()
         flow = CalibFlow(game, "gamepad", live_calib=learner, calib=calib,
                          live_params=SimpleNamespace(lag_frames=1, end_validation=lambda: None,
+                                                     begin_steering_fit=lambda: None,
+                                                     end_steering_fit=lambda: None,
                                                      trusted=lambda: False),
                          persist=False, model_identity={})
         flow._enter(Step.CAMERA)
