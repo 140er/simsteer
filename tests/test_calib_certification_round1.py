@@ -68,6 +68,7 @@ def test_two_saturating_checks_reach_failed():
 
 def test_highway_sized_steering_can_establish_trust():
     lp = LiveParams(game="ets2", device_kind="gamepad", lag_frames=0)
+    lp.begin_steering_fit()
     for i in range(4400):
         t = i * 0.05
         wheel = 0.0045 * math.sin(t / 8)
@@ -75,7 +76,7 @@ def test_highway_sized_steering_can_establish_trust():
         axis = (4.2 + 0.001 * speed * speed) * wheel
         lp.update(axis, speed, wheel)
     assert lp.samples >= 100
-    assert lp.trusted()
+    assert lp.finish_steering_fit() and lp.trusted()
 
 
 def test_missing_coverage_does_not_show_complete_steering():

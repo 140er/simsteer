@@ -392,12 +392,13 @@ def test_runtime_mirrored_binding_disengages_quickly(monkeypatch, tmp_path, fps)
     stopped = next(r["t"] for r in rows if r["t"] >= changed and not r["engaged"])
     assert stopped - changed <= 1.0 + 1 / fps
     assert flow.direction.ready and flow.lp.axis_sign == 1
-    # This plant drives at one speed, so direction evidence can be valid
-    # without identifying both coefficients of the speed-dependent fit.
-    assert not flow.lp.trusted() and not flow.output_direction.ready
+    # With b held at its seed, a single-speed fit can finish before the
+    # binding flips. The guard preserves that measurement and revokes output.
+    assert flow.lp.trusted() == flow.lp.scale_frozen
+    assert not flow.output_direction.ready
 
 
-def test_single_speed_plant_cannot_certify(monkeypatch, tmp_path):
+def test_one_sided_plant_cannot_certify(monkeypatch, tmp_path):
     flow, st, rows = run_plant(monkeypatch, tmp_path, drive_s=150)
     assert flow.step is Step.STEERING and not flow.lp.trusted()
     assert not any(r["calib"] == "done" for r in rows)

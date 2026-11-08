@@ -1,41 +1,10 @@
-"""Online identification of the truck's steering response, with the
-speed-stiffness correction that openpilot's `paramsd` uses for real
-vehicles.
+"""Per-game/device steering mapping: axis = a*wheel + b*wheel*v² + c.
 
-The model is comma's bicycle model with `stiffness_factor`, inverted
-for our purpose (we have wheel angle from telemetry — what we need is
-the gamepad axis that produces a target wheel angle). For a vehicle
-where wheel angle vs rack input falls off with speed (variable-ratio
-steering, ETS2's stability assist, real-car understeer), the inverse
-relationship is:
-
-    axis  ≈  a · wheel  +  b · wheel · v²  +  c
-
-  - a (axis per rad of wheel) is the low-speed linear coefficient.
-  - b (axis per rad·m²/s²) is the speed-stiffness coefficient — it's
-    what makes the controller automatically command MORE axis at
-    highway speed for the same plan curvature. Analogous to comma's
-    `stiffnessFactor` in `selfdrive/locationd/paramsd.py`.
-  - c is the axis offset bias.
-
-The form is linear in (a, b, c), so standard RLS still fits it. We
-observe `gameSteer_lagged` (ETS2's post-smoothing rack input, which
-is what actually drives the wheels) and regress against
-`H = [wheel, wheel·v², 1]`.
-
-Why fit the INVERSE rather than the forward `wheel = scale · axis`:
-
-  - At runtime we need axis given target_wheel + v_ego — that's what
-    the controller commands. Fitting the inverse means no inversion
-    at runtime: plug target_wheel + v² straight in.
-  - With our `wheel` and `gameSteer` both coming from low-noise SCS
-    telemetry, the noise-model asymmetry between the two directions
-    is negligible.
-
-The old `scale`/`offset` are still exposed as derived properties for
-HUD readability (`scale ≈ 1/a` at zero speed). Existing
-`liveparams_*.json` files written in the old 2-parameter format are
-auto-migrated on load.
+The guided Steering step measures a through the origin with b held at its
+profile seed and c kept separate. Driving only observes the frozen mapping;
+it never trains on the controller's own commands or on interventions.
+Legacy fits load frozen as-is and still require the existing direction and
+Check evidence. Explicit tuner edits remain available.
 """
 
 from __future__ import annotations
@@ -63,47 +32,14 @@ CONFIG_PATH = state_path("liveparams")
 # (ETS2 input filter + steering rack). ~5 frames at 20 Hz = 250 ms.
 LAG_FRAMES_DEFAULT = 5
 
-# Forgetting factor — closer to 1 = slower adaptation. See the
-# adaptive_forget() docstring.
-FORGET = 0.999
-FORGET_FLOOR = 0.99
-FORGET_RESPONSIVENESS = 0.009
-
-# Watchdog: if abs(innovation) stays above this for `BAD_FIT_PATIENCE`
-# consecutive accepted samples, the RLS state is persistently failing
-# to predict — covariance gets reset to its initial values so the next
-# few samples carry outsized weight.
-#
-# Units: axis (since the observation we regress is `gameSteer`). 0.10
-# means predictions are wrong by >10% of full deflection.
-BAD_FIT_INNOV_THRESHOLD = 0.10
-BAD_FIT_PATIENCE = 30            # ~1.5 s @ 20 Hz
-
 # Trouble detector: speed collapse implies crash / off-road; skip
 # updates until speed recovers.
 TROUBLE_SPEED_DROP_FRAC = 0.5
 TROUBLE_MIN_PEAK_MPS = 3.0
 TROUBLE_WINDOW_S = 5.0
 
-# Intervention threshold: when the observed gameSteer disagrees with
-# what we commanded by more than this, the human is adding (or
-# subtracting) input on top of the AI. Used to be a hard rejection
-# gate; now it routes the sample into the intervention-learning path
-# (see `_intervention_learn`) instead of the normal RLS update.
+# Interventions are excluded from calibration and pause the trim integrator.
 USER_ASSIST_DELTA = 0.15
-
-# Intervention learning rate. When the user is intervening, we don't
-# run RLS (the noise / lag structure of mid-correction samples breaks
-# the regression's assumptions). Instead we compute the `a` that
-# would have made `axis = a·wheel + b·wheel·v² + c` equal the
-# OBSERVED gameSteer at this frame's wheel, and blend toward it at
-# this rate. The blend is small — 0.02 over many frames lets a
-# sustained help/fight reshape `a` over a few seconds, while a single
-# spurious sample shifts it by <2%.
-INTERVENTION_LEARN_RATE = 0.02
-# Minimum wheel magnitude required to invert the model into an implied
-# `a`. Below this the division `axis/wheel` is dominated by noise.
-INTERVENTION_MIN_WHEEL = 0.005
 
 # Saturation gate: when the controller is commanding near the rail,
 # the observation reflects mechanical/slip dynamics, not the linear
@@ -135,30 +71,13 @@ _GATES_DEFAULT = {
     "max_innovation_cold": 0.60,
     "c_abs_max": 0.10,
     "lag_frames": 5,
-    # Initial state-covariance diagonal — bigger = faster initial
-    # convergence at the cost of more sample-to-sample swing. ETS2
-    # was tuned with these and worked; do not touch without need.
+    # Retained covariance fields for saved-state and HUD compatibility.
     "P_init": (0.1, 1e-4, 1e-3),
-    # Process-noise covariance added each step (Kalman Q). Matches
-    # paramsd's role: lets the state slowly drift even when nothing
-    # new is being observed, AND keeps the covariance from shrinking
-    # to zero (which would freeze the fit). Small positive values
-    # only — too big and a glitchy sample yanks the state.
     "Q_diag": (1e-7, 1e-10, 1e-6),
 }
 
-# Forza / AC overrides. We can't use min_axis to filter straight-
-# driving samples (the signed-byte / atan path produces sub-noise
-# axis values that we want — they contain real micro-corrections),
-# so instead we filter on the synthesized WHEEL: if the wheel
-# angle is below ~0.3° (0.005 rad), the sample carries no info
-# about the rack response regardless of axis, and letting it
-# through to RLS develops covariance off-diagonals that wash out
-# the good cornering data within seconds of straight driving.
-#
-# `P_init` is much bigger so cold-start converges quickly from the
-# default a=10 toward Forza's true a (~3). `Q_diag` is bigger too
-# so the filter doesn't lose responsiveness over long sessions.
+# Synthesized wheel angles need a wheel-excitation gate in addition to
+# the lag and input-quiescence gates shared with direct telemetry.
 _GATES_SYNTH_WHEEL = {
     "min_speed_mps": 3.0,
     "min_axis": 0.0,
@@ -189,12 +108,6 @@ MAX_AXIS_SPREAD_FOR_FIT = _GATES_DEFAULT["max_axis_spread_for_fit"]
 # 0.3 rad ≈ 17°. Real on-road wheel angle (front wheel, not steering
 # wheel) almost never exceeds this — most highway is <0.05 rad.
 MAX_WHEEL_FOR_FIT = 0.3
-
-# Innovation gates. Warm value is shared across games (it's a glitch
-# filter once the fit is trusted). Cold value is per-game — ETS2's
-# strict 0.60 worked there, Forza/AC need 2.0 because the initial
-# `a=10` is far from their true rack ratio (~3) and 0.60 rejected
-# every cold sample. See `GATE_PROFILES`.
 MAX_INNOVATION_WARM = 0.30
 MAX_INNOVATION_COLD = _GATES_DEFAULT["max_innovation_cold"]
 
@@ -205,17 +118,8 @@ MAX_INNOVATION_COLD = _GATES_DEFAULT["max_innovation_cold"]
 # controller and `lateral_sign` can remain on a fixed convention.
 # Magnitude constraints only: |a| ∈ [A_ABS_MIN, A_ABS_MAX], etc.
 #
-# `b` shares the sign of `a` — the speed-stiffness term is always in
-# the same direction as the base linear response. We enforce that
-# post-RLS so the regression remains unconstrained.
-# Lower floor on the EFFECTIVE |a| used at inversion time. Without
-# this, RLS can pin a near zero (degenerate but mathematically valid)
-# and `axis_for_wheel_angle` then outputs ~0 for any target wheel —
-# i.e. the controller decides "no steering is best." The internal
-# state is allowed to roam in [-A_ABS_MAX, +A_ABS_MAX] (so RLS can
-# track sign flips and unusual cars), but at INVERSION TIME we clamp
-# the magnitude so the controller always commands at least a usable
-# axis. 0.5 ≈ scale of 2 rad/axis, comfortably small but non-degenerate.
+# Keep the signed mapping and a non-degenerate runtime floor. The fitted
+# speed term uses the same direction as a.
 A_ABS_MAX = 50.0
 A_ABS_MIN_RUNTIME = 0.5
 B_ABS_MAX = 0.10
@@ -226,20 +130,14 @@ B_ABS_MAX = 0.10
 C_ABS_MAX = _GATES_DEFAULT["c_abs_max"]
 
 # Initial guess. a=10 ≈ 1 rad of wheel needs 10 units of axis at low
-# speed (so effective scale ≈ 0.1 wheel/axis). b=0 lets RLS discover
-# the speed term. c=0. Used when the game profile has no seed for the
+# speed (so effective scale ≈ 0.1 wheel/axis). b=0 and c=0 are the
+# fallbacks when the game profile has no seed for the
 # device.
 A_INIT = 10.0
 B_INIT = 0.0
 C_INIT = 0.0
 
-# Cold-start seeds come from the game profile, one per device kind
-# (`[liveparams.<device>] seed`), and apply only while no
-# liveparams_*.json exists for that (game, device). The universal a=10
-# fallback is far from real game racks (typically 3-5), so the cold
-# filter spends thousands of samples migrating before useful, AND a/c
-# are collinear in near-straight driving so it can converge to a wrong
-# local minimum.
+# Profile seeds supply the device's fallback scale, speed term and bias.
 DEFAULT_SEED: tuple[float, float, float] = (A_INIT, B_INIT, C_INIT)
 Seeds = Mapping[str, tuple[float, float, float]]
 
@@ -249,8 +147,8 @@ def _seed_for(seeds: Seeds, device_kind: str | None) -> tuple[float, float, floa
 
 
 # At a single speed, wheel and wheel*v² are collinear: arbitrarily many
-# samples cannot identify a and b separately. Require both turns and a
-# measured speed span, using only accepted, excited training samples.
+# samples cannot identify a and b separately. New measurements hold b at
+# its seed; speed coverage below is retained for validating older fits.
 TRUSTED_MIN_SAMPLES = 100
 TRUSTED_MIN_EACH_TURN = 10
 # The highway calibration replay peaks below 0.005 rad. At 0.003 rad it
@@ -261,10 +159,10 @@ TRUSTED_MIN_SPEED_SPAN_MPS = 3.0
 TRUSTED_MIN_SPEED_BIN_SAMPLES = 10
 TRUST_COVERAGE_VERSION = 1
 
-# Auto-freeze: once we've accumulated this many samples the fit is
-# mature enough that further RLS updates are more likely to fit
-# transient AI-confusion dynamics than the actual rack response.
-FREEZE_AFTER_SAMPLES = 2000
+# Bound the collection window so rejected data can age out.
+FIT_WINDOW_SAMPLES = 1200
+FIT_MAX_RMS_AXIS = 0.035
+FIT_MAX_RELATIVE_RMS = 0.25
 
 
 @dataclass
@@ -279,6 +177,8 @@ class _Persisted:
     coverage_speed_min: float | None = None
     coverage_speed_max: float | None = None
     legacy_fit: bool = False
+    scale_frozen: bool = False
+    calibration_fit: bool = False
 
 
 class LiveParams:
@@ -325,23 +225,16 @@ class LiveParams:
         self.coverage_speed_ranges = loaded.coverage_speed_ranges
         self.coverage_speed_min = loaded.coverage_speed_min
         self.coverage_speed_max = loaded.coverage_speed_max
+        self.scale_frozen = loaded.scale_frozen
+        self.calibration_fit = loaded.calibration_fit
+        self._steering_fit_active = False
+        self._fit_samples: deque[tuple[float, float, float]] = deque(maxlen=FIT_WINDOW_SAMPLES)
+        self.fit_reason = "Need more steering samples"
         self.legacy_fit = loaded.legacy_fit
         self.validation_model: tuple[float, float, float] | None = None
-        # Initial state-covariance diagonal (P0). Per-game — Forza/AC
-        # use bigger values to converge from defaults faster, ETS2
-        # uses the tighter values that worked there. The b prior is
-        # always smaller than a's because b's regressor is wheel·v²
-        # which can be ~50 at highway speed, so its natural Kalman
-        # gain is correspondingly smaller.
-        p_init = self._gates["P_init"]
-        self.P = np.diag(p_init)
-        # Process noise (Kalman Q) — added each RLS step to keep the
-        # covariance from collapsing to zero (which would freeze the
-        # state) and to let the state slowly drift between samples,
-        # exactly like openpilot's `paramsd` does. Values are small;
-        # tuned so a single step of process noise can't yank the
-        # state but cumulative drift over hours stays responsive.
-        self._Q = np.diag(self._gates["Q_diag"])
+        # Covariance remains available to old HUDs and finite-state checks;
+        # driving observations no longer update it.
+        self.P = np.diag(self._gates["P_init"])
         self.samples = loaded.samples
         self.session_samples = 0
         self.lag_frames = lag_frames
@@ -377,18 +270,13 @@ class LiveParams:
             maxlen=int(TROUBLE_WINDOW_S * 20))
         self._consecutive_bad_fit = 0
         # Trajectory ring buffer (time, a, b, c) — appended on every
-        # accepted RLS update. Used by a future tuner plot tab; the
+        # installed measurement. Used by a future tuner plot tab; the
         # HUD itself reads `last_update_ts` and the trust_level
         # property for now.
         self.history: deque[tuple[float, float, float, float]] = deque(
             maxlen=600)
         self.last_update_ts: float = 0.0
-        # Set whenever an intervention-learning sample is processed.
-        # Decays back to 0.0 over ~1 s — read by the controller's trim
-        # integrator to freeze itself while the human is fighting/helping
-        # the wheel (the gate is `last_intervened_ts` within 1 s of
-        # now). Lighter than a boolean flag because it lets the gate
-        # auto-clear without a separate tick.
+        # The trim integrator pauses for one second after an intervention.
         self.last_intervened_ts: float = 0.0
         # Frames where the fit predicted the axis, accepted or not. The
         # calibration check reads `last_innovation` when this grows.
@@ -458,7 +346,7 @@ class LiveParams:
 
     @property
     def innov_ema(self) -> float:
-        """EMA of |innovation| over accepted RLS updates. Same units as
+        """EMA of |innovation| over qualified observations. Same units as
         the regression target (axis). HUD reads this as a quick health
         gauge — should stabilize near zero on a healthy fit."""
         return float(self._innov_ema)
@@ -471,25 +359,13 @@ class LiveParams:
 
     @property
     def auto_frozen(self) -> bool:
-        # Sample-count auto-freeze is disabled — the rate-limit and
-        # rejection gates handle the corruption-from-bad-samples
-        # problem better than a hard sample-count cutoff did.
-        return False
+        return self.scale_frozen
 
     @property
     def trust_level(self) -> str:
-        """Coarse one-word status. The HUD colors itself by this:
-            LOCKED      — user has manually frozen the fit
-            RECOVERING  — watchdog about to fire (>10 consecutive bad)
-            WARMING     — fewer than TRUSTED_MIN_SAMPLES accepted
-            UNSTABLE    — innov_ratio > 0.30 — predictions consistently off
-            HEALTHY     — innov_ratio < 0.05 — predictions essentially right
-            SETTLED     — in between, fit is mature but not exceptional
-        Cheap to compute, no allocations beyond the f-string."""
+        """Coarse mapping status for the HUD."""
         if self.locked:
             return "LOCKED"
-        if self._consecutive_bad_fit > 10:
-            return "RECOVERING"
         if not self.trusted():
             return f"WARMING ({self.samples}/{TRUSTED_MIN_SAMPLES})"
         if self.innov_ratio > 0.30:
@@ -500,29 +376,8 @@ class LiveParams:
 
     @property
     def locked(self) -> bool:
-        """True iff the user has manually frozen the fit. When True,
-        BOTH the RLS update AND the intervention-learning path are
-        skipped — the state vector x = [a, b, c] stays exactly where
-        the user left it. Toggle via the 'Lock' checkbox in the
-        tuner's Lateral tab → LiveParams section. Frozen state isn't
-        persisted across launches by design — every session starts
-        unlocked unless the user re-locks."""
-        return bool(self.frozen)
-
-    def adaptive_forget(self) -> float:
-        # Adaptive (lower) forgetting is for cold convergence — when the
-        # filter is wrong and we need to bias toward new samples to
-        # escape. Once trusted the fit is reliable for the regime it
-        # was learned in, and high-innovation samples are usually
-        # off-regime transients (highway-trained fit going through a
-        # tight off-highway turn at low v²). Speeding up adaptation
-        # there corrupts the original fit instead of refining it —
-        # observed runaway from a≈4 to a≈19 after one off-highway
-        # detour. Trusted fits stick to FORGET (slowest).
-        if self._adaptation_warm():
-            return FORGET
-        ratio = min(self.innov_ratio, 1.0)
-        return max(FORGET_FLOOR, FORGET - FORGET_RESPONSIVENESS * ratio)
+        """Calibration freeze is independent of the tuner's session lock."""
+        return self.scale_frozen or bool(self.frozen)
 
     def _in_trouble(self, v_ego: float) -> bool:
         # Disabled. The detector latched on pause/unpause cycles —
@@ -534,7 +389,7 @@ class LiveParams:
         return False
 
     def trusted(self) -> bool:
-        return self.trust_progress >= 1.0
+        return not self._steering_fit_active and self.trust_progress >= 1.0
 
     @property
     def coverage_turns(self) -> tuple[int, int]:
@@ -557,6 +412,16 @@ class LiveParams:
 
     @property
     def trust_progress(self) -> float:
+        if self.calibration_fit and self.scale_frozen:
+            return 1.0
+        if self._steering_fit_active:
+            data = np.asarray(self._fit_samples)
+            if not len(data):
+                return 0.0
+            wheel = data[:, 0]
+            return min(0.99, len(wheel) / TRUSTED_MIN_SAMPLES,
+                       np.count_nonzero(wheel < -TRUSTED_MIN_WHEEL) / TRUSTED_MIN_EACH_TURN,
+                       np.count_nonzero(wheel > TRUSTED_MIN_WHEEL) / TRUSTED_MIN_EACH_TURN)
         left, right = self.coverage_turns
         return min(1.0, max(self.samples, self.session_samples) / TRUSTED_MIN_SAMPLES,
                    left / TRUSTED_MIN_EACH_TURN, right / TRUSTED_MIN_EACH_TURN,
@@ -564,6 +429,8 @@ class LiveParams:
 
     @property
     def trust_need(self) -> str:
+        if self._steering_fit_active:
+            return self.fit_reason
         left, right = self.coverage_turns
         if max(left, right) < TRUSTED_MIN_EACH_TURN:
             return "Need left and right curves"
@@ -574,11 +441,6 @@ class LiveParams:
         if self.coverage_speed_span < TRUSTED_MIN_SPEED_SPAN_MPS:
             return "Need varied speed"
         return "Need more steering samples"
-
-    def _adaptation_warm(self) -> bool:
-        # Preserve the existing filter's gain/outlier/watchdog schedule.
-        # Statistical identifiability gates certification, not filter tuning.
-        return max(self.samples, self.session_samples) >= TRUSTED_MIN_SAMPLES
 
     @property
     def validating(self) -> bool:
@@ -601,16 +463,9 @@ class LiveParams:
         """Invert the inverse-rack model to get the axis that produces
         `target_wheel_rad` at speed `v_ego`:
             axis = a · w + b · w · v² + c
-        Always uses the current state — so manually-set sliders take
-        effect immediately, before RLS has had a chance to converge.
-        Defaults at construction are (A_INIT, B_INIT, C_INIT) which is
-        the same fallback we used to have; loaded files override them.
-
-        |a| is floored at A_ABS_MIN_RUNTIME so the controller never
-        decides 'no steering is best' just because RLS pinned a near
-        zero on degenerate data (e.g. lots of straight-line samples
-        with no rack excitation). Sign of a is preserved — RLS still
-        owns the sign discovery."""
+        Explicit tuner edits take effect immediately. Preserve the direction
+        and floor |a| so old or manually edited states remain usable.
+        """
         self.validate_state()
         require_finite("liveparams", target=target_wheel_rad, speed=v_ego)
         a, b, c = float(self.x[0]), float(self.x[1]), float(self.x[2])
@@ -625,49 +480,82 @@ class LiveParams:
 
     @property
     def a_below_floor(self) -> bool:
-        """True when RLS's internal |a| is below the runtime clamp,
-        i.e. the fit has degenerated and the controller is currently
-        running on the floor value. Surfaced in the HUD so the user
-        knows their fit is unhealthy even when the truck appears to
-        steer normally (because the floor is doing the work)."""
+        """Whether the saved or manually edited gain needs the runtime floor."""
         return abs(float(self.x[0])) < A_ABS_MIN_RUNTIME
 
     def _intervention_learn(self, target_axis: float, wheel: float,
                             v2: float) -> None:
-        """User is intervening — blend `a` toward the value that would
-        have made our AI command exactly the observed gameSteer.
-
-        Solve  target_axis = a·wheel + b·wheel·v² + c  for a, with
-        b and c held at their current values, then EMA toward it.
-        Skipped when wheel is too small for the inversion to be
-        numerically meaningful.
-
-        Sets `last_intervened_ts` so the controller's trim integrator
-        can freeze itself while the human is on the wheel — the trim
-        and the intervention path both nudge axis toward the human's
-        intent, so we let intervention own that correction."""
-        # Always mark as intervened, even if we skip the math below,
-        # so a streak of small-wheel intervention frames still freezes
-        # the trim integrator.
+        """Record an intervention so the trim integrator can pause."""
+        require_finite("liveparams.intervention", axis=target_axis, wheel=wheel, v2=v2)
         self.last_intervened_ts = self.clock()
-        if abs(wheel) < INTERVENTION_MIN_WHEEL:
-            return
-        implied_a = (target_axis
-                     - self.x[2]
-                     - self.x[1] * wheel * v2) / wheel
-        alpha = INTERVENTION_LEARN_RATE
-        new_a = (1.0 - alpha) * self.x[0] + alpha * implied_a
-        require_finite("liveparams.intervention", coefficient=new_a)
-        # Magnitude clamp (keep sign).
-        sign_a = -1.0 if new_a < 0 else 1.0
-        self.x[0] = sign_a * min(A_ABS_MAX, abs(new_a))
+
+    def begin_steering_fit(self) -> None:
+        """Open collection for the guided Steering step; retain frozen fits."""
+        self._steering_fit_active = not self.scale_frozen
+        self._axis_buf.clear()
+        self._commanded_buf.clear()
+        self._v_buf.clear()
+
+    def end_steering_fit(self) -> None:
+        self._steering_fit_active = False
+        self._fit_samples.clear()
+
+    def finish_steering_fit(self) -> bool:
+        """Install a qualified least-squares measurement, then freeze it.
+
+        At one speed a and b are collinear. Hold b at the signed profile
+        seed instead of estimating two gains from a short drive. c is an
+        independently set bias, subtracted before the origin-only solve.
+        Rejected windows keep collecting; no candidate changes x.
+        """
+        if self.scale_frozen:
+            return True
+        if not self._steering_fit_active or self.validating or self.frozen:
+            return False
+        self.validate_state()
+        if len(self._fit_samples) < TRUSTED_MIN_SAMPLES:
+            self.fit_reason = "Need more steering samples"
+            return False
+        data = np.asarray(self._fit_samples)
+        wheel, speed, axis = data.T
+        left, right = (np.count_nonzero(wheel < -TRUSTED_MIN_WHEEL),
+                       np.count_nonzero(wheel > TRUSTED_MIN_WHEEL))
+        if min(left, right) < TRUSTED_MIN_EACH_TURN:
+            self.fit_reason = "Need left and right curves"
+            return False
+        energy = float(wheel @ wheel)
+        if energy < len(wheel) * TRUSTED_MIN_WHEEL ** 2:
+            self.fit_reason = "Need stronger steering excitation"
+            return False
+        seed_b = _seed_for(self.seeds, self.device_kind)[1]
+        sign = self.axis_sign or (-1 if self.a_linear < 0 else 1)
+        b = sign * abs(seed_b)
+        target = axis - b * wheel * speed ** 2 - self.c_bias
+        a = float(wheel @ target / energy)
+        residual = float(np.sqrt(np.mean((target - a * wheel) ** 2)))
+        signal = float(np.sqrt(np.mean(target ** 2)))
+        if (not A_ABS_MIN_RUNTIME <= abs(a) <= A_ABS_MAX
+                or a * sign <= 0):
+            self.fit_reason = "Steering fit has implausible gain or direction"
+            return False
+        if residual > FIT_MAX_RMS_AXIS or residual > FIT_MAX_RELATIVE_RMS * signal:
+            self.fit_reason = "Steering fit residual too large; drive steady gentle bends"
+            return False
+        self.x[:2] = a, b
+        self.scale_frozen = self.calibration_fit = True
+        self.last_update_ts = self.clock()
+        self.history.append((self.last_update_ts, a, b, self.c_bias))
+        self.end_steering_fit()
+        self.save()
+        return True
 
     def update(self, game_steer: float | None, v_ego: float | None,
                wheel_angle_rad: float | None,
                commanded_axis: float | None = None,
                gate_override: dict | None = None) -> None:
-        """Feed one observation. Regression target is `game_steer`;
-        regressors are `[wheel, wheel·v², 1]`.
+        """Observe a delayed axis/wheel pair without changing coefficients.
+
+        Only an open guided Steering step collects qualified fit samples.
 
         `gate_override`, when provided, shadows `self._gates` for this
         single call — used by the guided-calibration routine to widen
@@ -679,15 +567,9 @@ class LiveParams:
         self.validate_state()
         if game_steer is None:
             return
-        # Per-call gate dict. Without an override this is just the
-        # instance's stored profile; with one we merge so the routine
-        # can loosen e.g. innovation gate + Q without touching the
-        # baseline. `Q` is recomputed only when the override changes
-        # Q_diag, otherwise the cached self._Q is used.
+        # The Steering override widens only sample-admission gates.
         gates = (self._gates if gate_override is None
                  else {**self._gates, **gate_override})
-        Q = (self._Q if gate_override is None or "Q_diag" not in gate_override
-             else np.diag(gates["Q_diag"]))
         self._axis_buf.append(float(game_steer))
         self._commanded_buf.append(
             float(commanded_axis) if commanded_axis is not None else 0.0)
@@ -712,13 +594,7 @@ class LiveParams:
         if abs(float(wheel_angle_rad)) > MAX_WHEEL_FOR_FIT:
             self.rej_wheel += 1
             return
-        # Small-wheel gate (per-game). For Forza/AC where the wheel
-        # is synthesized from yaw rate, a near-zero wheel means the
-        # vehicle isn't turning enough to extract any info about the
-        # rack — and admitting these samples lets the bias term `c`
-        # bleed into `a` and `b` through covariance off-diagonals.
-        # ETS2's profile keeps this at 0 because its min_axis already
-        # filters that case.
+        # Synthesized wheels need enough turning signal to exceed noise.
         if abs(float(wheel_angle_rad)) < gates["min_wheel"]:
             self.rej_small_wheel += 1
             return
@@ -733,91 +609,49 @@ class LiveParams:
                 self.rej_transient += 1
                 return
 
-        # Intervention learning + saturation gate. When the observed
-        # gameSteer differs from what we commanded, the human is
-        # intervening — adding (helping) or subtracting (fighting)
-        # input. Instead of dropping these samples we compute the
-        # `a` that would have made our AI command match the OBSERVED
-        # gameSteer at this frame's wheel angle, and blend toward
-        # that value. Sustained help → a grows → next AI command
-        # steers more. Sustained fight → a shrinks → next AI command
-        # steers less. Saturation is still rejected outright (mech
-        # limit, not the linear rack).
+        # Reject intervention and saturation samples, including passive rails.
         wheel = float(wheel_angle_rad)
         v2 = v_lagged * v_lagged
+        if abs(axis_lagged) >= SATURATION_AXIS:
+            self.rej_saturated += 1
+            return
         if commanded_axis is not None and len(self._commanded_buf) > self.lag_frames:
             commanded_lagged = float(self._commanded_buf[0])
             if abs(commanded_lagged) >= SATURATION_AXIS:
                 self.rej_saturated += 1
                 return
             if abs(axis_lagged - commanded_lagged) > USER_ASSIST_DELTA:
-                # Honor the user's lock — intervention still counts as
-                # "modifying the fit," so a locked LiveParams stays put
-                # even if the user nudges the wheel mid-drive.
-                if not self.locked and not self.validating:
-                    self._intervention_learn(axis_lagged, wheel, v2)
+                self._intervention_learn(axis_lagged, wheel, v2)
                 self.rej_assist += 1   # counts as "intervention" for HUD
                 return
 
-        # Regression: axis = a·wheel + b·wheel·v² + c.
-        # (`wheel` and `v2` were already computed above for the
-        # intervention check.)
+        # Predictions remain available to Check and diagnostics.
         H = np.array([wheel, wheel * v2, 1.0], dtype=np.float64)
         predicted = float(H @ (self.validation_model if self.validating else self.x))
         actual = axis_lagged
         innovation = actual - predicted
+        require_finite("liveparams.prediction", predicted=predicted, innovation=innovation)
         self.predictions += 1
         if self.validating:
             # These frames are scored, including large errors, but never fit
-            # or used by intervention adaptation or the covariance watchdog.
+            # or used in the Steering collection window.
             self.last_innovation = innovation
             self.last_predicted = predicted
             self.last_actual = actual
             return
-        innov_gate = (MAX_INNOVATION_WARM if self._adaptation_warm()
+        self.last_innovation = innovation
+        self.last_predicted = predicted
+        self.last_actual = actual
+        self._innov_ema = 0.95 * self._innov_ema + 0.05 * abs(innovation)
+        self._actual_ema = 0.95 * self._actual_ema + 0.05 * abs(actual)
+        innov_gate = (MAX_INNOVATION_WARM if self.trusted()
                       else gates["max_innovation_cold"])
         if abs(innovation) > innov_gate:
             self.rej_innovation += 1
-            self._innov_ema = 0.95 * self._innov_ema + 0.05 * abs(innovation)
-            self._actual_ema = 0.95 * self._actual_ema + 0.05 * abs(actual)
-            self.last_innovation = innovation
-            self.last_predicted = predicted
-            self.last_actual = actual
             return
-
-        if self.locked:
-            self._innov_ema = 0.95 * self._innov_ema + 0.05 * abs(innovation)
-            self._actual_ema = 0.95 * self._actual_ema + 0.05 * abs(actual)
-            self.last_innovation = innovation
-            self.last_predicted = predicted
-            self.last_actual = actual
+        if not self._steering_fit_active or self.locked:
             return
-
-        forget = self.adaptive_forget()
-        denom = forget + float(H @ self.P @ H)
-        K = (self.P @ H) / denom
-        next_x = self.x + K * innovation
-        # Standard RLS covariance update + Kalman process noise.
-        # Without the `+ Q` term P shrinks monotonically and the
-        # filter eventually stops responding to new information
-        # (sample-rich, low-uncertainty regime). Adding Q each step
-        # keeps it alive — what openpilot's `paramsd` does via its
-        # EKF process-noise matrix. `Q` here is the override-merged
-        # version when a gate_override was passed in.
-        next_P = (self.P - np.outer(K, H @ self.P)) / forget + Q
-        require_finite("liveparams.update", coefficients=next_x, covariance=next_P)
-        self.x, self.P = next_x, next_P
-
-        # Bounds-clamp each parameter. `a` keeps its sign; `b` is
-        # sign-locked to `a` (the stiffness term is always in the same
-        # direction as the base linear response, so the rack doesn't
-        # flip direction with speed). `c` is a free bias.
-        sign_a = -1.0 if self.x[0] < 0 else 1.0
-        self.x[0] = sign_a * min(A_ABS_MAX, abs(self.x[0]))
-        self.x[1] = sign_a * min(B_ABS_MAX, max(0.0, sign_a * self.x[1]))
-        c_max = gates["c_abs_max"]
-        self.x[2] = max(-c_max, min(c_max, self.x[2]))
-
+        self._fit_samples.append((wheel, v_lagged, actual))
         self.samples += 1
         self.session_samples += 1
         if abs(wheel) >= TRUSTED_MIN_WHEEL:
@@ -830,45 +664,9 @@ class LiveParams:
                                        else min(self.coverage_speed_min, v_lagged))
             self.coverage_speed_max = (v_lagged if self.coverage_speed_max is None
                                        else max(self.coverage_speed_max, v_lagged))
-        self.last_innovation = innovation
-        self.last_predicted = predicted
-        self.last_actual = actual
-        self._innov_ema = 0.95 * self._innov_ema + 0.05 * abs(innovation)
-        self._actual_ema = 0.95 * self._actual_ema + 0.05 * abs(actual)
-        # Trajectory log + last-update timestamp for HUD diagnostics.
-        # Appended only on accepted updates so the buffer reflects what
-        # the filter actually saw, not every frame.
-        self.last_update_ts = self.clock()
-        self.history.append((self.last_update_ts,
-                             float(self.x[0]), float(self.x[1]),
-                             float(self.x[2])))
-
-        if abs(innovation) > BAD_FIT_INNOV_THRESHOLD:
-            self._consecutive_bad_fit += 1
-            # Watchdog inflates Kalman gain to unstick a cold fit. It
-            # MUST NOT fire when trusted — observed runaway: highway-
-            # learned fit goes off-highway, low-v² samples produce
-            # large innovation, watchdog resets P, the next off-regime
-            # samples carry huge weight, `a` drifts from ~4 to ~19
-            # and the fit doesn't recover even back on highway
-            # (closed-loop reinforcement). Trusted fits just keep
-            # their slow RLS adaptation; off-regime errors accumulate
-            # softly and wash out when the regime returns.
-            if (not self._adaptation_warm()
-                    and self._consecutive_bad_fit >= BAD_FIT_PATIENCE):
-                self.P = np.diag(gates["P_init"])
-                self.watchdog_resets += 1
-                self._consecutive_bad_fit = 0
-        else:
-            self._consecutive_bad_fit = 0
-
-        self._dirty += 1
-        if self._dirty >= 200:
-            self.save()
-            self._dirty = 0
 
     def reset(self, wipe_disk: bool = False, clear_axis_sign: bool = False) -> None:
-        """Wipe in-memory RLS state to the per-(game, device) seed.
+        """Wipe the measured fit and collection state to the per-(game, device) seed.
         With `wipe_disk=True`, also remove the persisted JSON so the
         next session starts fresh — used by the overlay `R` hotkey
         and the `--reset-calib` CLI flag. Without `wipe_disk`, the
@@ -896,6 +694,10 @@ class LiveParams:
         self.coverage_speed_ranges = {}
         self.coverage_speed_min = self.coverage_speed_max = None
         self.legacy_fit = False
+        self.scale_frozen = self.calibration_fit = False
+        self.frozen = False
+        self.end_steering_fit()
+        self.fit_reason = "Need more steering samples"
         self.end_validation()
         self._axis_buf.clear()
         self._commanded_buf.clear()
@@ -926,14 +728,7 @@ class LiveParams:
                 pass
 
     def reset_covariance_only(self) -> None:
-        """Reset P (and consecutive-bad-fit counter) to cold-start
-        values without touching the state vector x = [a, b, c].
-
-        Used by the guided-calibration routine between steps so each
-        new step's samples carry full Kalman gain instead of being
-        diluted by the previous step's accumulated certainty. Doesn't
-        clear sample counts or rejection counters — those still reflect
-        lifetime activity."""
+        """Reset the diagnostic covariance without changing the mapping."""
         self.P = np.diag(self._gates["P_init"])
         self._consecutive_bad_fit = 0
 
@@ -943,8 +738,11 @@ class LiveParams:
         if sign not in (-1, 1):
             raise ValueError("axis sign must be -1 or 1")
         self.axis_sign = sign
-        if self.a_linear * sign <= 0:
+        if not self.scale_frozen and self.a_linear * sign <= 0:
+            active = self._steering_fit_active
             self.reset(wipe_disk=True)
+            if active:
+                self.begin_steering_fit()
         self.save()
 
     # ----- persistence -----
@@ -1005,8 +803,9 @@ class LiveParams:
             data["samples"] = bounded_int(data["samples"])
         if "coverage_version" in data:
             bounded_int(data["coverage_version"])
-        if "legacy_fit" in data and type(data["legacy_fit"]) is not bool:
-            raise ValueError("invalid legacy flag")
+        for flag in ("legacy_fit", "scale_frozen", "calibration_fit"):
+            if flag in data and type(data[flag]) is not bool:
+                raise ValueError("invalid fit flag")
         if data.get("axis_sign") is not None:
             if type(data["axis_sign"]) not in (int, float) or data["axis_sign"] not in (-1, 1):
                 raise ValueError("invalid axis sign")
@@ -1031,11 +830,8 @@ class LiveParams:
             # abs()'d this and broke users whose legacy fit was
             # negative.)
             #
-            # Samples are ALWAYS reset to 0 on migration: the old
-            # 2-param fit's sample count doesn't validate the new
-            # 3-param model. Preserving it would auto-freeze the new
-            # fit on first load and prevent `b` (speed-stiffness)
-            # from ever learning.
+            # The old sample count cannot certify a different model.
+            # Preserve its coefficients frozen without inventing coverage.
             try:
                 scale = float(data.get("scale", 0.1))
                 offset = float(data.get("offset", 0.0))
@@ -1053,7 +849,7 @@ class LiveParams:
         # seed and samples=0 so the user gets a fresh, well-seeded fit.
         # Use the LARGER (ETS2) c-bound here as the "obviously garbage"
         # threshold — accept files that came from any profile, runtime
-        # gate clamps them tighter on the next RLS step if needed.
+        # profile's bias slider retains its tighter clamp.
         in_bounds = (np.isfinite([a, b, c, samples]).all()
                      and abs(a) <= A_ABS_MAX
                      and abs(b) <= B_ABS_MAX
@@ -1089,10 +885,15 @@ class LiveParams:
                 raise ValueError("invalid speed range")
         legacy_fit = data.get("legacy_fit", data.get("coverage_version") is None
                               and samples >= TRUSTED_MIN_SAMPLES and not coverage) is True
+        scale_frozen = data.get("scale_frozen", data.get("samples", 0) > 0)
+        calibration_fit = data.get("calibration_fit", False)
+        if calibration_fit and (not scale_frozen or samples < TRUSTED_MIN_SAMPLES):
+            raise ValueError("invalid measured fit")
         return _Persisted(a=a, b=b, c=c, samples=samples, axis_sign=axis_sign,
                           coverage=coverage, coverage_speed_ranges=ranges,
                           coverage_speed_min=speed_min,
-                          coverage_speed_max=speed_max, legacy_fit=legacy_fit)
+                          coverage_speed_max=speed_max, legacy_fit=legacy_fit,
+                          scale_frozen=scale_frozen, calibration_fit=calibration_fit)
 
     def validate_state(self) -> None:
         require_finite("liveparams.state", coefficients=self.x, covariance=self.P,
@@ -1121,6 +922,8 @@ class LiveParams:
                 "coverage_speed_min": self.coverage_speed_min,
                 "coverage_speed_max": self.coverage_speed_max,
                 "legacy_fit": self.legacy_fit,
+                "scale_frozen": self.scale_frozen,
+                "calibration_fit": self.calibration_fit,
             })
         except NonFiniteError as exc:
             logging.getLogger(__name__).warning("Not saving non-finite state: %s", exc)
@@ -1135,7 +938,7 @@ class LiveParams:
         fit per device-kind instead of trying to share one.
 
         State that's NOT persisted (session_samples, rejection
-        counters, RLS covariance) gets reset, matching what would
+        counters, diagnostic covariance) gets reset, matching what would
         happen on a fresh launch with the new device."""
         if new_device_kind == self.device_kind:
             return
@@ -1160,6 +963,12 @@ class LiveParams:
         self.coverage_speed_ranges = loaded.coverage_speed_ranges
         self.coverage_speed_min = loaded.coverage_speed_min
         self.coverage_speed_max = loaded.coverage_speed_max
+        self.scale_frozen = loaded.scale_frozen
+        self.calibration_fit = loaded.calibration_fit
+        self.frozen = False
+        self._steering_fit_active = False
+        self._fit_samples: deque[tuple[float, float, float]] = deque(maxlen=FIT_WINDOW_SAMPLES)
+        self.fit_reason = "Need more steering samples"
         self.legacy_fit = loaded.legacy_fit
         self.end_validation()
         self.P = np.diag(self._gates["P_init"])

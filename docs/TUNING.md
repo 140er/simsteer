@@ -24,7 +24,7 @@ A fresh setup, in order:
    to accept it; wrong FOV means wrong geometry and a plan that veers
    off the road. Camera converges LiveCalib (pitch/yaw/height) and
    Steering first verifies direction from manual left and right bends,
-   then converges LiveParams (the rack fit) while SimSteer drives.
+   then measures and freezes LiveParams (the rack fit).
 2. The Check scores the drive. It passes, or names the step to redo:
    weaving, full-lock steering or a steering model that mispredicts the
    wheel point at Steering; model speed that disagrees with the game
@@ -154,44 +154,43 @@ model demand; `last_target_wheel` includes compensation.
 
 ---
 
-## LiveParams — RLS steering fit
+## LiveParams — measured steering fit
 
-LiveParams learns the inverse steering-rack model online:
+LiveParams uses the inverse steering-rack mapping:
 
 ```
 axis = a·wheel + b·wheel·v² + c
 ```
 
-- **a** — axis per radian of wheel at low speed (the base ratio).
-- **b** — speed-stiffness; how much more axis the same wheel needs at
-  highway speed (ETS2's variable-ratio rack). For the vJoy wheel device
-  this is ~0 (linear).
-- **c** — small constant axis bias.
+The guided **Steering** step is the only automatic scale writer. It collects
+lag-matched observations, then solves `axis - b·wheel·v² - c = a·wheel`
+by least squares through the origin. It requires at least 100 samples,
+at least 10 excited samples in each turn direction, wheel RMS of at least
+0.003 rad, a plausible signed gain, and residual RMS no greater than
+0.035 axis and 25% of signal RMS. Rejected fits keep collecting and show why.
+The bounded sample window lets poor data age out.
 
-It's our analog of openpilot's `paramsd` (which estimates `steerRatio` +
-`stiffnessFactor`). Per-(game, device) — a gamepad fit and a wheel fit
-are stored separately.
+**b** stays at the signed per-device profile seed: at one speed `wheel`
+and `wheel·v²` are collinear, so a short drive cannot reliably separate
+two gains. **c** remains the separate axis bias; the solve never estimates
+an intercept. A successful measurement installs **a** and **b** once and
+persists their freeze per game/device. Engaged driving, manual driving
+outside Steering, interventions, the probe, Check and session saves cannot
+adapt the scale. The bounded, leaky trim integrator still corrects residuals.
 
 | Control | Effect |
 |---|---|
-| **a / b / c sliders** | Manually seed the fit. RLS keeps refining unless locked. |
-| **Lock fit** | Freeze a/b/c — both RLS and intervention learning stop. |
-| **Flip sign** | Negate a and b. In telemetry games this mirrors AI steering immediately; Recalibrate to undo. |
-| **Reset RLS** | Back to the per-(game, device) **seed** (e.g. ETS2 gamepad a=3.5). |
-| **Save liveparams** | Persist current a/b/c. |
+| **a / b / c sliders** | Explicit manual overrides, saved as chosen. No online refinement. |
+| **Lock fit** | Session hold during collection; clearing it cannot unlock a measured fit. |
+| **Flip sign** | Explicitly negate a and b. Recalibrate to measure again. |
+| **Reset fit** | Start a new guided calibration when the flow is running. |
+| **Save liveparams** | Persist the current mapping and its freeze. |
 
-**Trust + off-regime protection**: once the fit has enough samples it
-flips to *trusted* (HUD `trust_level`). Trusted fits are deliberately
-stubborn — the watchdog covariance-reset and adaptive forgetting are
-**disabled when trusted**. This fixes a known runaway: a highway-trained
-fit used to corrupt itself the moment you drove off-highway (low speed,
-big wheel angles → huge innovation → watchdog reset → `a` ran from ~4 to
-~19 and never recovered). Now off-regime samples are absorbed slowly and
-wash out when you're back on the highway.
-
-**If your fit is already corrupted** (a way off its seed, truck won't
-steer or wildly oversteers): hit **Reset RLS**, then drive highway until
-trusted again.
+Valid older fits load frozen as-is, preserving existing per-device settings
+and state imports. Loading them does not invent new measurement evidence:
+the existing direction, coverage and scored Check requirements still apply.
+If a saved fit is wrong, use **R / Recalibrate**. A failed Check that identifies
+Steering also clears the fit and collects a new measurement.
 
 The guided flow's **Steering** step first asks for manual left and right
 bends. It compares model curvature and the observed input axis with
@@ -216,10 +215,14 @@ the rack fit and manual direction remain. Driver corrections are excluded
 from this guard. A replay has no device response
 and therefore stops at this measurement.
 
-After output direction is verified, the step prompts for a straight stretch,
-gentle curves, lane changes and slow turns until the fit is trusted.
-It widens the RLS gates with a per-call override during this step;
-the profile's gates stay unchanged. **Recalibrate** restarts the whole
+After output direction is verified, follow the prompts for gentle left and
+right bends. Profiles that permit passive fitting can use the player's
+telemetry during this step. Otherwise the existing engaged Steering probe
+can supply excitation, subject to all its speed, lane-change, command and
+direction gates. The sample target is always the observed game input, never
+a replacement with SimSteer's command. No game scripting or teleportation
+is involved. Sample-admission gates widen only during Steering; the profile
+stays unchanged. **Recalibrate** restarts the whole
 flow, including camera calibration and the scored Check.
 
 ---
@@ -241,7 +244,7 @@ can't see (rack-fit residual, model plan bias).
 Trim learns bias only on straights, freezing even in gentle sweepers
 (`|curvature| > 0.0015 m⁻¹`). This prevents lag-induced windup from
 returning as curve-exit overshoot. It also freezes during lane changes,
-saturation, cold/recovering RLS, intervention, and below
+saturation, uncalibrated steering, intervention, and below
 `feedback_min_speed`. The error LPF's `wheel_trim_error_lpf_alpha=0.05`
 is specified at 20 Hz and converted using elapsed time; the existing
 `wheel_trim_leak_s=60` and clip remain in force. The HUD `axis:` line shows
@@ -320,6 +323,6 @@ consecutive blocks.
 | Steers in too late | Raise **Anticipation**. |
 | Persistent drift to one side | **Axis bias**, or let closed-loop trim settle. |
 | Oversteers / wobbles in lane | Lower **Steer max** or **Authority**; check LiveParams `a` isn't inflated. |
-| Truck stopped steering / wild oversteer after off-highway | LiveParams corrupted → **Reset RLS**, reconverge on highway. |
+| Truck stopped steering / wild oversteer after off-highway | Saved steering fit is unsuitable → **Recalibrate**, then repeat Steering and Check. |
 | Lane-change state ends too soon | Raise **State window** to extend steering, calibration and HUD gating. |
 | Won't engage | Calibration not trusted yet (drive more), low FPS (DirectML), or no telemetry. |

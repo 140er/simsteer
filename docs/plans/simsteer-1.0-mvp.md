@@ -59,7 +59,7 @@ where they change a phase's completion evidence, the table says so.
 | 2D: Further telemetry | 2C and confirmed games available for validation | Le Mans Ultimate and the other supported games have documented telemetry checks and real-drive evidence; unvalidated profiles stay marked untested. |
 | 3A: Actionable checks | 2D and 0G | Model, driver, rendering and game checks identify fixes; repeated fixes leave the same valid state. The driver installer is pinned and hash-checked, installs only the selected backend and fails loudly; binding checks read neutral back from the device; checks pass from both shipped entry points (FE-09). |
 | 3B: Unified setup | 3A and 3C | Game, Device, Checks, FOV and Bind steps resume after interruption and expose calibration status and recalibration. |
-| 3C: Guided calibration | 1B; integrate profiles from 2A; 0D, 0E and 0F | FOV, Camera, Steering and Check stages resume per game/device; inversion is corrected and saved; a two-minute scored drive passes or identifies what to redo. Check returns PASS, FAIL or INSUFFICIENT_EVIDENCE, scores bias and spread, judges a frozen fit, and FAILED removes engagement (FE-08). The FOV step holds its accuracy below 20 Hz (FE-06); Camera reports why it is blocked and ends instead of waiting forever (FE-07). Real-game lanes run in the supervised session (FE-15). |
+| 3C: Guided calibration | 1B; integrate profiles from 2A; 0D, 0E and 0F | FOV, Camera, Steering and Check stages resume per game/device; inversion is corrected and saved; a two-minute scored drive passes or identifies what to redo. Steering collects excited left/right samples, fits a through the origin with b held at its profile seed and c separate, then persists a per-game/device freeze; ordinary driving cannot change the scale. Check returns PASS, FAIL or INSUFFICIENT_EVIDENCE, scores bias and spread, judges a frozen fit, and FAILED removes engagement (FE-08). The FOV step holds its accuracy below 20 Hz (FE-06); Camera reports why it is blocked and ends instead of waiting forever (FE-07). Real-game lanes run in the supervised session (FE-15). |
 | 3D: Legacy removal | 3B | Golden-output parity passes; `pilot/`, obsolete debug tools and launch paths are removed; source and release docs use the replacement flow. Legacy launchers go earlier (FE-22) and tracked calibration files earlier still (FE-10). |
 | 4A: Physical input | 1A and 1C hardware evidence | Wheel, pedals and engage buttons work in the background, with range, inversion, deadband and disconnect tests. |
 | 4B: vJoy handover | 2C and 4A; 0I and 0J | Manual input passes through; brake and steering overrides disengage safely; throttle override and the handover ramp work in real driving. One output owner writes every device and expires stale commands (FE-12); a device swap keeps the old device on failure (FE-11); device-output bench lanes cover takeovers, loss and stalls (FE-13). |
@@ -346,8 +346,11 @@ The status column is a snapshot; live PR status is on the PR pages.
   references now, delete the tree in 3D, bring README, SETUP, RELEASE,
   ARCHITECTURE and this plan's status up to V0.12, and add a short
   contributor contract with the FE-19 checklist.
-- **FE-23.** Steering-fit identifiability: wheel and wheel·v² are collinear
-  at constant speed; decide whether intervention learning is a takeover.
+- **FE-23.** Steering-fit identifiability: the guided Steering measurement
+  holds b at its profile seed because wheel and wheel·v² are collinear at
+  constant speed. It fits a through the origin, rejects weak or inconsistent
+  data, and persists the freeze. Interventions pause trim without learning.
+  Old fits are frozen as-is; recalibration is required for a new measurement.
 - **FE-24.** Curvature law: adopt the pinned upstream law or drop the
   "direct port" claim and document the delay settings.
 - **FE-25.** Camera resolution guidance: HFOV ≤ 2·atan(W/1820), and pad

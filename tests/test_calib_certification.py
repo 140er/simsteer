@@ -57,6 +57,7 @@ def test_required_sparse_measurement_cannot_disappear():
 
 def test_check_uses_held_out_frames_without_refitting():
     lp = LiveParams(lag_frames=1)
+    lp.begin_steering_fit()
     train_rack(lp, a=8.0, b=0.0, frames=range(1000))
     flow = new_flow(lp=lp, persist=False)
     flow._enter(Step.CHECK)
@@ -68,14 +69,15 @@ def test_check_uses_held_out_frames_without_refitting():
     assert lp.predictions > flow._pred_seen
 
 
-@pytest.mark.parametrize("one_sided", [False, True], ids=["single-speed", "one-sided"])
-def test_sample_count_without_excitation_is_not_trusted(one_sided):
+def test_sample_count_without_both_turns_is_not_trusted():
     lp = LiveParams(lag_frames=0)
+    lp.begin_steering_fit()
     for i in range(1000):
-        wheel = 0.02 if one_sided else 0.02 * math.sin(i / 40)
-        speed = 15 + 5 * math.sin(i / 100) if one_sided else 22.0
+        wheel = 0.02
+        speed = 15 + 5 * math.sin(i / 100)
         lp.update(10 * wheel, speed, wheel)
     assert lp.samples >= 100
+    assert not lp.finish_steering_fit()
     assert not lp.trusted()
 
 
@@ -195,11 +197,12 @@ def test_missing_and_nonfinite_lane_samples_keep_the_denominator():
 
 def test_trust_coverage_survives_reload_and_reset_clears_it():
     lp = LiveParams(game="ets2", device_kind="gamepad", lag_frames=0)
+    lp.begin_steering_fit()
     for speed in (12.0, 24.0):
         for i in range(400):
             wheel = 0.02 * math.sin(i / 30)
             lp.update(10 * wheel, speed, wheel)
-    assert lp.trusted()
+    assert lp.finish_steering_fit() and lp.trusted()
     lp.save()
     loaded = LiveParams(game="ets2", device_kind="gamepad")
     assert loaded.trusted() and loaded.coverage == lp.coverage
