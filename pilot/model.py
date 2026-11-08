@@ -33,11 +33,18 @@ VISION_PATH = model_path("driving_vision.onnx")
 POLICY_PATH = model_path("driving_policy.onnx")
 
 
+# Same CPU cap as simsteer.core.model: ORT's default of one intra-op
+# thread per core starves the game at 20 Hz.
+ORT_INTRA_OP_THREADS = 3
+
+
 def _make_session(path: Path, providers: list[str]) -> ort.InferenceSession:
     if not path.exists():
         raise FileNotFoundError(
             f"{path} missing — run `python tools/fetch_model.py`")
-    return ort.InferenceSession(str(path), providers=providers)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = ORT_INTRA_OP_THREADS
+    return ort.InferenceSession(str(path), sess_options=options, providers=providers)
 
 
 class DrivingModel:
@@ -73,14 +80,14 @@ class DrivingModel:
 
     def step(self, img: np.ndarray, big_img: np.ndarray | None = None,
              desire: np.ndarray | None = None,
-             traffic_convention: tuple[float, float] = (0.0, 1.0),
+             traffic_convention: tuple[float, float] = (1.0, 0.0),
              ) -> tuple[np.ndarray, np.ndarray]:
         # traffic_convention: openpilot's modeld sets index `int(is_rhd)`
-        # to 1.0. So:
-        #   (0, 1)  =  is_rhd False  =  drive on the RIGHT  (US, EU, AC stock tracks)
-        #   (1, 0)  =  is_rhd True   =  drive on the LEFT   (UK, Japan, AU)
-        # We had (1, 0) hardcoded — telling the model "we drive on the
-        # left" which biases its lane targeting. Default flipped to (0, 1).
+        # to 1.0 (is_rhd = driver sits on the right = left-side traffic):
+        #   (1, 0)  =  is_rhd False  =  traffic on the RIGHT  (US, EU, AC stock tracks)
+        #   (0, 1)  =  is_rhd True   =  traffic on the LEFT   (UK, Japan, AU)
+        # An earlier version of this table was inverted, and the (0, 1)
+        # default it justified told the model to drive on the left.
         """Run one inference step. Returns (vision_out_flat, policy_out_flat)
         as float32 numpy arrays of shapes (1576,) and (1000,)."""
         if big_img is None:
