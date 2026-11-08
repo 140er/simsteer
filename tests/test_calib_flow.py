@@ -75,6 +75,15 @@ class FakeLiveParams:
     def end_validation(self):
         self.validation_model = None
 
+    def begin_steering_fit(self):
+        pass
+
+    def end_steering_fit(self):
+        pass
+
+    def finish_steering_fit(self):
+        return self.trusted()
+
     def trusted(self) -> bool:
         return max(self.samples, self.session_samples) >= TRUSTED_MIN_SAMPLES
 

@@ -31,7 +31,7 @@ offset). An earlier PID was removed for fighting LiveParams during
 transients — this trim is built to specifically *not* re-create
 that failure mode: filtered, bounded bias correction + 60 s leak τ,
 frozen during every transient regime
-(corners, lane changes, saturation, intervention, cold RLS, low
+(corners, lane changes, saturation, intervention, uncalibrated steering, low
 speed), and hard-clipped to ±wheel_trim_clip so it can only nudge.
 The separate tire-slip feed-forward starts neutral and learns only
 from sustained measured wheel/yaw curvature. It never changes the rack.
@@ -157,7 +157,7 @@ class ControllerConfig:
     # earlier PID was removed for fighting LiveParams during
     # transients — this version filters error, bounds output and freezes
     # during every transient regime (corners, lane changes,
-    # saturation, intervention, cold RLS, low speed). Output is
+    # saturation, intervention, uncalibrated steering, low speed). Output is
     # hard-clipped to ±wheel_trim_clip so even if it goes wrong it
     # can only nudge — not swing the axis the wrong way like the
     # old PID could.
@@ -388,8 +388,6 @@ class LateralController:
             return "lc"
         if max(abs(axis), abs(self.last_axis)) >= 0.85 * self.cfg.steer_max:
             return "sat"
-        if self.live_params._consecutive_bad_fit > 10:
-            return "rls-bad"
         if not self.live_params.trusted():
             return "cold"
         if self.live_params.clock() - self.live_params.last_intervened_ts < 1.0:

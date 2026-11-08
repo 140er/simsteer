@@ -742,7 +742,7 @@ class Tuner:
             if self.live_params:
                 lp = self.live_params
                 fit = f"a {lp.a_linear:+.2f}  b {lp.b_quad:+.4f}  c {lp.c_bias:+.3f}  n {lp.samples:,}"
-                if lp.frozen:
+                if lp.locked:
                     fit += "  LOCKED"
             self._live.configure(
                 text=f"{label}    Look {self.ctrl_cfg.lookahead_s:.2f} s    {fit}"
@@ -840,6 +840,9 @@ class Tuner:
         self._persist(self.settings)
 
     def _reset_liveparams(self):
+        if self.calib_flow is not None:
+            self.calib_flow.request_restart("Reset fit clicked")
+            return
         self.live_params.reset()
         self._persist(self.live_params)
         self._sync_controls(force_obj=self.live_params)

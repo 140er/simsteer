@@ -1029,7 +1029,7 @@ def _build_hud_state(*, pad, view_mode, fps, v_real, v_ego, settings,
         fit_b=live_params.b_quad,
         fit_c=live_params.c_bias,
         fit_samples=max(live_params.samples, live_params.session_samples),
-        fit_locked=live_params.frozen,
+        fit_locked=live_params.locked,
         dev_lines=dev_lines,
     )
 

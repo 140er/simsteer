@@ -62,13 +62,13 @@ axis     = clip(axis_ff + axis_trim + axis_bias, ±steer_max)
 
 | Module | Learns | openpilot analog |
 |---|---|---|
-| `liveparams.py` | inverse steering rack `axis = a·wheel + b·wheel·v² + c`, via RLS, per (game, device) | `selfdrive/locationd/paramsd.py` (`steerRatio`, `stiffnessFactor`) |
+| `liveparams.py` | inverse steering rack `axis = a·wheel + b·wheel·v² + c`: Steering-only origin least squares for a, seeded b, separate c; persisted freeze per (game, device) | `selfdrive/locationd/paramsd.py` (`steerRatio`, `stiffnessFactor`) |
 | `livecalib.py` | camera mount pitch / yaw / height, block-aggregated | `selfdrive/locationd/calibrationd.py` |
 
-Both are slow, long-horizon estimators. LiveParams' watchdog reset and
-adaptive forgetting are **disabled once the fit is trusted**, so a good
-highway fit isn't corrupted by a short off-regime detour (the failure we
-hit and fixed).
+LiveCalib aggregates camera observations over time. LiveParams collects only
+inside Steering, installs a qualified measurement once, and persists its
+freeze. Driving and interventions observe the fit without adapting it;
+Check continues to judge held-out observations.
 
 ## Direct openpilot ports
 
@@ -78,7 +78,7 @@ hit and fixed).
 - **`desired_curvature_lag_adjusted`** (`postprocess.py`) — openpilot's
   `get_lag_adjusted_curvature`: lag-corrected pure-pursuit + rate limit,
   including the fixed `+0.2 s for other delays` buffer.
-- **LiveParams / LiveCalib** — see table above.
+- **LiveCalib** — see table above.
 - **Decode math** — plan/lane/lead tensor layout matches openpilot's
   model output heads.
 
@@ -122,9 +122,10 @@ slow learners.
 
 The principle: only close a loop on a signal that's **independent** of
 the thing you're adjusting. Camera intrinsics, actuator delay, and gain
-are set once (openpilot treats them as per-car constants); only the rack
-fit and camera *pose* are learned online, because those have clean,
-independent observations (telemetry wheel angle, model pose vector).
+are set once (openpilot treats them as per-car constants). The rack fit is
+measured only in the guided Steering step and frozen; ordinary driving
+never trains on its own commands. Camera *pose* still learns from the
+model pose vector. Explicit tuner scale edits remain available.
 
 The pose is only independent when the warp applies all of it. The
 default simple warp shifts the horizon for pitch and ignores yaw, so

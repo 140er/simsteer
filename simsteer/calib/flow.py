@@ -116,13 +116,10 @@ SAVE_EVERY_S = 5.0
 MAX_DT_S = 0.25
 CAMERA_NO_PROGRESS_S = 180.0
 
-# LiveParams gates while Steering runs, from the old guided routine:
-# admit slalom samples, let `a` leave a wrong seed, adapt faster. Passed
-# per call, so the per-game profile stays untouched.
+# Admit gentle calibration excitation without changing the profile defaults.
 STEERING_GATE_OVERRIDE: dict = {
     "max_axis_spread_for_fit": 0.30,
     "max_innovation_cold": 1.0,
-    "Q_diag": (1e-6, 1e-9, 1e-5),
     "min_speed_mps": 3.0,
 }
 
@@ -753,7 +750,7 @@ class CalibFlow:
             return
         samples = self._lp_samples()
         self._rate.add(o.now, samples)
-        if self.lp.trusted() or getattr(self.lp, "legacy_fit", False):
+        if self.lp.finish_steering_fit():
             print(f"calib: steering done (a={self.lp.a_linear:.3f} "
                   f"b={self.lp.b_quad:.5f} c={self.lp.c_bias:+.4f})")
             self._advance()
@@ -853,6 +850,10 @@ class CalibFlow:
     def _set_step(self, step: Step) -> None:
         if step is not Step.CHECK:
             self.lp.end_validation()
+        if step is Step.STEERING:
+            self.lp.begin_steering_fit()
+        else:
+            self.lp.end_steering_fit()
         self.step = step
         self._rate.clear()
         self.save()
@@ -1218,6 +1219,8 @@ class CalibFlow:
             else:
                 if self.step is Step.CHECK:
                     self.lp.begin_validation(self._check_model)
+        if self.step is Step.STEERING:
+            self.lp.begin_steering_fit()
         if self.step is Step.STEERING and not self.steering_fit:
             self._enter(Step.CHECK)
         elif self.steering_fit:
