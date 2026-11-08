@@ -39,6 +39,12 @@ from simsteer.core.model_identity import actual_model_identity
 VISION_PATH = model_path("driving_vision.onnx")
 POLICY_PATH = model_path("driving_policy.onnx")
 
+# ORT's CPU execution provider defaults to one intra-op thread per core,
+# which saturates the whole machine at 20 Hz even though a few threads
+# keep a step well inside the 50 ms frame budget. The game needs those
+# cores, so cap it.
+ORT_INTRA_OP_THREADS = 3
+
 
 def _make_session(path: Path, providers: list[str]) -> ort.InferenceSession:
     if not path.exists():
@@ -46,7 +52,9 @@ def _make_session(path: Path, providers: list[str]) -> ort.InferenceSession:
             f"{path} missing — run `python tools/fetch_model.py`")
     available = set(ort.get_available_providers())
     providers = [p for p in providers if p in available] or ["CPUExecutionProvider"]
-    return ort.InferenceSession(str(path), providers=providers)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = ORT_INTRA_OP_THREADS
+    return ort.InferenceSession(str(path), sess_options=options, providers=providers)
 
 
 class DrivingModel:
