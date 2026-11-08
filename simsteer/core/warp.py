@@ -132,6 +132,23 @@ def camera_intrinsics(image_w: int, image_h: int, fov_h_deg: float,
     ], dtype=np.float64)
 
 
+def source_sampling_ratio(image_w: int, fov_h_deg: float,
+                          bigmodel: bool = False) -> float:
+    """Nominal source pixels per model luma pixel at the optical axis.
+
+    The intrinsic swap scales by f_camera / f_model. Square pixels make
+    this a linear ratio in both axes, independent of capture height and
+    camera height. Count the 512x256 view before YUV packing, not its
+    256x128 tensor planes. Crop rounding and perspective rotation can
+    change local sampling; this does not measure padding or coverage.
+    """
+    if image_w <= 0 or not 0.0 < fov_h_deg < 180.0:
+        raise ValueError("sampling needs a positive width and 0 < HFOV < 180")
+    model_fl = SBIGMODEL_FL if bigmodel else MEDMODEL_FL
+    camera_fl = (image_w / 2.0) / math.tan(math.radians(fov_h_deg) / 2.0)
+    return camera_fl / model_fl
+
+
 def get_warp_matrix(rpy_calib: np.ndarray | tuple[float, float, float],
                     camera_K: np.ndarray,
                     bigmodel: bool = False) -> np.ndarray:

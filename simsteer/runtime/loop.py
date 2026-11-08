@@ -58,7 +58,7 @@ from simsteer.core.lane_change import ManualLaneChange
 from simsteer.core.model import DrivingModel
 from simsteer.core.postprocess import decode
 from simsteer.core.steering import STEERING_TIMEOUT_S, SteeringTarget
-from simsteer.core.preprocess import FrameQueue, model_views, yuv6_to_bgr
+from simsteer.core.preprocess import FrameQueue, model_views, sampling_warning, yuv6_to_bgr
 from simsteer.games.base import GameProfile, get_profile
 from simsteer.paths import data_dir
 from simsteer.state import flush_state, take_state_warnings, with_background_saves
@@ -274,6 +274,7 @@ def run(settings: Settings, game: GameProfile | str, *,
     banner_text = ""
     banner_color = (200, 200, 200)
     banner_until = 0.0
+    sampling_warned = False
     was_engaged_last_frame = False
     last_device_axis: float | None = None
     was_measuring = False
@@ -504,6 +505,12 @@ def run(settings: Settings, game: GameProfile | str, *,
                             flow.feed_fov(frame, vx, v_real, actual_yaw,
                                           time.perf_counter)
                             fov_vision_s = flow.fov_solver.vision_s - before
+                        if flow.step is not Step.FOV and not sampling_warned:
+                            notice = sampling_warning(frame.shape[1], calib.fov_h_deg)
+                            if notice and not current_fault and now_perf >= banner_until:
+                                print(notice)
+                                set_banner(notice, COL_ACCENT_BLUE, 10.0)
+                                sampling_warned = True
                         camera_learning = flow.camera_learning
                         if camera_learning:
                             live_calib.update(

@@ -28,10 +28,19 @@ import cv2
 import numpy as np
 
 from simsteer.core.constants import FRAME_SKIP, MODEL_H, MODEL_W, SRC_H, SRC_W
-from simsteer.core.warp import warp_to_model
+from simsteer.core.warp import source_sampling_ratio, warp_to_model
 
 if TYPE_CHECKING:
     from simsteer.core.calibration import Calibration
+
+
+def sampling_warning(image_w: int, fov_h_deg: float) -> str | None:
+    """Advisory only: the narrow view benefits from about 1.5:1 sampling."""
+    ratio = source_sampling_ratio(image_w, fov_h_deg)
+    if ratio < 1.5 - 1e-12:
+        return (f"Low capture detail ({ratio:.2f}:1, recommend 1.5:1): "
+                "use a higher game resolution or narrower in-game FOV")
+    return None
 
 
 def make_warp_matrix(src_w: int, src_h: int) -> np.ndarray:
