@@ -164,8 +164,8 @@ class ControllerConfig:
     # controller to be mid-lane-change for trim and calibration gating.
     lane_change_desire_threshold: float = 0.3
     # How long SimSteer treats a manual request as mid-lane-change for
-    # steering, calibration and HUD state. The model receives one
-    # rising-edge pulse per request; a longer window adds no model input.
+    # steering, calibration and HUD state, unless the model finishes first.
+    # The model receives one rising-edge pulse per request.
     lane_change_hold_s: float = 2.5
 
     # ----- LONGITUDINAL -----

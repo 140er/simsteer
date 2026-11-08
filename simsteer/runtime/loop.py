@@ -55,6 +55,7 @@ from simsteer.core.control import (
 )
 from simsteer.core.learners.livecalib import CalStatus, CameraBlockedReason, LiveCalib
 from simsteer.core.learners.liveparams import LiveParams
+from simsteer.core.lane_change import ManualLaneChange
 from simsteer.core.model import DrivingModel
 from simsteer.core.postprocess import decode
 from simsteer.core.preprocess import FrameQueue, model_views, yuv6_to_bgr
@@ -262,8 +263,7 @@ def run(settings: Settings, game: GameProfile | str, *,
     window_open = False
     log_f = open(log_path, "w", encoding="utf-8") if log_path else None
     blocked_reason = ""
-    lane_change_idx: int | None = None
-    lane_change_until = 0.0
+    lane_change = ManualLaneChange()
     banner_text = ""
     banner_color = (200, 200, 200)
     banner_until = 0.0
@@ -325,6 +325,7 @@ def run(settings: Settings, game: GameProfile | str, *,
         lat_ctrl.reset()
         long_ctrl.reset()
         probe.reset()
+        lane_change.reset()
         last_device_axis = None
         was_measuring = False
         if was_engaged:
@@ -398,7 +399,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                 now_perf = clock.now()
                 dt = max(1e-3, now_perf - last)
                 now_wall = now_perf
-                lane_change_active = (lane_change_idx is not None and now_wall < lane_change_until)
+                lane_change.expire(now_wall)
                 decoded = display_decoded
                 vx = None
                 ai_steer = steer = ai_throttle = ai_brake = throttle_out = brake_out = 0.
@@ -452,18 +453,20 @@ def run(settings: Settings, game: GameProfile | str, *,
                         nav_desire_idx = nav.tick(v_ego=v_ego, dt=dt, now_t=now_perf)
                         if hasattr(tel, "nav_distance_m"):
                             nav.update_destination(tel.nav_distance_m(), tel.nav_time_s())
-                        effective_idx = lane_change_idx if lane_change_active else nav_desire_idx
+                        effective_idx = lane_change.model_desire(nav_desire_idx)
                         if effective_idx is not None:
                             desire_vec = np.zeros(DESIRE_LEN, dtype=np.float32)
                             desire_vec[effective_idx] = 1.0
                         else:
                             desire_vec = None
-                            lane_change_idx = None
                         t_model = time.perf_counter()
                         vision_out, policy_out = model.step(img_narrow, img_wide, desire=desire_vec)
                         t_ctrl = time.perf_counter()
                         decoded = decode(vision_out, policy_out)
                         require_finite("decoded", **vars(decoded))
+                        if lane_change.observe(decoded.desire_state,
+                                               ctrl_cfg.lane_change_desire_threshold):
+                            set_banner("Lane change complete", COL_ACCENT_BLUE, 1.5)
                         vx = (float(decoded.pose[0])
                               if decoded.pose is not None and len(decoded.pose) > 0
                               else None)
@@ -494,14 +497,14 @@ def run(settings: Settings, game: GameProfile | str, *,
                             speed=v_real, engaged=bool(pad and pad.engaged),
                             manual_override=manual.steer_override,
                             user_axis=user_steer,
-                            lane_change=lane_change_active or lat_ctrl.last_in_lane_change,
+                            lane_change=lane_change.active or lat_ctrl.last_in_lane_change,
                             dt=dt)
                         if output_fault and pad is not None:
                             stop_output("Output direction changed")
                             current_fault = "Output direction changed"
                         ai_steer = lat_ctrl.compute(
                             decoded, v_ego, actual_wheel_angle=wheel_angle,
-                            lane_change_command_active=lane_change_active, dt=dt,
+                            lane_change_command_active=lane_change.active, dt=dt,
                             wheel_sign=flow.steering_sign)
                         require_finite("lateral", output=ai_steer)
                         ai_steer = flow.device_axis(ai_steer)
@@ -509,7 +512,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                         if pad is not None and flow.ai_steering_ready and not manual.steer_override:
                             steer += probe.tick(
                                 dt=dt, ai_axis=steer, v_ego=v_real,
-                                in_lane_change=lane_change_active,
+                                in_lane_change=lane_change.active,
                                 engaged=pad.engaged,
                                 lp_trusted=live_params.trusted(),
                                 calibrating=flow.probe_wanted)
@@ -556,7 +559,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                                     speed=v_real if tel.available else None,
                                     observed=game_steer, user_axis=user_steer, dt=dt,
                                     manual_override=manual.steer_override or pad.engaged
-                                    or lane_change_active)
+                                    or lane_change.active)
                                 require_finite("output_check", steering=steer)
                                 pad.set_steering(steer, force=True)
                                 throttle_out = brake_out = 0.0
@@ -619,7 +622,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                         model_curvature=lat_ctrl.last_curvature,
                         lane_offset=_lane_offset(decoded), axis=float(steer),
                         driving=engaged_now or pad is None, engaged=engaged_now,
-                        lane_change=(lane_change_active
+                        lane_change=(lane_change.active
                                      or lat_ctrl.last_in_lane_change),
                         telemetry_ok=tel.available))
                 if flow.direction.ready and not direction_was_ready:
@@ -687,12 +690,12 @@ def run(settings: Settings, game: GameProfile | str, *,
                                 set_banner("ENGAGED", COL_ACCENT_GREEN, 1.5)
                                 print("-> ENGAGED")
                     elif key == KEY_NUMPAD4 and hk("lane_change_left"):
-                        lane_change_idx = DESIRE_LANE_CHANGE_LEFT
-                        lane_change_until = now + ctrl_cfg.lane_change_hold_s
+                        lane_change.request(DESIRE_LANE_CHANGE_LEFT, now,
+                                            ctrl_cfg.lane_change_hold_s)
                         print("lane change LEFT commanded")
                     elif key == KEY_NUMPAD6 and hk("lane_change_right"):
-                        lane_change_idx = DESIRE_LANE_CHANGE_RIGHT
-                        lane_change_until = now + ctrl_cfg.lane_change_hold_s
+                        lane_change.request(DESIRE_LANE_CHANGE_RIGHT, now,
+                                            ctrl_cfg.lane_change_hold_s)
                         print("lane change RIGHT commanded")
                     elif key == KEY_PAGEUP and hk("nav_queue_left"):
                         nav.queue(ManeuverDir.LEFT)
@@ -822,8 +825,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                     pad=pad, view_mode=view_mode, fps=fps, v_real=v_real,
                     v_ego=v_ego, settings=settings, banner_text=banner_text,
                     banner_color=banner_color, banner_until=banner_until,
-                    blocked_reason=blocked_reason, lane_change_idx=lane_change_idx,
-                    lane_change_active=lane_change_active, manual=manual,
+                    blocked_reason=blocked_reason, lane_change_idx=lane_change.index,
+                    lane_change_active=lane_change.active, manual=manual,
                     probe=probe, lat_ctrl=lat_ctrl, long_ctrl=long_ctrl,
                     live_params=live_params, live_calib=live_calib,
                     ctrl_cfg=ctrl_cfg, flow=flow,
