@@ -222,6 +222,9 @@ class ControllerConfig:
     # under/overshoots. Small by design — the FF carries most of the
     # work, this is a trim.
     speed_p_gain: float = 0.3
+    # Residual telemetry/vision speed correction after camera calibration.
+    # 1.0 disables; the hard ceiling also bounds persisted warm starts.
+    speed_scale_max: float = 1.3
     # Symmetric deadband around 0 m/s^2 — avoids the actuator hunting
     # between throttle and brake when the desired accel is near zero
     # (cruise on flat road). Below this the controller commands 0/0.
@@ -310,7 +313,8 @@ class ControllerConfig:
                         and 0 < cfg.understeer_steady_fraction < 1
                         and cfg.feedback_min_speed > 0
                         and cfg.wheel_trim_max_curvature > 0
-                        and cfg.curvature_anticipation_cap_min_curvature > 0):
+                        and cfg.curvature_anticipation_cap_min_curvature > 0
+                        and 1.0 <= cfg.speed_scale_max <= 1.4):
                     raise ValueError("invalid controller limits")
             except (OSError, ValueError, TypeError, OverflowError):
                 state_warning(path, "unreadable; using defaults")
@@ -634,6 +638,7 @@ class LongitudinalController:
 
     def __init__(self, cfg: ControllerConfig | None = None) -> None:
         self.cfg = cfg or ControllerConfig()
+        self.speed_scale = 1.0
         self.last_v_target = 0.0
         self.last_a_target = 0.0
         self.last_a_cmd = 0.0
@@ -670,7 +675,8 @@ class LongitudinalController:
     def compute(self, decoded: Decoded, v_ego: float) -> tuple[float, float]:
         cfg = self.cfg
         require_finite("longitudinal", plan=decoded.plan, speed=v_ego,
-                       leads=decoded.leads, probability=decoded.lead_prob, config=vars(cfg))
+                       leads=decoded.leads, probability=decoded.lead_prob, config=vars(cfg),
+                       scale=self.speed_scale)
 
         v_plan = decoded.plan[:, 3]   # vel_x over the 33 plan timesteps
         a_plan = decoded.plan[:, 6]   # accel_x
@@ -682,6 +688,12 @@ class LongitudinalController:
         t = max(0.0, float(cfg.lookahead_s) + float(cfg.long_anticipation_s))
         v_target = float(np.interp(t, self._T_IDXS, v_plan))
         a_target = float(np.interp(t, self._T_IDXS, a_plan))
+
+        # Convert only longitudinal targets, before corner/lead limits.
+        # Keep the raw decoded plan/pose available to camera and rack learning.
+        scale = min(max(1.0, self.speed_scale), max(1.0, cfg.speed_scale_max), 1.4)
+        v_target *= scale
+        a_target *= scale
 
         # Corner anticipation: find the tightest upcoming planned
         # curvature within `corner_scan_horizon_s` and override v_target

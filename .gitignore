@@ -32,6 +32,8 @@ logs/
 /calibration_*.json
 /controller.json
 /controller_*.json
+/longitudinal.json
+/longitudinal_*.json
 /calibflow*.json
 /settings.json
 /state-import.json
