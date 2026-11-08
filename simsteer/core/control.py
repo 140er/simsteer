@@ -342,6 +342,7 @@ class LateralController:
         self.last_curvature = 0.0
         self.last_target_wheel = 0.0
         self.last_axis = 0.0
+        self.last_ff = 0.0
         self.last_in_lane_change = False
         self.last_authority = 1.0
         # Previous-frame desired curvature (pre-authority, pre-scale).
@@ -376,6 +377,7 @@ class LateralController:
         self.last_curvature = 0.0
         self.last_target_wheel = 0.0
         self.last_axis = 0.0
+        self.last_ff = 0.0
         self.last_in_lane_change = False
         self.last_authority = 1.0
         self.last_desired_k_raw = 0.0
@@ -496,6 +498,7 @@ class LateralController:
             self.last_curvature = 0.0
             self.last_target_wheel = 0.0
             self.last_axis = 0.0
+            self.last_ff = 0.0
             self.last_in_lane_change = False
             self.last_authority = 0.0
             self._curve_history.clear()
@@ -563,6 +566,7 @@ class LateralController:
         # stiffness term so the inverse demands more axis at speed.
         axis_ff = self.live_params.axis_for_wheel_angle(
             target_wheel, v_ego=v_ego)
+        self.last_ff = axis_ff
 
         # Closed-loop steady-state trim. Corrects drift the FF stack
         # can't see (rack-fit residual, model plan offset). The LPF

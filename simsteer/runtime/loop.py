@@ -23,7 +23,6 @@ Two things this loop fixes vs a naive port of v1's monolith:
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
 import sys
@@ -65,6 +64,7 @@ from simsteer.paths import data_dir
 from simsteer.state import flush_state, take_state_warnings, with_background_saves
 from simsteer.state_import import import_legacy_state
 from simsteer.runtime.capture import Capture, CaptureConfig
+from simsteer.runtime.diagnostics import RunDiagnostics, SLOW_MODEL_BANNER
 from simsteer.runtime.fov import FovSolver, model_vision
 from simsteer.runtime.faults import neutral_decoded
 from simsteer.runtime.output.base import DeviceManager
@@ -268,6 +268,7 @@ def run(settings: Settings, game: GameProfile | str, *,
     n_frames = 0
     window_open = False
     log_f = open(log_path, "w", encoding="utf-8") if log_path else None
+    diagnostics = RunDiagnostics(state_root, timing_log=log_timing or isinstance(clock, LiveClock))
     blocked_reason = ""
     lane_change = ManualLaneChange()
     banner_text = ""
@@ -331,6 +332,7 @@ def run(settings: Settings, game: GameProfile | str, *,
         nonlocal was_engaged_last_frame, last_stop_banner, healthy_since
         nonlocal last_control_at
         was_engaged = bool(pad and (pad.engaged or was_engaged_last_frame))
+        diagnostics.incident(reason, user_stop=user_stop and was_engaged)
         keep_bind = (preserve_bind and pad is not None and not pad.engaged
                      and getattr(pad, "binding_active", False))
         if steering_output is not None:
@@ -385,6 +387,7 @@ def run(settings: Settings, game: GameProfile | str, *,
         was_engaged_last_frame = bool(pad and pad.engaged)
         try:
             while max_frames is None or n_frames < max_frames:
+                diagnostics.begin_tick()
                 if tuner is not None:
                     restart_args = tuner.take_restart_request()
                     if restart_args:
@@ -396,6 +399,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                     set_banner(state_notice, COL_ACCENT_RED, 10.0)
                 t_grab = time.perf_counter()
                 frame = cap.grab()
+                t_captured = time.perf_counter()
                 fresh_frame = frame is not None
                 if not fresh_frame and cap.done:
                     break
@@ -594,6 +598,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                         live_calib.validate_state()
                         require_finite("command", steering=steer, throttle=throttle_out,
                                        brake=brake_out)
+                        diagnostics.control(lat_ctrl, steer - ai_steer if not manual.steer_override else 0.,
+                                            long_ctrl.speed_scale)
                         # --- Device output ---
                         last_device_axis = None
                         if pad is not None:
@@ -790,6 +796,24 @@ def run(settings: Settings, game: GameProfile | str, *,
                         if msg is not None:
                             print(msg)
 
+                diagnostics.observe(
+                    t=now - t_start, decoded=decoded, speed=v_real, yaw=actual_yaw,
+                    wheel=wheel_angle, observed_axis=game_steer, user_axis=user_steer,
+                    final_axis=steer,
+                    executor_axis=(steering_output.last_axis if steering_output is not None
+                                   else last_device_axis),
+                    engaged=engaged_now, manual=manual.steer_override or manual.long_override,
+                    intervention=live_params.last_intervened_ts, fresh=fresh_frame and pipeline_healthy,
+                    calibration=calib, camera_pose=frame_camera_pose,
+                    frame_fov=frame_fov_h_deg,
+                    output_sign=flow.output_direction.sign,
+                    counters=(t_grab, t_captured, t_warp, t_model, t_ctrl, t_render, fov_vision_s),
+                    fault=bool(current_fault))
+                if diagnostics.slow and now >= banner_until:
+                    set_banner(SLOW_MODEL_BANNER, COL_ACCENT_BLUE, 2.)
+                elif not diagnostics.slow and banner_text == SLOW_MODEL_BANNER:
+                    banner_until = 0.
+                row = None
                 if log_f is not None:
                     row = {
                         "frame": n_frames,
@@ -842,11 +866,12 @@ def run(settings: Settings, game: GameProfile | str, *,
                             model_ms=round((t_ctrl - t_model + fov_vision_s) * 1e3, 3),
                             ctrl_ms=round((t_render - t_ctrl - fov_vision_s) * 1e3, 3),
                             frame_ms=round((t_render - t_grab) * 1e3, 3))
-                    log_f.write(json.dumps(row) + "\n")
 
                 if quit_loop:
+                    diagnostics.finish(time.perf_counter(), row, log_f)
                     break
                 if headless:
+                    diagnostics.finish(time.perf_counter(), row, log_f)
                     continue
 
                 # --- Render: model view (self-aligning) or capture view ---
@@ -895,6 +920,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                     ai_throttle=ai_throttle, ai_brake=ai_brake,
                     throttle_out=throttle_out, brake_out=brake_out, nav=nav,
                     now=now)
+                if diagnostics.hud_text:
+                    hud_state.dev_lines.append((diagnostics.hud_text, (200, 200, 255)))
                 hud_renderer.draw(overlay, hud_state, mode=settings.hud_mode)
                 if settings.hud_mode == "dev":
                     draw_developer_panel(
@@ -904,6 +931,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                 if tuner is not None:
                     tuner.update_state(hud_state)
                 show_scaled(overlay, settings.max_width)
+                diagnostics.finish(time.perf_counter(), row, log_f)
 
         finally:
             if steering_output is not None:
@@ -911,6 +939,7 @@ def run(settings: Settings, game: GameProfile | str, *,
             if pad is not None:
                 stop_output(user_stop=True)
                 getattr(pad, "shutdown_output", pad.disengage)()
+            diagnostics.close()
             speed_scale.save()
             live_params.save()
             live_calib.save_state(game_id)
