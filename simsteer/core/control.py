@@ -119,6 +119,10 @@ class ControllerConfig:
     # delay at 1 ms so negative values can't break the math.
     curvature_anticipation_s: float = 0.0
 
+    # Steering contribution to lateral jerk (v² * curvature rate).
+    # None retains the legacy speed-interpolated curvature rate table.
+    lat_jerk_max_mps3: float | None = 5.0
+
     # Speed-dependent steering response (variable-ratio rack in ETS2
     # and most games) is handled inside LiveParams now — it fits a
     # `b · wheel · v²` stiffness term, so `axis_for_wheel_angle(...,
@@ -332,13 +336,14 @@ class LateralController:
                 dt: float = 0.05, wheel_sign: float = 1.0) -> float:
         """Plan -> gamepad axis. `actual_wheel_angle` (rad) feeds the
         closed-loop trim integrator; pass None to disable feedback
-        for this frame. `dt` (s) is used by the integrator + leak —
+        for this frame. `dt` (s) drives curvature limiting and trim —
         defaults to 0.05 s (20 Hz) for callers that don't measure it."""
         cfg = self.cfg
         require_finite("lateral", plan=decoded.plan, desire=decoded.desire_state,
                        speed=v_ego, wheel=actual_wheel_angle, dt=dt,
                        sign=wheel_sign, config=vars(cfg), previous=self.last_desired_k_raw,
                        trim=self.axis_trim_state, error=self.lpf_wheel_error)
+        dt = max(0., dt)
         if v_ego < cfg.min_speed:
             self.last_curvature = 0.0
             self.last_target_wheel = 0.0
@@ -354,14 +359,14 @@ class LateralController:
         # too early" — without it, the moment the model first sees
         # an upcoming corner the commanded curvature snaps to its
         # target value; with it, the command ramps in over hundreds
-        # of ms even if the plan jumps. Comma's rate is speed-
-        # interpolated and gives ~850 ms turn-in at highway speed,
-        # which is what feels natural in their own car.
+        # of ms even if the plan jumps. The default jerk bound allows
+        # faster turn-in at low speed and gentler motion at high speed.
         k_raw = desired_curvature_lag_adjusted(
             decoded.plan, v_ego,
             steer_actuator_delay=cfg.lookahead_s,
             last_desired_curvature=self.last_desired_k_raw,
             extra_buffer_s=cfg.curvature_anticipation_s,
+            dt=dt, lat_jerk_max_mps3=cfg.lat_jerk_max_mps3,
         )
         self.last_desired_k_raw = k_raw
         k_total = k_raw

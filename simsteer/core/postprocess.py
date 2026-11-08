@@ -185,6 +185,8 @@ def desired_curvature_lag_adjusted(
     plan: np.ndarray, v_ego: float, steer_actuator_delay: float,
     last_desired_curvature: float = 0.0,
     extra_buffer_s: float | None = None,
+    dt: float = DT_MDL,
+    lat_jerk_max_mps3: float | None = None,
 ) -> float:
     """Lag-adjusted desired curvature, ported from openpilot's
     `selfdrive/controls/lib/drive_helpers.py:get_lag_adjusted_curvature`.
@@ -206,7 +208,8 @@ def desired_curvature_lag_adjusted(
 
     Then RATE-LIMIT relative to the previous-frame value so a step
     change in the model's plan doesn't translate into a step change
-    in steering output. The rate cap is speed-interpolated:
+    in steering output. With `lat_jerk_max_mps3`, the cap is jerk / v².
+    Otherwise the legacy rate cap is speed-interpolated:
         max_rate(v) = lerp(v, [2, 29], [0.0376, 0.0034]) 1/m/s
     Per frame at 50 ms: max change ~ 0.0019 (at 2 m/s) → 0.00017 (at
     29 m/s). At 20 m/s a 0-to-100-m-radius (κ=0.01) ramp takes ~17
@@ -217,7 +220,7 @@ def desired_curvature_lag_adjusted(
     """
     require_finite("curvature", plan=plan, speed=v_ego,
                    delay=steer_actuator_delay, previous=last_desired_curvature,
-                   buffer=extra_buffer_s)
+                   buffer=extra_buffer_s, dt=dt, jerk=lat_jerk_max_mps3)
     v = max(v_ego, MIN_SPEED)
     buf = EXTRA_LAG_BUFFER_S if extra_buffer_s is None else float(extra_buffer_s)
     delay = max(float(steer_actuator_delay) + buf, 1e-3)
@@ -238,6 +241,11 @@ def desired_curvature_lag_adjusted(
 
     desired_k = 2.0 * avg_k - cur_k
 
+    if lat_jerk_max_mps3 is not None:
+        from simsteer.core.steering import limit_curvature
+        return limit_curvature(desired_k, last_desired_curvature, v, dt,
+                               lat_jerk_max_mps3)
+
     # Rate-limit against the previous commanded curvature. This is the
     # mechanism that prevents "steers in too early": a step jump in
     # plan curvature gets ramped over many frames.
@@ -245,7 +253,7 @@ def desired_curvature_lag_adjusted(
         v, [_MAX_CURV_RATE_LO_V, _MAX_CURV_RATE_HI_V],
         [_MAX_CURV_RATE_LO, _MAX_CURV_RATE_HI],
     ))
-    max_delta = max_rate * DT_MDL
+    max_delta = max_rate * max(0., dt)
     safe_desired_k = float(np.clip(
         desired_k,
         last_desired_curvature - max_delta,
