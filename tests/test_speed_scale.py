@@ -150,6 +150,31 @@ def test_invalid_saved_value_cannot_poison_warm_start(parts, scale):
     assert fresh.update(flow, tel, 20., .05) == 1.
 
 
+def test_unhealthy_frame_holds_scale_without_learning(parts):
+    cfg, flow, tel = parts
+    learner = SpeedScale("ets2", cfg)
+    learn(learner, flow, tel)
+    value = learner.value
+    assert value > 1.1
+    for _ in range(40):
+        # A wildly different pose must not train while unhealthy.
+        assert learner.update(flow, tel, 10., .05, healthy=False) == value
+    assert learner.value == value
+    assert learner.update(flow, tel, 17.6, .05) == pytest.approx(value, abs=.0001)
+
+
+def test_scale_raises_targets_without_corner_or_lead(parts):
+    cfg, _, _ = parts
+    decoded = decoded_plan(20., 20., accel=.5)
+    plain, scaled = LongitudinalController(cfg), LongitudinalController(cfg)
+    scaled.speed_scale = 1.2
+    plain.compute(decoded, 20.)
+    scaled.compute(decoded, 20.)
+    assert plain.last_v_safe_corner > 100.  # no corner limit binds
+    assert scaled.last_v_target == pytest.approx(1.2 * plain.last_v_target)
+    assert scaled.last_a_target == pytest.approx(1.2 * plain.last_a_target)
+
+
 def test_disabled_or_calibrating_freezes_and_suspends_saved_scale(parts):
     cfg, flow, tel = parts
     learner = SpeedScale("ets2", cfg)

@@ -72,9 +72,14 @@ class SpeedScale:
         changes. Steering settings do not participate in this calibration.
         """
         ceiling = min(SPEED_SCALE_LIMIT, max(1.0, self.cfg.speed_scale_max))
-        if not healthy or not flow.calibrated or flow.camera_learning or ceiling <= 1.0:
+        if not flow.calibrated or flow.camera_learning or ceiling <= 1.0:
             self._stable_s = 0.0
             return 1.0
+        if not healthy:
+            # Hold the applied scale: dropping to 1.0 for a faulted frame
+            # would step the speed target down and brake on recovery.
+            self._stable_s = 0.0
+            return min(ceiling, max(1.0, self.value))
         key = vehicle_context(telemetry).get("vehicle") or ""
         camera = asdict(flow.calib)
         camera.pop("lateral_sign")
