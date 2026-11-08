@@ -182,11 +182,13 @@ class RunDiagnostics:
         self._pending.add(code)
 
     @contained
-    def control(self, lateral, probe_axis):
+    def control(self, lateral, probe_axis, speed_scale=1.0):
         # Called before learning or a handback can reset the controller.
         self._control = {
             "raw_k": number(lateral.last_desired_k_raw),
             "steer_authority": number(lateral.last_authority),
+            "understeer_ff": number(getattr(lateral, "last_understeer_ff", 1.0)),
+            "speed_scale": number(speed_scale),
             "feedforward_axis": number(lateral.last_ff),
             "trim_axis": number(lateral.axis_trim_state),
             "probe_axis": number(probe_axis),

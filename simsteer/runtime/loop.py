@@ -598,7 +598,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                         live_calib.validate_state()
                         require_finite("command", steering=steer, throttle=throttle_out,
                                        brake=brake_out)
-                        diagnostics.control(lat_ctrl, steer - ai_steer if not manual.steer_override else 0.)
+                        diagnostics.control(lat_ctrl, steer - ai_steer if not manual.steer_override else 0.,
+                                            long_ctrl.speed_scale)
                         # --- Device output ---
                         last_device_axis = None
                         if pad is not None:

@@ -37,7 +37,8 @@ def test_new_columns_and_original_values(monkeypatch, tmp_path):
     row = state.rows[0]
     assert {"desire_state", "lane_line_probs", "road_edge_probs", "plan_speed_mps",
             "pose_speed_mps", "lane_offset_m", "plan_curvature", "raw_k",
-            "steer_authority", "feedforward_axis", "trim_axis", "probe_axis",
+            "steer_authority", "understeer_ff", "speed_scale",
+            "feedforward_axis", "trim_axis", "probe_axis",
             "final_axis", "executor_axis", "draw_ms", "timing_stats"} <= row.keys()
     assert row["desire_state"] == [0.] * 8
     assert row["lane_line_probs"] == [.95] * 4
@@ -46,6 +47,7 @@ def test_new_columns_and_original_values(monkeypatch, tmp_path):
     assert row["plan_speed_mps"] == row["pose_speed_mps"] == 22.
     assert row["plan_curvature"] == state.decoded.plan[0, 14] / 22.
     assert row["probe_axis"] == 0.
+    assert row["understeer_ff"] == 1. and row["speed_scale"] == 1.
     assert row["final_axis"] == state.writes[0]
     assert {"cap_ms", "warp_ms", "model_ms", "ctrl_ms", "frame_ms"} <= row.keys()
     assert row["t"] == .05 and row["frame"] == 1

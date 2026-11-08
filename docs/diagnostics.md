@@ -43,8 +43,10 @@ from the display fallback on a fault or missing capture.
 
 Steering fields are `plan_curvature` (instantaneous model yaw rate / plan
 speed), `raw_k` (lag-adjusted and jerk-limited curvature before authority),
-`steer_authority`, `feedforward_axis`, `trim_axis`, `probe_axis`, `final_axis`,
-and `executor_axis`. Feed-forward and trim use game input units before the
+`steer_authority`, `understeer_ff` (tire-slip multiplier on curvature),
+`feedforward_axis`, `trim_axis`, `probe_axis`, `final_axis`, and
+`executor_axis`. `speed_scale` is the residual longitudinal speed
+correction applied to plan targets. Feed-forward and trim use game input units before the
 output sign; probe and final axis use device units. `output_sign` records the
 measured mapping, while `executor_axis` is the last submitted executor output
 or direct device command; it is `null` when no output was applied. These
