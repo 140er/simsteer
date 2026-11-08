@@ -58,7 +58,7 @@ from simsteer.core.lane_change import ManualLaneChange
 from simsteer.core.model import DrivingModel
 from simsteer.core.postprocess import decode
 from simsteer.core.steering import STEERING_TIMEOUT_S, SteeringTarget
-from simsteer.core.preprocess import FrameQueue, model_views, yuv6_to_bgr
+from simsteer.core.preprocess import FrameQueue, model_views, sampling_warning, yuv6_to_bgr
 from simsteer.games.base import GameProfile, get_profile
 from simsteer.paths import data_dir
 from simsteer.state import flush_state, take_state_warnings, with_background_saves
@@ -96,6 +96,8 @@ DESIRE_LANE_CHANGE_RIGHT = 4
 KEY_BACKSPACE = 8
 
 MIN_HEALTHY_FPS = 8.0
+# Healthy run time (s) before the capture-detail advisory may show.
+SAMPLING_NOTICE_HEALTHY_S = 0.5
 DISENGAGED_RECENTER_EVERY_N = 20
 # DirectML compiles its kernels on the first few inferences (<5 fps);
 # don't enforce the fps auto-disengage until past this many frames.
@@ -274,6 +276,7 @@ def run(settings: Settings, game: GameProfile | str, *,
     banner_text = ""
     banner_color = (200, 200, 200)
     banner_until = 0.0
+    sampling_warned = False
     was_engaged_last_frame = False
     last_device_axis: float | None = None
     was_measuring = False
@@ -504,6 +507,16 @@ def run(settings: Settings, game: GameProfile | str, *,
                             flow.feed_fov(frame, vx, v_real, actual_yaw,
                                           time.perf_counter)
                             fov_vision_s = flow.fov_solver.vision_s - before
+                        # Advisory only once the pipeline has run cleanly for a
+                        # moment, so startup faults keep the banner to themselves.
+                        if (flow.step is not Step.FOV and not sampling_warned
+                                and healthy_since is not None
+                                and now_perf - healthy_since >= SAMPLING_NOTICE_HEALTHY_S):
+                            notice = sampling_warning(frame.shape[1], calib.fov_h_deg)
+                            if notice and not current_fault and now_perf >= banner_until:
+                                print(notice)
+                                set_banner(notice, COL_ACCENT_BLUE, 10.0)
+                                sampling_warned = True
                         camera_learning = flow.camera_learning
                         if camera_learning:
                             live_calib.update(

@@ -138,8 +138,9 @@ def _second_derivative(fn, s: float, h: float = 1.0) -> float:
 
 class CameraModel:
     def __init__(self, fov_deg: float, pitch_deg: float, yaw_deg: float,
-                 height_m: float) -> None:
-        self.f = (W / 2) / math.tan(math.radians(fov_deg) / 2)
+                 height_m: float, width: int = W, height: int = H) -> None:
+        self.width, self.height = width, height
+        self.f = (width / 2) / math.tan(math.radians(fov_deg) / 2)
         self.p = math.radians(pitch_deg)
         self.y = math.radians(yaw_deg)
         self.h = height_m
@@ -152,10 +153,12 @@ class CameraModel:
         z1 = -x * math.sin(self.y) + z * math.cos(self.y)
         y2 = down * math.cos(self.p) - z1 * math.sin(self.p)
         z2 = down * math.sin(self.p) + z1 * math.cos(self.p)
-        return np.stack([W / 2 + self.f * x1 / z2, H / 2 + self.f * y2 / z2], axis=1)
+        return np.stack([self.width / 2 + self.f * x1 / z2,
+                         self.height / 2 + self.f * y2 / z2], axis=1)
 
 
 def render_calib(s0: float, cam: CameraModel) -> np.ndarray:
+    W, H = cam.width, cam.height
     img = np.empty((H, W, 3), np.uint8)
     horizon = int(round(H / 2 - cam.f * math.tan(cam.p)))
     horizon = max(1, min(H - 1, horizon))
@@ -203,7 +206,8 @@ def render_calib(s0: float, cam: CameraModel) -> np.ndarray:
 
 
 def write_calib_clip(args) -> dict:
-    cam = CameraModel(args.fov, args.pitch_deg, args.yaw_deg, CAM_HEIGHT_M)
+    cam = CameraModel(args.fov, args.pitch_deg, args.yaw_deg, args.height_m,
+                      args.width, args.height)
     a, b, c = args.rack
     frames = int(round(args.minutes * 60 * args.fps))
     dt = 1.0 / args.fps
@@ -218,7 +222,7 @@ def write_calib_clip(args) -> dict:
     wheels = [math.atan(WHEELBASE * (calib_road_curvature(x)
                                      + _second_derivative(lane_offset, x)))
               for x in ss]
-    writer = ClipWriter(args.out, game="ets2", overwrite=True)
+    writer = ClipWriter(args.out, game="ets2", width=args.width, overwrite=True)
     for i in range(frames):
         writer.write_frame(ts[i], render_calib(ss[i], cam))
         k_car = calib_road_curvature(ss[i]) + _second_derivative(lane_offset, ss[i])
@@ -233,7 +237,7 @@ def write_calib_clip(args) -> dict:
         })
     meta = writer.close("synthetic-calib")
     meta["truth"] = {"fov_h_deg": args.fov, "pitch_deg": args.pitch_deg,
-                     "yaw_deg": args.yaw_deg, "height_m": CAM_HEIGHT_M,
+                     "yaw_deg": args.yaw_deg, "height_m": args.height_m,
                      "rack": [a, b, c], "lag_frames": LAG_FRAMES}
     (Path(args.out) / "clip.json").write_text(json.dumps(meta, indent=2) + "\n",
                                               encoding="utf-8")
@@ -257,6 +261,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="--calib camera pitch, + looks down")
     ap.add_argument("--yaw-deg", type=float, default=0.0,
                     help="--calib camera yaw, + looks left")
+    ap.add_argument("--height-m", type=float, default=CAM_HEIGHT_M,
+                    help="--calib camera height above the road (m)")
+    ap.add_argument("--width", type=int, default=W, help="--calib capture width")
+    ap.add_argument("--height", type=int, default=H, help="--calib capture height")
     ap.add_argument("--rack", type=lambda v: tuple(float(x) for x in v.split(",")),
                     default=(4.2, 0.0010, 0.01), metavar="A,B,C",
                     help="--calib steering rack: axis = a*w + b*w*v^2 + c")
