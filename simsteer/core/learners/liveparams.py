@@ -267,9 +267,6 @@ class LiveParams:
         self.frozen = False
         self._speed_history: deque[float] = deque(
             maxlen=int(TROUBLE_WINDOW_S * 20))
-        # No longer driven (the RLS watchdog is gone); stays 0 so the
-        # controller's trim gate reads a valid value.
-        self._consecutive_bad_fit = 0
         # Trajectory ring buffer (time, a, b, c) — appended on every
         # installed measurement. Used by a future tuner plot tab; the
         # HUD itself reads `last_update_ts` and the trust_level
@@ -706,7 +703,6 @@ class LiveParams:
         self._commanded_buf.clear()
         self._v_buf.clear()
         self._speed_history.clear()
-        self._consecutive_bad_fit = 0
         self.rej_wheel = 0
         self.rej_innovation = 0
         self.rej_trouble = 0
@@ -732,7 +728,6 @@ class LiveParams:
     def reset_covariance_only(self) -> None:
         """Reset the diagnostic covariance without changing the mapping."""
         self.P = np.diag(self._gates["P_init"])
-        self._consecutive_bad_fit = 0
 
     def set_axis_sign(self, sign: int) -> None:
         """Use the independently measured input direction as the seed.
@@ -983,7 +978,6 @@ class LiveParams:
         self._commanded_buf.clear()
         self._v_buf.clear()
         self._speed_history.clear()
-        self._consecutive_bad_fit = 0
         self._innov_ema = 0.0
         self._actual_ema = 0.0
         # Reset diagnostics so the HUD shows the new device's fresh

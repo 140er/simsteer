@@ -175,7 +175,7 @@ def test_missing_evidence_starts_neutral_and_never_writes_rack():
     assert ctrl.axis_trim_state == 0.
 
 
-@pytest.mark.parametrize("gate", ["lc", "cold", "rls-bad", "user", "sat", "slow"])
+@pytest.mark.parametrize("gate", ["lc", "cold", "user", "sat", "slow"])
 def test_understeer_transient_gates_freeze_estimate(gate):
     ctrl = controller()
     teach(ctrl, seconds=5.)
@@ -186,8 +186,6 @@ def test_understeer_transient_gates_freeze_estimate(gate):
         kwargs["lane_change_command_active"] = True
     elif gate == "cold":
         ctrl.live_params.samples = 0
-    elif gate == "rls-bad":
-        ctrl.live_params._consecutive_bad_fit = 11
     elif gate == "user":
         ctrl.live_params.last_intervened_ts = 100.
     elif gate == "sat":
