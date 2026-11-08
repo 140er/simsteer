@@ -47,7 +47,10 @@ def _normalized(source: Path) -> dict | bytes | None:
     if name.startswith("controller"):
         return asdict(ControllerConfig.load(path=source))
     if name.startswith("liveparams"):
-        return {**asdict(LiveParams._load(path=source)), "coverage_version": TRUST_COVERAGE_VERSION}
+        state = {**asdict(LiveParams._load(path=source)), "coverage_version": TRUST_COVERAGE_VERSION}
+        if state["scale_frozen"] is None:
+            del state["scale_frozen"]  # unrecorded: settled on first load
+        return state
     if name.startswith("livecalib_state"):
         learner = LiveCalib()
         if not learner.load_state("default", path=source):

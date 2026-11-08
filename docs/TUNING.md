@@ -170,7 +170,7 @@ at least 10 excited samples in each turn direction, wheel RMS of at least
 0.035 axis and 25% of signal RMS. Rejected fits keep collecting and show why.
 The bounded sample window lets poor data age out.
 
-**b** stays at the signed per-device profile seed: at one speed `wheel`
+**b** keeps the per-device profile seed's magnitude, with the sign of **a**: at one speed `wheel`
 and `wheel·v²` are collinear, so a short drive cannot reliably separate
 two gains. **c** remains the separate axis bias; the solve never estimates
 an intercept. A successful measurement installs **a** and **b** once and

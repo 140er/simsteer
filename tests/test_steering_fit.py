@@ -168,6 +168,27 @@ def test_old_fit_loads_frozen_without_inventing_measurement(data_dir):
     assert LiveParams(game="ets2", device_kind="gamepad").scale_frozen
 
 
+@pytest.mark.parametrize("extra", [dict(samples=50), dict(samples=500, coverage_version=1)])
+def test_under_covered_old_fit_is_measured_not_frozen(data_dir, extra):
+    import json
+    (data_dir / "liveparams_ets2_gamepad.json").write_text(json.dumps(
+        dict(a=4.0, b=0.001, c=0.0, **extra)))
+    lc = FakeLiveCalib()
+    lc.converge()
+    lp = LiveParams(game="ets2", device_kind="gamepad", lag_frames=0)
+    assert not lp.scale_frozen and not lp.legacy_fit
+    flow = new_flow(lc=lc, lp=lp, passive_fit=True, persist=False)
+    flow._enter(Step.STEERING)
+    driver = Driver(flow)
+    driver.verify_direction()
+    driver.frames(1)
+    assert flow.step is Step.STEERING
+    samples(lp, a=6.0)
+    driver.frames(1)
+    assert flow.step is Step.CHECK and lp.calibration_fit
+    assert lp.a_linear == pytest.approx(6.0)
+
+
 def test_freeze_is_per_device_and_game():
     lp = LiveParams(game="ets2", device_kind="gamepad", lag_frames=0)
     lp.begin_steering_fit()

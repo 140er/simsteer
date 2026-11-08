@@ -177,7 +177,7 @@ class _Persisted:
     coverage_speed_min: float | None = None
     coverage_speed_max: float | None = None
     legacy_fit: bool = False
-    scale_frozen: bool = False
+    scale_frozen: bool | None = False
     calibration_fit: bool = False
 
 
@@ -225,18 +225,19 @@ class LiveParams:
         self.coverage_speed_ranges = loaded.coverage_speed_ranges
         self.coverage_speed_min = loaded.coverage_speed_min
         self.coverage_speed_max = loaded.coverage_speed_max
-        self.scale_frozen = loaded.scale_frozen
+        self.scale_frozen = False
         self.calibration_fit = loaded.calibration_fit
         self._steering_fit_active = False
         self._fit_samples: deque[tuple[float, float, float]] = deque(maxlen=FIT_WINDOW_SAMPLES)
         self.fit_reason = "Need more steering samples"
         self.legacy_fit = loaded.legacy_fit
         self.validation_model: tuple[float, float, float] | None = None
-        # Covariance remains available to old HUDs and finite-state checks;
-        # driving observations no longer update it.
+        # The initial covariance stays as a finite-state invariant only;
+        # nothing updates it now that driving no longer trains the fit.
         self.P = np.diag(self._gates["P_init"])
         self.samples = loaded.samples
         self.session_samples = 0
+        self._settle_freeze(loaded.scale_frozen)
         self.lag_frames = lag_frames
         # Buffers — lag_frames+1 deep so `[0]` is the value lag_frames
         # samples in the past once full.
@@ -248,7 +249,6 @@ class LiveParams:
         self.last_actual = 0.0
         self._innov_ema = 0.0
         self._actual_ema = 0.0
-        self._dirty = 0
         # Rejection counters for HUD diagnostics.
         self.rej_wheel = 0
         self.rej_innovation = 0
@@ -264,10 +264,11 @@ class LiveParams:
         self.rej_no_wheel = 0        # wheel_angle_rad is None this frame
         self.rej_small_axis = 0      # |axis_lagged| below MIN_AXIS
         self.rej_small_wheel = 0     # |wheel| below profile min_wheel (Forza/AC)
-        self.watchdog_resets = 0
         self.frozen = False
         self._speed_history: deque[float] = deque(
             maxlen=int(TROUBLE_WINDOW_S * 20))
+        # No longer driven (the RLS watchdog is gone); stays 0 so the
+        # controller's trim gate reads a valid value.
         self._consecutive_bad_fit = 0
         # Trajectory ring buffer (time, a, b, c) — appended on every
         # installed measurement. Used by a future tuner plot tab; the
@@ -337,12 +338,6 @@ class LiveParams:
         Drops with speed when b > 0 — the whole point of fitting b."""
         denom = self.x[0] + self.x[1] * v_ego * v_ego
         return float(1.0 / denom) if abs(denom) > 1e-6 else 0.0
-
-    @property
-    def scale_std(self) -> float:
-        """Std of `a` (the linear coefficient). Relative confidence
-        read; not directly comparable across fits."""
-        return float(np.sqrt(self.P[0, 0]))
 
     @property
     def innov_ema(self) -> float:
@@ -489,6 +484,13 @@ class LiveParams:
         require_finite("liveparams.intervention", axis=target_axis, wheel=wheel, v2=v2)
         self.last_intervened_ts = self.clock()
 
+    def _settle_freeze(self, recorded: bool | None) -> None:
+        """Files written before the freeze record no flag. Keep such a fit
+        frozen only if it already met the trust evidence or is a legacy
+        fit the Check has accepted; otherwise the Steering step measures."""
+        self.scale_frozen = (recorded if recorded is not None
+                             else self.legacy_fit or self.trust_progress >= 1.0)
+
     def begin_steering_fit(self) -> None:
         """Open collection for the guided Steering step; retain frozen fits."""
         self._steering_fit_active = not self.scale_frozen
@@ -503,9 +505,10 @@ class LiveParams:
     def finish_steering_fit(self) -> bool:
         """Install a qualified least-squares measurement, then freeze it.
 
-        At one speed a and b are collinear. Hold b at the signed profile
-        seed instead of estimating two gains from a short drive. c is an
-        independently set bias, subtracted before the origin-only solve.
+        At one speed a and b are collinear. Hold b at the profile seed's
+        magnitude, signed like a, instead of estimating two gains from a
+        short drive. c is an independently set bias, subtracted before the
+        origin-only solve.
         Rejected windows keep collecting; no candidate changes x.
         """
         if self.scale_frozen:
@@ -714,7 +717,6 @@ class LiveParams:
         self.rej_no_wheel = 0
         self.rej_small_axis = 0
         self.rej_small_wheel = 0
-        self.watchdog_resets = 0
         self.history.clear()
         self.last_update_ts = 0.0
         if wipe_disk:
@@ -885,7 +887,9 @@ class LiveParams:
                 raise ValueError("invalid speed range")
         legacy_fit = data.get("legacy_fit", data.get("coverage_version") is None
                               and samples >= TRUSTED_MIN_SAMPLES and not coverage) is True
-        scale_frozen = data.get("scale_frozen", data.get("samples", 0) > 0)
+        # None = written before the freeze existed; `_settle_freeze`
+        # decides once coverage and samples are loaded.
+        scale_frozen = data.get("scale_frozen")
         calibration_fit = data.get("calibration_fit", False)
         if calibration_fit and (not scale_frozen or samples < TRUSTED_MIN_SAMPLES):
             raise ValueError("invalid measured fit")
@@ -963,7 +967,7 @@ class LiveParams:
         self.coverage_speed_ranges = loaded.coverage_speed_ranges
         self.coverage_speed_min = loaded.coverage_speed_min
         self.coverage_speed_max = loaded.coverage_speed_max
-        self.scale_frozen = loaded.scale_frozen
+        self.scale_frozen = False
         self.calibration_fit = loaded.calibration_fit
         self.frozen = False
         self._steering_fit_active = False
@@ -974,6 +978,7 @@ class LiveParams:
         self.P = np.diag(self._gates["P_init"])
         self.samples = loaded.samples
         self.session_samples = 0
+        self._settle_freeze(loaded.scale_frozen)
         self._axis_buf.clear()
         self._commanded_buf.clear()
         self._v_buf.clear()
@@ -993,7 +998,5 @@ class LiveParams:
         self.rej_no_wheel = 0
         self.rej_small_axis = 0
         self.rej_small_wheel = 0
-        self.watchdog_resets = 0
         self.history.clear()
         self.last_update_ts = 0.0
-        self._dirty = 0
