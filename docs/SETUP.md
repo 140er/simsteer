@@ -134,6 +134,24 @@ Both want a reboot afterward so the kernel drivers load / unload cleanly.
 
 ---
 
+### Force feedback pass-through
+
+With `--device wheel`, the game sends its force feedback to the vJoy wheel
+SimSteer steers with. `--ffb-cap PERCENT` passes it on to your real force
+feedback wheel:
+
+- Force reaches the wheel **only while SimSteer is engaged** and has no
+  fault. Disengaging (INSERT, brake takeover), any fault or quitting
+  releases the wheel at once: every effect stops and is unloaded.
+- The wheel's device gain is capped at PERCENT of its peak torque before
+  any effect plays (2 percent of a 25 Nm base is about 0.5 Nm). Values
+  outside 1 to 15 are refused. If the wheel refuses the cap, nothing plays.
+- Your wheel does not steer the game in this mode; it only feels the
+  game's forces. Hold it lightly: start low and raise the cap in small
+  steps.
+- vJoy device force feedback must be enabled in *Configure vJoy*. The
+  console prints `FFB pass-through ready` at start, or why it is off.
+
 ## 4. (ETS2 only) Install the SCS telemetry plugin
 
 SimSteer reads speed + wheel angle from ETS2 via an SCS telemetry plugin.
@@ -352,6 +370,7 @@ same as for the exe.
 | `--list-games` | — | Print every game profile (built-in and yours from `%LOCALAPPDATA%\SimSteer\games\`) and exit. Broken profile files are named on stderr. |
 | `--device {gamepad,wheel}` | gamepad | Output device. gamepad = ViGEm Xbox 360; wheel = vJoy. |
 | `--vjoy-device N` | 1 | vJoy device index when `--device wheel`. |
+| `--ffb-cap PERCENT` | off | With `--device wheel`: pass the game's force feedback to your real wheel while engaged, device gain capped at PERCENT (1 to 15). See [Force feedback pass-through](#force-feedback-pass-through). |
 | `--max-width N` | 1600 | Cap overlay window width (px). |
 | `--no-gamepad` | off | Run overlay + model but open no virtual device. Skips ViGEm/vJoy preflight. Dry-run. |
 | `--no-tuner` | off | Don't open the tuner window. (You lose the Setup tab too.) |

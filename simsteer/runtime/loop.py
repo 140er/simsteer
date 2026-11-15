@@ -159,7 +159,8 @@ def run(settings: Settings, game: GameProfile | str, *,
         headless: bool = False,
         max_frames: int | None = None,
         log_path: str | None = None,
-        log_timing: bool = False) -> int:
+        log_timing: bool = False,
+        ffb_cap: float | None = None) -> int:
     """Run the driving loop for one pinned game until the user quits (q),
     the source runs out, or `max_frames` frames are done.
 
@@ -216,6 +217,14 @@ def run(settings: Settings, game: GameProfile | str, *,
                             vjoy_device_id=settings.vjoy_device)
         if pad.kind is None:
             print(f"device init failed: {pad.last_error} — overlay-only")
+    ffb = None
+    if ffb_cap is not None and pad is not None and pad.kind == "wheel":
+        from simsteer.runtime.ffb.passthrough import FfbPassthrough
+        ffb = FfbPassthrough(ffb_cap, vjoy_device=settings.vjoy_device)
+        if not ffb.start():
+            ffb = None
+    elif ffb_cap is not None:
+        print("FFB disabled: force feedback pass-through needs the vJoy wheel output")
 
     vision = model_vision(model)
     flow = CalibFlow(
@@ -335,6 +344,8 @@ def run(settings: Settings, game: GameProfile | str, *,
         nonlocal was_engaged_last_frame, last_stop_banner, healthy_since
         nonlocal last_control_at
         was_engaged = bool(pad and (pad.engaged or was_engaged_last_frame))
+        if ffb is not None:
+            ffb.update(False)  # release the wheel before anything else
         diagnostics.incident(reason, user_stop=user_stop and was_engaged)
         keep_bind = (preserve_bind and pad is not None and not pad.engaged
                      and getattr(pad, "binding_active", False))
@@ -689,6 +700,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                 if was_engaged_last_frame and not engaged_now:
                     stop_output(user_stop=True)
                 was_engaged_last_frame = engaged_now
+                if ffb is not None:
+                    ffb.update(engaged_now and not current_fault and pad.kind == "wheel")
                 direction_was_ready = flow.direction.ready
                 if pipeline_healthy:
                     flow.tick(Obs(
@@ -947,6 +960,8 @@ def run(settings: Settings, game: GameProfile | str, *,
                 diagnostics.finish(time.perf_counter(), row, log_f)
 
         finally:
+            if ffb is not None:
+                ffb.close()
             if steering_output is not None:
                 steering_output.close()
             if pad is not None:
