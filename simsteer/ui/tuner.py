@@ -378,6 +378,13 @@ class Tuner:
             ("wheelbase_m", "Wheelbase (m)", 2.5, 6, 0.1, "{:.1f}"),
         ]:
             self._add_number(group, _NumberSpec(self.ctrl_cfg, attr, label, lo, hi, step, fmt))
+        self._add_switch(
+            group,
+            "Learn anticipation",
+            lambda: self.ctrl_cfg.auto_anticipation,
+            lambda v: setattr(self.ctrl_cfg, "auto_anticipation", v),
+            obj=self.ctrl_cfg,
+        )
 
     def _build_fit(self, parent):
         group = self._make_group(parent, "Fit")
