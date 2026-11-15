@@ -43,8 +43,12 @@ class FfbPassthrough:
         if not check.ok:
             rx.close()
             raise OSError(f"vJoy FFB: {check.row}" + (f". Fix: {check.fix}" if check.fix else ""))
-        bridge = FfbBridge(rx, di.DirectInputSink(), self.cap, attended=True, armed=False,
-                           list_devices=di.attached_ff_devices, say=self.say)
+        try:
+            bridge = FfbBridge(rx, di.DirectInputSink(), self.cap, attended=True, armed=False,
+                               list_devices=di.attached_ff_devices, say=self.say)
+        except Exception:
+            rx.close()
+            raise
         return bridge, rx
 
     def start(self) -> bool:
@@ -55,6 +59,10 @@ class FfbPassthrough:
             self.say(f"FFB disabled: {e}")
             self.bridge = None
             self._close_receiver()
+            return False
+        if not self.bridge.running:
+            self.say(f"FFB disabled: {self.bridge.status}")
+            self.close()
             return False
         self.say(f"FFB pass-through ready, cap {self.cap:g}% of the wheel's peak torque, "
                  "active only while engaged")
@@ -78,6 +86,13 @@ class FfbPassthrough:
         if self.bridge is not None:
             self.bridge.arm(False)
             self.bridge.stop()
+            if self.bridge.running:
+                # Its thread still uses the receiver; the wheel is already
+                # disarmed and the process exit ends both.
+                self.say("FFB bridge did not stop in time; vJoy receiver left open")
+                self.bridge = None
+                self._receiver = None
+                return
             self.bridge = None
         self._close_receiver()
 

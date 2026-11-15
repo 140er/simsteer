@@ -205,6 +205,9 @@ def _main(args: argparse.Namespace, games: Registry, clip: Path | None) -> int:
         if settings.device != "wheel":
             print("Refusing to start: --ffb-cap needs --device wheel")
             return 2
+        if clip is not None:
+            print("Refusing to start: --ffb-cap does not apply to a replay")
+            return 2
 
     game = _pick_game(games, args.game, settings.game, clip)
     if game is None:

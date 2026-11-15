@@ -208,3 +208,47 @@ def test_loop_without_ffb_cap_never_creates_a_passthrough(monkeypatch):
     monkeypatch.setattr(passthrough, "FfbPassthrough", Recorder)
     drive(monkeypatch, fault="vision")
     assert Recorder.instances == []
+
+
+# --------------------------------------------------------------------------
+# gate follow-ups
+
+
+def test_disarm_mid_step_sends_nothing_more_to_the_wheel():
+    b, src, sink, clock = disarmed_bridge()
+    constant_game(src)
+    b.arm(True)
+    run_until(b, clock, 0.5)
+    calls = len(sink.calls)
+    b.arm(False)
+    b._execute(b.model.rearm(clock.t + 1.0))  # a renewal already computed
+    assert len(sink.calls) == calls
+
+
+def test_passthrough_reports_a_bridge_that_dies_at_start():
+    fake, rx, lines = FakeBridge(), FakeReceiver(), []
+    fake.start = lambda: None  # thread never runs
+    fake.status = "FFB stopped: wheel refused the capped gain"
+    p = FfbPassthrough(2.0, say=lines.append, make_bridge=lambda: (fake, rx))
+    assert not p.start()
+    assert lines == ["FFB disabled: FFB stopped: wheel refused the capped gain"] and rx.closed
+
+
+def test_close_keeps_the_receiver_while_a_stuck_bridge_thread_uses_it():
+    fake, rx, lines = FakeBridge(), FakeReceiver(), []
+    p = FfbPassthrough(2.0, say=lines.append, make_bridge=lambda: (fake, rx))
+    p.start()
+    fake.stop = lambda: None  # join timed out, still running
+    p.close()
+    assert fake.armed_log[-1] is False and not rx.closed
+    assert lines[-1] == "FFB bridge did not stop in time; vJoy receiver left open"
+
+
+def test_ffb_cap_is_refused_for_a_replay(tmp_path, capsys):
+    from simsteer.app import main as app
+    from simsteer.games.base import registry
+
+    args = app._build_parser(registry().ids).parse_args(
+        ["--device", "wheel", "--ffb-cap", "2"])
+    assert app._main(args, registry(), tmp_path) == 2
+    assert "does not apply to a replay" in capsys.readouterr().out

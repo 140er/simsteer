@@ -139,6 +139,7 @@ class FfbBridge:
         self._armed = threading.Event()
         if attended if armed is None else armed:
             self._armed.set()
+        self._was_armed = self._armed.is_set()  # bridge thread's own view
 
     # ---- lifecycle
 
@@ -154,10 +155,9 @@ class FfbBridge:
     def arm(self, on: bool) -> None:
         """Allow or forbid force on the wheel. Disarming releases the wheel
         on the bridge thread within one step (`IDLE_WAIT_S`)."""
-        if on and not self._armed.is_set():
-            self._reopen_at = 0.0
+        if on:
             self._armed.set()
-        elif not on:
+        else:
             self._armed.clear()
 
     @property
@@ -212,6 +212,10 @@ class FfbBridge:
             self._close()
 
     def _step(self) -> None:
+        armed = self._armed.is_set()
+        if armed and not self._was_armed:
+            self._reopen_at = 0.0  # a fresh arm opens at once
+        self._was_armed = armed
         self._release_if_disarmed()
         now = self.clock()
         wait = IDLE_WAIT_S
@@ -245,7 +249,9 @@ class FfbBridge:
 
     def _execute(self, calls: list[fm.DiCall]) -> None:
         for call in calls:
-            if not self.device_open:
+            # A disarm between checks sends nothing more; the wheel closes
+            # at the start of the next step.
+            if not self.device_open or not self._armed.is_set():
                 return
             if call.op == "SetGain":
                 call = fm.DiCall("SetGain", value=capped_gain(call.value, self.cap))
