@@ -38,7 +38,10 @@ seed = [3.5, 0.0015, 0.0]
 
 [liveparams.wheel]
 # vJoy bypasses the gamepad rack assist, so the rack is linear in speed.
-seed = [4.0, 0.0, 0.0]
+# Measured on a live drive: wheel = 0.71 rad per unit of game input, and
+# the wheel angle moves in the same frame as that input.
+seed = [1.41, 0.0, 0.0]
+lag_frames = 1
 
 [[setup]]
 check = "scs_plugin"

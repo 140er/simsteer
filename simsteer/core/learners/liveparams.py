@@ -187,7 +187,8 @@ class LiveParams:
                  device_kind: str | None = None,
                  seeds: Seeds | None = None,
                  gates: str = "strict",
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 lags: Mapping[str, int] | None = None) -> None:
         self.game = game
         self.seeds: Seeds = seeds or {}
         # Timestamps below, and the controller's trim freeze that reads
@@ -204,8 +205,12 @@ class LiveParams:
         # it: Forza/AC have a fast rack and need `lag_frames=1`, ETS2
         # needs the full 5 (= 250 ms smoothing).
         self._gates = dict(GATE_PROFILES[gates])
+        # A profile may give a device its own lag: the vJoy wheel reaches
+        # ETS2 without the gamepad's input smoothing.
+        self.lags: Mapping[str, int] = lags or {}
+        self._fixed_lag = lag_frames is not None
         if lag_frames is None:
-            lag_frames = int(self._gates["lag_frames"])
+            lag_frames = self._lag_for(device_kind)
         # Detect cold start (no persisted file) so the startup print
         # below can announce that a/b/c came from the seed table, not
         # a learned fit. Tuner / HUD read this flag to dim or annotate
@@ -929,6 +934,9 @@ class LiveParams:
         except OSError:
             pass
 
+    def _lag_for(self, device_kind: str | None) -> int:
+        return int(self.lags.get(device_kind, self._gates["lag_frames"]))
+
     def switch_device(self, new_device_kind: str | None) -> None:
         """Save the current fit (under the OLD device's path) and
         reload from the NEW device's path. Called by the tuner when
@@ -974,9 +982,11 @@ class LiveParams:
         self.samples = loaded.samples
         self.session_samples = 0
         self._settle_freeze(loaded.scale_frozen)
-        self._axis_buf.clear()
-        self._commanded_buf.clear()
-        self._v_buf.clear()
+        if not self._fixed_lag:
+            self.lag_frames = self._lag_for(new_device_kind)
+        self._axis_buf = deque(maxlen=self.lag_frames + 1)
+        self._commanded_buf = deque(maxlen=self.lag_frames + 1)
+        self._v_buf = deque(maxlen=self.lag_frames + 1)
         self._speed_history.clear()
         self._innov_ema = 0.0
         self._actual_ema = 0.0
