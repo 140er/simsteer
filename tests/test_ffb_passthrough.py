@@ -140,3 +140,71 @@ def test_passthrough_start_failure_disables_ffb_without_raising():
 def test_passthrough_refuses_caps_outside_1_to_15(cap):
     with pytest.raises(ValueError):
         FfbPassthrough(cap)
+
+
+# --------------------------------------------------------------------------
+# the live loop arms force feedback only while engaged and releases it on
+# every stop path
+
+
+class Recorder:
+    instances: list["Recorder"] = []
+
+    def __init__(self, cap, vjoy_device=1):
+        self.cap = cap
+        self.updates: list[bool] = []
+        self.closed = False
+        Recorder.instances.append(self)
+
+    def start(self):
+        return True
+
+    def update(self, active):
+        self.updates.append(bool(active))
+
+    def close(self):
+        self.closed = True
+
+
+def drive_with_ffb(monkeypatch, **kw):
+    import functools
+
+    import simsteer.runtime.loop as loop
+    import simsteer.runtime.ffb.passthrough as passthrough
+    import simsteer.runtime.output.base as devices
+    from test_output_safety import drive
+
+    Recorder.instances.clear()
+    monkeypatch.setattr(passthrough, "FfbPassthrough", Recorder)
+    monkeypatch.setattr(devices.DeviceManager, "kind", property(lambda self: "wheel"))
+    monkeypatch.setattr(loop, "run", functools.partial(loop.run, ffb_cap=2.0))
+    st, pad, manager = drive(monkeypatch, **kw)
+    (ffb,) = Recorder.instances
+    return st, ffb
+
+
+def test_loop_arms_ffb_while_engaged_and_releases_it_on_a_fault(monkeypatch):
+    st, ffb = drive_with_ffb(monkeypatch, fault="vision")
+    assert ffb.cap == 2.0
+    assert True in ffb.updates  # armed during the genuinely engaged frames
+    first_release = ffb.updates.index(False, ffb.updates.index(True))
+    assert not any(ffb.updates[first_release:])  # never re-armed after the fault
+    assert ffb.closed
+
+
+def test_loop_releases_ffb_when_insert_disengages(monkeypatch):
+    from simsteer.app.global_keys import KEY_INSERT
+
+    st, ffb = drive_with_ffb(monkeypatch, no_frames=True, key=KEY_INSERT)
+    assert True in ffb.updates
+    assert ffb.updates[-1] is False and ffb.closed
+
+
+def test_loop_without_ffb_cap_never_creates_a_passthrough(monkeypatch):
+    import simsteer.runtime.ffb.passthrough as passthrough
+    from test_output_safety import drive
+
+    Recorder.instances.clear()
+    monkeypatch.setattr(passthrough, "FfbPassthrough", Recorder)
+    drive(monkeypatch, fault="vision")
+    assert Recorder.instances == []

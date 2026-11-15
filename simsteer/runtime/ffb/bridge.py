@@ -10,7 +10,10 @@ While forwarding, the only intended difference from native play is safety:
 effects that would never end play in a 200 ms window the model renews
 every 100 ms, so if SimSteer dies the force stops within 200 ms.
 
-This PR runs the bridge standalone and test-only:
+SimSteer runs it in-process with `--device wheel --ffb-cap PERCENT`
+(`simsteer.runtime.ffb.passthrough`): armed only while engaged, so every
+disengage releases the wheel. Standalone, for testing without SimSteer
+holding vJoy:
 
     python -m simsteer.runtime.ffb.bridge --ffb-test-cap 5 --attended
 
@@ -51,7 +54,7 @@ LATENCY_WINDOW = 20_000
 def validate_cap(cap: float) -> float:
     cap = float(cap)
     if not CAP_MIN <= cap <= CAP_MAX:  # also rejects NaN
-        raise ValueError(f"--ffb-test-cap must be {CAP_MIN:g} to {CAP_MAX:g} percent, got {cap:g}")
+        raise ValueError(f"the force feedback cap must be {CAP_MIN:g} to {CAP_MAX:g} percent, got {cap:g}")
     return cap
 
 
