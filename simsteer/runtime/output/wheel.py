@@ -50,6 +50,26 @@ class WheelError(RuntimeError):
     pass
 
 
+def use_driver_dll(pyvjoy) -> str | None:
+    """Point pyvjoy at the installed driver's vJoyInterface.dll.
+
+    pyvjoy loads its own bundled copy, which can predate the driver: the
+    device then acquires fine but axis updates never reach the game. The
+    driver ships a matching DLL; the FFB receiver uses the same one.
+    Returns the path used, or None to keep pyvjoy's bundled DLL.
+    """
+    import ctypes
+    import os
+
+    from simsteer.runtime.ffb.vjoy_ffb import DEFAULT_DLL
+
+    path = os.environ.get("SIMSTEER_VJOY_DLL") or DEFAULT_DLL
+    if not os.path.isfile(path):
+        return None
+    pyvjoy._sdk._vj = ctypes.CDLL(path)
+    return path
+
+
 class Wheel:
     """Virtual steering wheel + pedals via vJoy. Matches the Gamepad
     interface so the main loop can use either."""
@@ -63,6 +83,7 @@ class Wheel:
                 "the vJoy driver from https://sourceforge.net/projects/vjoystick/"
             ) from e
 
+        use_driver_dll(pyvjoy)
         try:
             self._dev = pyvjoy.VJoyDevice(device_id)
         except Exception as e:

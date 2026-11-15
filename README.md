@@ -279,7 +279,6 @@ py -3.11 -m venv .venv
 & ".\.venv\Scripts\Activate.ps1"
 pip install -r requirements.txt
 pip install pyinstaller       # only needed to build .exe
-pip install pyvjoy            # only needed for --device wheel
 python tools\fetch_model.py
 ```
 
