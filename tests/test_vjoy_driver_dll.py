@@ -64,9 +64,19 @@ def test_unloadable_driver_dll_is_a_wheel_error(fake_pyvjoy, monkeypatch, tmp_pa
 
 
 def test_wheel_keeps_pyvjoys_dll_without_an_installed_driver(fake_pyvjoy, monkeypatch, tmp_path):
-    from simsteer.runtime.output.wheel import Wheel
+    from simsteer.runtime.output import wheel as w
+    from simsteer.runtime.ffb import vjoy_ffb
 
-    monkeypatch.setenv("SIMSTEER_VJOY_DLL", str(tmp_path / "missing.dll"))
+    monkeypatch.delenv("SIMSTEER_VJOY_DLL", raising=False)
+    monkeypatch.setattr(vjoy_ffb, "DEFAULT_DLL", str(tmp_path / "missing.dll"))
     monkeypatch.setattr(ctypes, "CDLL", lambda path: pytest.fail("must not load"))
-    Wheel(1)
+    w.Wheel(1)
     assert fake_pyvjoy._sdk._vj == "bundled"
+
+
+def test_a_missing_explicit_override_is_a_wheel_error(fake_pyvjoy, monkeypatch, tmp_path):
+    from simsteer.runtime.output.wheel import Wheel, WheelError
+
+    monkeypatch.setenv("SIMSTEER_VJOY_DLL", str(tmp_path / "typo.dll"))
+    with pytest.raises(WheelError, match="missing file"):
+        Wheel(1)

@@ -63,8 +63,11 @@ def use_driver_dll(pyvjoy) -> str | None:
 
     from simsteer.runtime.ffb.vjoy_ffb import DEFAULT_DLL
 
-    path = os.environ.get("SIMSTEER_VJOY_DLL") or DEFAULT_DLL
+    override = os.environ.get("SIMSTEER_VJOY_DLL")
+    path = override or DEFAULT_DLL
     if not os.path.isfile(path):
+        if override:
+            raise WheelError(f"SIMSTEER_VJOY_DLL points to a missing file: {path}")
         return None
     try:
         pyvjoy._sdk._vj = ctypes.CDLL(path)
