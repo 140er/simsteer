@@ -56,6 +56,10 @@ def _build_parser(game_ids: list[str]) -> argparse.ArgumentParser:
                          "whose profile does not allow it.")
     ap.add_argument("--vjoy-device", type=int, default=None,
                     help="vJoy device index when --device wheel.")
+    ap.add_argument("--ffb-cap", type=float, metavar="PERCENT", default=None,
+                    help="with --device wheel: pass the game's force feedback "
+                         "to the real wheel while engaged, device gain capped "
+                         "at PERCENT (1 to 15). Off by default.")
     ap.add_argument("--no-tuner", action="store_true",
                     help="don't open the tuner window.")
     ap.add_argument("--max-width", type=int, default=None,
@@ -191,6 +195,17 @@ def _main(args: argparse.Namespace, games: Registry, clip: Path | None) -> int:
     if args.max_width is not None:
         settings.override(max_width=args.max_width)
 
+    if args.ffb_cap is not None:
+        from simsteer.runtime.ffb.bridge import validate_cap
+        try:
+            validate_cap(args.ffb_cap)
+        except ValueError as e:
+            print(f"Refusing to start: {e}")
+            return 2
+        if settings.device != "wheel":
+            print("Refusing to start: --ffb-cap needs --device wheel")
+            return 2
+
     game = _pick_game(games, args.game, settings.game, clip)
     if game is None:
         print("no game profiles found")
@@ -205,7 +220,7 @@ def _main(args: argparse.Namespace, games: Registry, clip: Path | None) -> int:
     loop_args = dict(headless=args.headless, max_frames=args.max_frames,
                      log_path=args.log_jsonl, log_timing=args.log_timing)
     if clip is None:
-        return run(settings, game, **loop_args)
+        return run(settings, game, ffb_cap=args.ffb_cap, **loop_args)
 
     from simsteer.runtime.loop import WindowKeys
     from simsteer.runtime.replay import ReplayClock, ReplaySource, ReplayTelemetry

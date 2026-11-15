@@ -111,6 +111,7 @@ class FfbBridge:
         clock: Callable[[], float] = time.perf_counter,
         reopen_s: float = REOPEN_S,
         say: Callable[[str], None] = lambda line: None,
+        armed: bool | None = None,
     ) -> None:
         self.source = source
         self.sink = sink
@@ -128,6 +129,13 @@ class FfbBridge:
         self._thread: threading.Thread | None = None
         self._reopen_at = 0.0
         self._last_seen: tuple[str, ...] | None = None
+        # While disarmed the wheel stays closed: packets still update the
+        # model, so arming replays the game's current effects. The
+        # standalone CLI is armed from the start; SimSteer arms only
+        # while engaged and fault-free.
+        self._armed = threading.Event()
+        if attended if armed is None else armed:
+            self._armed.set()
 
     # ---- lifecycle
 
@@ -140,6 +148,19 @@ class FfbBridge:
         if self._thread is not None:
             self._thread.join(timeout)
 
+    def arm(self, on: bool) -> None:
+        """Allow or forbid force on the wheel. Disarming releases the wheel
+        on the bridge thread within one step (`IDLE_WAIT_S`)."""
+        if on and not self._armed.is_set():
+            self._reopen_at = 0.0
+            self._armed.set()
+        elif not on:
+            self._armed.clear()
+
+    @property
+    def armed(self) -> bool:
+        return self._armed.is_set()
+
     @property
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -149,6 +170,8 @@ class FfbBridge:
         """HUD line: `FFB pass 0 unknown`, or why nothing is forwarded."""
         if self.failure is not None:
             return f"FFB stopped: {self.failure}"
+        if self.attended and not self._armed.is_set():
+            return f"FFB off until engaged (cap {self.cap:g}%)"
         if not self.device_open:
             return "FFB waiting for wheel"
         return self.model.status()
@@ -175,7 +198,8 @@ class FfbBridge:
 
     def _run(self) -> None:
         try:
-            self._try_open(self.clock())
+            if self._armed.is_set() or not self.attended:
+                self._try_open(self.clock())
             while not self._stop.is_set():
                 self._step()
         except BaseException as e:  # stop forwarding on anything unexpected
@@ -185,19 +209,26 @@ class FfbBridge:
             self._close()
 
     def _step(self) -> None:
+        self._release_if_disarmed()
         now = self.clock()
         wait = IDLE_WAIT_S
         due = self.model.next_rearm() if self.device_open else None
         if due is not None:
             wait = min(wait, max(0.0, due - now))
         packet = self.source.get(wait)
+        self._release_if_disarmed()
         if packet is not None:
             self._forward(packet)
         now = self.clock()
         if self.device_open:
             self._execute(self.model.rearm(now))
-        elif now >= self._reopen_at:
-            self._try_open(now)
+        elif (self._armed.is_set() or not self.attended) and now >= self._reopen_at:
+            self._try_open(now)  # unattended only reports what it sees
+
+    def _release_if_disarmed(self) -> None:
+        if self.device_open and not self._armed.is_set():
+            self._close()
+            self._event("wheel released")
 
     def _forward(self, packet: Packet) -> None:
         record = fm.decode_packet(packet.cmd, packet.data)
