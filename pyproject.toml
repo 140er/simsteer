@@ -17,6 +17,7 @@ dependencies = [
     "onnxruntime>=1.17; sys_platform != 'win32'",
     "dxcam>=0.0.5; sys_platform == 'win32'",
     "vgamepad>=0.1.0; sys_platform == 'win32'",
+    "pyvjoy>=1.0; sys_platform == 'win32'",
     "mss>=9.0",
     "customtkinter>=5.2,<6.0",
     "pillow>=10.1",

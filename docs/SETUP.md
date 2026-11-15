@@ -55,12 +55,11 @@ pip install -r requirements.txt
 | `customtkinter>=5.2,<6.0` | the tuner window |
 | `pillow>=10.1` | HUD text rendering |
 
-**Wheel-mode only:** if you intend to use the vJoy wheel device
-(`--device wheel`) instead of the gamepad, also:
-
-```powershell
-pip install pyvjoy
-```
+**Wheel mode:** `pyvjoy`, used by the vJoy wheel device (`--device wheel`),
+installs with the other packages on Windows. SimSteer points it at the vJoy
+driver's own `vJoyInterface.dll` (`C:\Program Files\vJoy\x64\`), because the
+copy bundled with pyvjoy can predate the driver: the device then opens but
+the game never sees it move. Set `SIMSTEER_VJOY_DLL` to use another path.
 
 > **Path-with-spaces note**: this project is often developed in a path with a space, e.g.
 > `C:\Sim Tools\SimSteer\`. Always quote the venv activate
@@ -109,7 +108,7 @@ and skips its speed-sensitive gamepad rack assist, giving a linear
 axis→wheel response (often nicer to tune).
 - Download: https://github.com/njz3/vJoy/releases
 - Run the installer, **reboot**.
-- Also `pip install pyvjoy` (see step 1).
+- `pyvjoy` comes with the packages from step 1.
 
 > You only need the one matching your `--device`. Gamepad is the default
 > and the simplest to get going.
