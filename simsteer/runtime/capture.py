@@ -1,8 +1,10 @@
-"""Screen capture for the ETS2 game window.
+"""Screen capture for the game window.
 
-dxcam is the fastest path on Windows (uses DXGI desktop duplication). We
-default to grabbing the primary monitor's full screen; if you want to
-restrict to a specific window region, pass `region=(x1, y1, x2, y2)`.
+dxcam is the fastest path on Windows (uses DXGI desktop duplication) and
+grabs the primary monitor. With `window_processes` set, each frame is
+cropped to that game's client area, so a windowed game that does not fill
+the monitor still reaches the model centred. Without a usable window on
+the primary monitor the full screen is used, as before.
 """
 
 from __future__ import annotations
@@ -14,9 +16,11 @@ from queue import Empty, Full, Queue
 from threading import Event, Thread
 import sys
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
+
+from simsteer.runtime.window import WindowRect, crop_to_window, find_client_rect
 
 if TYPE_CHECKING:
     import dxcam
@@ -30,6 +34,9 @@ class CaptureConfig:
     wait_s: float = 0.1
     max_age_s: float = 0.25
     unchanged_ticks: int = 5
+    # Lowercase exe names whose window to crop to, e.g. ("eurotrucks2.exe",).
+    window_processes: tuple[str, ...] = ()
+    window_refresh_s: float = 1.0
 
 
 class Capture:
@@ -40,8 +47,15 @@ class Capture:
     frame has arrived since the last call.
     """
 
-    def __init__(self, cfg: CaptureConfig | None = None) -> None:
+    def __init__(self, cfg: CaptureConfig | None = None,
+                 find_window: Callable[[tuple[str, ...]], WindowRect | None] = find_client_rect,
+                 ) -> None:
         self.cfg = cfg or CaptureConfig()
+        self._find_window = find_window
+        self._window: WindowRect | None = None
+        self._window_checked = -math.inf
+        # Last capture-area message, printed once per change.
+        self.window_status = ""
         self._cam: "dxcam.DXCamera | None" = None
         # A screen never runs out; `ReplaySource` sets this at clip end.
         self.done = False
@@ -141,4 +155,28 @@ class Capture:
             self._unchanged = 0
         if self._unchanged >= self.cfg.unchanged_ticks:
             return None
-        return frame
+        return crop_to_window(frame, self._current_window())
+
+    def _current_window(self) -> WindowRect | None:
+        if not self.cfg.window_processes:
+            return None
+        now = time.monotonic()
+        if now - self._window_checked >= self.cfg.window_refresh_s:
+            self._window_checked = now
+            try:
+                self._window = self._find_window(self.cfg.window_processes)
+            except Exception:  # a failed lookup must never break capture
+                self._window = None
+            rect = self._window
+            if rect is None:
+                status = "capture: game window not found; using the full primary screen"
+            elif not rect.on_primary:
+                status = ("capture: game window is not on the primary monitor; "
+                          "using the full primary screen (move the game to the main monitor)")
+            else:
+                status = (f"capture: game window {rect.width}x{rect.height} "
+                          f"at ({rect.left},{rect.top})")
+            if status != self.window_status:
+                self.window_status = status
+                print(status, flush=True)
+        return self._window

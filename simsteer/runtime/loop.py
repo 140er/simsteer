@@ -180,7 +180,8 @@ def run(settings: Settings, game: GameProfile | str, *,
     import_legacy_state()
     state_root = data_dir()
     if source is None:
-        source = Capture(CaptureConfig(target_fps=20))
+        source = Capture(CaptureConfig(target_fps=20,
+                                       window_processes=tuple(profile.process_names)))
     if make_telemetry is None:
         make_telemetry = profile.make_telemetry
     if clock is None:
