@@ -62,12 +62,20 @@ FULL_CHECK_LOG_INTERVAL_S = 1.0
 
 
 # Controller fields that may change after a passed Check without revoking
-# it: the longitudinal speed-scale ceiling, and the turn-in lead that is
-# learned online within fixed bounds (core/learners/anticipation.py).
-# Ignored on both sides, so certificates saved before a field joined this
-# set still match.
-CHECK_EXEMPT_CONTROLLER_KEYS = frozenset(
-    {"speed_scale_max", "curvature_anticipation_s", "auto_anticipation"})
+# it: the longitudinal speed-scale ceiling and the learning switch. The
+# turn-in lead is exempt only while it is learned online within fixed
+# bounds (core/learners/anticipation.py); a hand-set lead stays certified.
+# Both sides follow the current switch, so certificates saved before these
+# fields were exempt still match.
+CHECK_EXEMPT_CONTROLLER_KEYS = frozenset({"speed_scale_max", "auto_anticipation"})
+LEARNED_LEAD_KEY = "curvature_anticipation_s"
+
+
+def check_exempt_keys(controller: dict) -> frozenset[str]:
+    """Exempt keys for a controller snapshot, given its learning switch."""
+    if controller.get("auto_anticipation"):
+        return CHECK_EXEMPT_CONTROLLER_KEYS | {LEARNED_LEAD_KEY}
+    return CHECK_EXEMPT_CONTROLLER_KEYS
 
 
 def contexts_match(saved: dict | None, current: dict) -> bool:
@@ -78,14 +86,16 @@ def contexts_match(saved: dict | None, current: dict) -> bool:
         return False
     # Readers without a usable identity omit it. Earlier snapshots used
     # null for this same limitation; that alone is not a context change.
+    current_controller = current.get("controls", {}).get("controller")
+    exempt = check_exempt_keys(current_controller if isinstance(current_controller, dict) else {})
+
     def normalized(context):
         controls = dict(context.get("controls", {}))
         if controls.get("vehicle") is None:
             controls.pop("vehicle", None)
         controller = controls.get("controller")
         if isinstance(controller, dict):
-            controls["controller"] = {k: v for k, v in controller.items()
-                                      if k not in CHECK_EXEMPT_CONTROLLER_KEYS}
+            controls["controller"] = {k: v for k, v in controller.items() if k not in exempt}
         return {**context, "controls": controls}
     saved, current = normalized(saved), normalized(current)
     if old_camera.get("simple_warp", True) or camera.get("simple_warp", True):

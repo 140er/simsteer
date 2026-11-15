@@ -43,7 +43,7 @@ from simsteer.app.manual import ManualInputs
 from simsteer.app.nav import ManeuverDir, NavManager
 from simsteer.app.probe import SteeringProbe
 from simsteer.app.settings import Settings
-from simsteer.calib.flow import CHECK_EXEMPT_CONTROLLER_KEYS, CalibFlow, Obs, Step, steering_fit_for
+from simsteer.calib.flow import CalibFlow, Obs, Step, steering_fit_for
 from simsteer.calib.fov_source import profile_reader
 from simsteer.calib.score import CheckPolicy
 from simsteer.core.calibration import Calibration, model_view_calib
@@ -52,10 +52,10 @@ from simsteer.core.finite import NonFiniteError, require_finite
 from simsteer.core.control import (
     ControllerConfig, LateralController, LongitudinalController,
 )
+from simsteer.core.learners.anticipation import AnticipationLearner
 from simsteer.core.learners.livecalib import CalStatus, CameraBlockedReason, LiveCalib
 from simsteer.core.learners.liveparams import LiveParams
 from simsteer.core.lane_change import ManualLaneChange
-from simsteer.core.learners.anticipation import AnticipationLearner
 from simsteer.core.model import DrivingModel
 from simsteer.core.postprocess import decode
 from simsteer.core.steering import STEERING_TIMEOUT_S, SteeringTarget
@@ -98,8 +98,10 @@ KEY_BACKSPACE = 8
 
 
 def certified_controller(cfg) -> dict:
-    """The controller settings a steering Check certifies."""
-    return {k: v for k, v in asdict(cfg).items() if k not in CHECK_EXEMPT_CONTROLLER_KEYS}
+    """The controller snapshot a steering Check records. Learned and
+    longitudinal fields are ignored when comparing (calib.flow)."""
+    return {k: v for k, v in asdict(cfg).items() if k != "speed_scale_max"}
+
 
 MIN_HEALTHY_FPS = 8.0
 # Healthy run time (s) before the capture-detail advisory may show.

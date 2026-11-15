@@ -74,9 +74,28 @@ def test_lead_stays_within_the_knob_range():
     assert cfg.curvature_anticipation_s <= an.ANTICIPATION_MAX_S
 
 
-def test_disengage_starts_a_fresh_window():
-    cfg = ControllerConfig(lookahead_s=0.3)
+def test_disengage_starts_a_fresh_window_and_learning_resumes():
+    cfg = ControllerConfig(lookahead_s=0.3, curvature_anticipation_s=0.0)
     learner = AnticipationLearner(cfg)
     drive(learner, 8)
     drive(learner, 0.1, engaged=False)
     assert len(learner._samples) == 0
+    estimates = learner.estimates
+    assert drive(learner, 40, delay=0.6)
+    assert learner.estimates > estimates and cfg.curvature_anticipation_s > 0
+
+
+def test_loop_resets_the_learner_when_output_stops(monkeypatch):
+    import simsteer.runtime.loop as loop
+    from test_output_safety import drive as drive_loop
+
+    resets = []
+
+    class Recording(AnticipationLearner):
+        def reset(self):
+            resets.append(True)
+            super().reset()
+
+    monkeypatch.setattr(loop, "AnticipationLearner", Recording)
+    drive_loop(monkeypatch, fault="vision")
+    assert resets  # the fault's stop_output dropped the window

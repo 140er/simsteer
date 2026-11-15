@@ -10,13 +10,21 @@ from simsteer.calib.flow import contexts_match
 from simsteer.core.control import ControllerConfig
 
 
-def test_a_learned_lead_does_not_revoke_a_passed_check():
-    """A Check certified with one lead stays valid as the lead is learned,
-    including certificates saved before the lead was exempt."""
-    def context(**controller):
-        base = {"steer_authority": 1.0, "curvature_anticipation_s": 0.0}
-        return {"camera": {"simple_warp": True}, "controls": {"controller": {**base, **controller}}}
+def context(**controller):
+    base = {"steer_authority": 1.0, "curvature_anticipation_s": 0.0}
+    return {"camera": {"simple_warp": True}, "controls": {"controller": {**base, **controller}}}
 
+
+def test_a_learned_lead_does_not_revoke_a_passed_check():
+    """While the lead is learned, a Check stays valid as it moves, including
+    certificates saved before the lead could be learned."""
     assert getattr(ControllerConfig(), "auto_anticipation", False) is True
-    assert contexts_match(context(), context(curvature_anticipation_s=0.25))
-    assert not contexts_match(context(), context(steer_authority=1.2))
+    old_certificate = context()  # saved before the learning switch existed
+    assert contexts_match(old_certificate, context(curvature_anticipation_s=0.25, auto_anticipation=True))
+    assert not contexts_match(old_certificate, context(steer_authority=1.2, auto_anticipation=True))
+
+
+def test_a_hand_set_lead_stays_certified():
+    saved = context(auto_anticipation=False)
+    assert contexts_match(saved, context(auto_anticipation=False))
+    assert not contexts_match(saved, context(curvature_anticipation_s=0.1, auto_anticipation=False))
