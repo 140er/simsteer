@@ -66,7 +66,10 @@ def use_driver_dll(pyvjoy) -> str | None:
     path = os.environ.get("SIMSTEER_VJOY_DLL") or DEFAULT_DLL
     if not os.path.isfile(path):
         return None
-    pyvjoy._sdk._vj = ctypes.CDLL(path)
+    try:
+        pyvjoy._sdk._vj = ctypes.CDLL(path)
+    except OSError as e:
+        raise WheelError(f"could not load the vJoy driver DLL {path}: {e}") from e
     return path
 
 
