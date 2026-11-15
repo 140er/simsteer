@@ -74,3 +74,13 @@ def test_missing_window_falls_back_to_full_screen_with_a_notice(capsys):
                               find_window=lambda names: None), screen())
     assert capture.grab().shape[:2] == (1440, 2560)
     assert "game window not found" in capsys.readouterr().out
+
+
+def test_a_failing_window_lookup_keeps_the_full_screen(capsys):
+    def broken(names):
+        raise AttributeError("SetThreadDpiAwarenessContext")
+
+    capture = started(Capture(CaptureConfig(window_processes=("eurotrucks2.exe",)),
+                              find_window=broken), screen())
+    assert capture.grab().shape[:2] == (1440, 2560)
+    assert "game window not found" in capsys.readouterr().out

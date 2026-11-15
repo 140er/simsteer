@@ -165,7 +165,7 @@ class Capture:
             self._window_checked = now
             try:
                 self._window = self._find_window(self.cfg.window_processes)
-            except OSError:
+            except Exception:  # a failed lookup must never break capture
                 self._window = None
             rect = self._window
             if rect is None:

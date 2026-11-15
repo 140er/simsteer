@@ -73,8 +73,11 @@ def find_client_rect(process_names: tuple[str, ...]) -> WindowRect | None:
         _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
                     ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
 
-    user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
-    user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+    # Windows 10 1607+; older systems skip the DPI context.
+    set_dpi = getattr(user32, "SetThreadDpiAwarenessContext", None)
+    if set_dpi is not None:
+        set_dpi.restype = ctypes.c_void_p
+        set_dpi.argtypes = [ctypes.c_void_p]
     user32.MonitorFromRect.restype = ctypes.c_void_p
     user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
     kernel32.OpenProcess.restype = wintypes.HANDLE
@@ -117,7 +120,7 @@ def find_client_rect(process_names: tuple[str, ...]) -> WindowRect | None:
 
     # Physical pixels, matching what desktop duplication captures,
     # whatever DPI awareness the rest of the process runs with.
-    previous = user32.SetThreadDpiAwarenessContext(_PER_MONITOR_AWARE_V2)
+    previous = set_dpi(_PER_MONITOR_AWARE_V2) if set_dpi is not None else None
     try:
         user32.EnumWindows(visit, 0)
         if not candidates:
@@ -134,4 +137,4 @@ def find_client_rect(process_names: tuple[str, ...]) -> WindowRect | None:
                           bool(info.dwFlags & _MONITORINFOF_PRIMARY))
     finally:
         if previous:
-            user32.SetThreadDpiAwarenessContext(previous)
+            set_dpi(previous)
