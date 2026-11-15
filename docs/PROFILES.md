@@ -72,7 +72,8 @@ profile = "strict"
 seed = [3.5, 0.0015, 0.0]
 
 [liveparams.wheel]
-seed = [4.0, 0.0, 0.0]
+seed = [1.41, 0.0, 0.0]
+lag_frames = 1
 
 [[setup]]
 check = "scs_plugin"
@@ -143,6 +144,7 @@ built-in default.
 |---|---|
 | `[liveparams.gates] profile` | `strict` (games that report the wheel angle) or `loose` (games where it is derived from yaw rate). |
 | `[liveparams.gamepad] seed`, `[liveparams.wheel] seed` | `[a, b, c]` in `axis = a*wheel + b*wheel*v^2 + c`, the starting steering fit for that device until `liveparams_<id>_<device>.json` exists. Without one, `[10, 0, 0]`. |
+| `[liveparams.gamepad] lag_frames`, `[liveparams.wheel] lag_frames` | integer 0 to 20: frames between the game's observed steering input and the wheel angle, used to pair samples for that device's steering fit. Without one, the gate profile's value (5 for `strict`, 1 for `loose`). ETS2's vJoy wheel uses 1: it skips the gamepad's input smoothing. |
 
 A trusted fit needs at least 100 accepted samples, including 10 samples
 per turn with wheel magnitude at least 0.003 rad and a measured speed span

@@ -29,8 +29,9 @@ process_names = ["MyGame.exe"]
 telemetry = { kind = "none" }
 '''
 
-# `_INITIAL_SEEDS` in liveparams.py before profiles replaced it.
-OLD_ETS2_SEEDS = {"gamepad": (3.5, 0.0015, 0.0), "wheel": (4.0, 0.0, 0.0)}
+# `_INITIAL_SEEDS` in liveparams.py before profiles replaced it. The wheel
+# seed was a placeholder until a live vJoy drive measured 1.41 axis/rad.
+OLD_ETS2_SEEDS = {"gamepad": (3.5, 0.0015, 0.0), "wheel": (1.41, 0.0, 0.0)}
 
 
 def _write(folder: Path, name: str, text: str) -> Path:
@@ -106,6 +107,7 @@ passive_fit_safe = true
 profile = "loose"
 [liveparams.wheel]
 seed = [3, 0.001, 0]
+lag_frames = 2
 
 [[setup]]
 check = "camera_fov"
@@ -120,6 +122,7 @@ port = 7777
     assert p.capabilities.speed_source == "model" and p.capabilities.passive_fit_safe
     assert p.liveparams.gates == "loose"
     assert p.liveparams.seeds == {"wheel": (3.0, 0.001, 0.0)}
+    assert p.liveparams.lags == {"wheel": 2}
     assert [(s.check, dict(s.params)) for s in p.setup] == [
         ("camera_fov", {"where": "Options > Video"}), ("data_out", {"port": 7777})]
 
@@ -134,6 +137,9 @@ port = 7777
     ('[liveparams.gamepad]\nseed = [1, 0]', "liveparams.gamepad.seed", "three numbers"),
     ('[liveparams.keyboard]\nseed = [1, 0, 0]', "liveparams.keyboard", "unknown key"),
     ('[liveparams.gates]\nprofile = "medium"', "liveparams.gates.profile", "not one of"),
+    ('[liveparams.wheel]\nlag_frames = 21', "liveparams.wheel.lag_frames", "0 to 20"),
+    ('[liveparams.wheel]\nlag_frames = -1', "liveparams.wheel.lag_frames", "0 to 20"),
+    ('[liveparams.wheel]\nlag_frames = 1.5', "liveparams.wheel.lag_frames", "must be an integer"),
     ('[camera]\nfov_h_deg = 400', "camera.fov_h_deg", "between"),
     ('[camera.fov_source]\nfile = "x.cfg"', "camera.fov_source.key", "missing"),
     ('[[setup]]\nwhere = "x"', "setup[0].check", "missing"),

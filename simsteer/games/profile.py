@@ -25,6 +25,8 @@ from simsteer.runtime.telemetry import KINDS
 # `runtime.output.base.DeviceKind`, not imported because it pulls in the
 # device drivers.
 DEVICE_KINDS = ("gamepad", "wheel")
+# 20 frames is a second at the model rate; real input lag is far below.
+MAX_LAG_FRAMES = 20
 GATE_PROFILES = ("strict", "loose")
 SPEED_SOURCES = ("telemetry", "model")
 FOV_AXES = ("horizontal", "vertical")
@@ -79,6 +81,9 @@ class Camera:
 class LiveParamsSpec:
     gates: str = "strict"
     seeds: Mapping[str, tuple[float, float, float]] = field(default_factory=dict)
+    # Frames between the observed game input and the wheel angle, per
+    # device; devices not listed use the gate profile's value.
+    lags: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -220,15 +225,21 @@ def _liveparams(t: _Table) -> LiveParamsSpec:
         g = t.table("gates")
         gates = g.choice("profile", GATE_PROFILES, "strict")
         g.finish()
-    seeds = {}
+    seeds, lags = {}, {}
     for device in DEVICE_KINDS:
         if t.has(device):
             d = t.table(device)
             if d.has("seed"):
                 seeds[device] = _seed(d, "seed")
+            if d.has("lag_frames"):
+                lag = d.get("lag_frames", "int")
+                if not 0 <= lag <= MAX_LAG_FRAMES:
+                    raise d.error("lag_frames", f"must be 0 to {MAX_LAG_FRAMES}")
+                lags[device] = lag
             d.finish()
     t.finish()
-    return LiveParamsSpec(gates=gates, seeds=MappingProxyType(seeds))
+    return LiveParamsSpec(gates=gates, seeds=MappingProxyType(seeds),
+                          lags=MappingProxyType(lags))
 
 
 def _setup(t: _Table) -> tuple[SetupCheck, ...]:

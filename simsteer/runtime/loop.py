@@ -193,6 +193,7 @@ def run(settings: Settings, game: GameProfile | str, *,
     live_params = LiveParams(game=game_id, device_kind=settings.device,
                              seeds=profile.liveparams.seeds,
                              gates=profile.liveparams.gates,
+                             lags=profile.liveparams.lags,
                              clock=clock.now)
     lat_ctrl = LateralController(ctrl_cfg, live_params)
     long_ctrl = LongitudinalController(ctrl_cfg)
