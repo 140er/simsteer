@@ -121,11 +121,12 @@ class ControllerConfig:
     # Negative subtracts from lookahead — the function floors total
     # delay at 1 ms so negative values can't break the math.
     curvature_anticipation_s: float = 0.0
-    # Learn curvature_anticipation_s while engaged, so the total lead
-    # matches the measured delay from commanded to driven curvature
-    # (simsteer/core/learners/anticipation.py). Turn off to keep a
-    # hand-set value.
+    # Learn an offset on top of curvature_anticipation_s while engaged, so
+    # the total lead matches the measured delay from commanded to driven
+    # curvature (simsteer/core/learners/anticipation.py). The hand-set
+    # value stays as set; turn this off to drive with it alone.
     auto_anticipation: bool = True
+    learned_anticipation_s: float = 0.0
     # Bound the anticipation magnitude to the plan's peak curvature over
     # 1.5 times the effective lookahead. Applied before the jerk limit.
     curvature_anticipation_cap: bool = True
@@ -339,6 +340,11 @@ class ControllerConfig:
         atomic_save_json(path, asdict(self))
 
 
+def effective_anticipation(cfg: "ControllerConfig") -> float:
+    """Hand-set anticipation plus the learned offset while learning is on."""
+    return cfg.curvature_anticipation_s + (cfg.learned_anticipation_s if cfg.auto_anticipation else 0.0)
+
+
 class LateralController:
     def __init__(self, cfg: ControllerConfig | None = None,
                  live_params: LiveParams | None = None) -> None:
@@ -372,7 +378,7 @@ class LateralController:
         self.last_understeer_delivery = 1.0
         self.last_understeer_frozen_reason = "cold"
         self.last_curvature_error = 0.0
-        self.last_lookahead_s = max(.001, self.cfg.lookahead_s + self.cfg.curvature_anticipation_s)
+        self.last_lookahead_s = max(.001, self.cfg.lookahead_s + effective_anticipation(self.cfg))
         self._feedback_time = 0.0
         self._curve_history: deque[tuple[float, ...]] = deque(maxlen=512)
 
@@ -525,12 +531,12 @@ class LateralController:
             decoded.plan, v_ego,
             steer_actuator_delay=cfg.lookahead_s,
             last_desired_curvature=self.last_desired_k_raw,
-            extra_buffer_s=cfg.curvature_anticipation_s,
+            extra_buffer_s=effective_anticipation(cfg),
             dt=dt, lat_jerk_max_mps3=cfg.lat_jerk_max_mps3,
             anticipation_cap=cfg.curvature_anticipation_cap,
             anticipation_cap_min_curvature=cfg.curvature_anticipation_cap_min_curvature,
         )
-        self.last_lookahead_s = max(.001, cfg.lookahead_s + cfg.curvature_anticipation_s)
+        self.last_lookahead_s = max(.001, cfg.lookahead_s + effective_anticipation(cfg))
         self.last_desired_k_raw = k_raw
         k_total = k_raw
 

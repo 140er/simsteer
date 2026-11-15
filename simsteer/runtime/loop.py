@@ -24,6 +24,7 @@ Two things this loop fixes vs a naive port of v1's monolith:
 from __future__ import annotations
 
 import logging
+import math
 import subprocess
 import sys
 import time
@@ -50,7 +51,7 @@ from simsteer.core.calibration import Calibration, model_view_calib
 from simsteer.core.constants import DESIRE_LEN, T_IDXS
 from simsteer.core.finite import NonFiniteError, require_finite
 from simsteer.core.control import (
-    ControllerConfig, LateralController, LongitudinalController,
+    ControllerConfig, LateralController, LongitudinalController, effective_anticipation,
 )
 from simsteer.core.learners.anticipation import AnticipationLearner
 from simsteer.core.learners.livecalib import CalStatus, CameraBlockedReason, LiveCalib
@@ -98,8 +99,8 @@ KEY_BACKSPACE = 8
 
 
 def certified_controller(cfg) -> dict:
-    """The controller snapshot a steering Check records. Learned and
-    longitudinal fields are ignored when comparing (calib.flow)."""
+    """The controller snapshot a steering Check records. `contexts_match`
+    ignores the exempt fields (calib.flow.CHECK_EXEMPT_CONTROLLER_KEYS)."""
     return {k: v for k, v in asdict(cfg).items() if k != "speed_scale_max"}
 
 
@@ -205,6 +206,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                              clock=clock.now)
     lat_ctrl = LateralController(ctrl_cfg, live_params)
     anticipation = AnticipationLearner(ctrl_cfg)
+    last_lead_report = math.nan
     long_ctrl = LongitudinalController(ctrl_cfg)
     speed_scale = SpeedScale(game_id, ctrl_cfg)
     live_calib = LiveCalib(game=game_id, clock=clock.now)
@@ -580,11 +582,17 @@ def run(settings: Settings, game: GameProfile | str, *,
                         if anticipation.update(
                                 dt=control_dt, commanded_k=lat_ctrl.last_curvature,
                                 yaw_rate=actual_yaw if tel.available else None, speed=v_real,
-                                engaged=bool(pad and pad.engaged) and flow.ai_steering_ready,
+                                # A driver override steers the truck, not the command.
+                                engaged=(bool(pad and pad.engaged) and flow.ai_steering_ready
+                                         and not manual.steer_override),
                                 lane_change=lane_change.active or lat_ctrl.last_in_lane_change):
+                            # Queued to the session's background writer.
                             ctrl_cfg.save(game=game_id)
-                            print(f"turn-in lead {ctrl_cfg.lookahead_s + ctrl_cfg.curvature_anticipation_s:.2f}s "
-                                  f"(measured delay {anticipation.last_delay_s:.2f}s)")
+                            lead = ctrl_cfg.lookahead_s + effective_anticipation(ctrl_cfg)
+                            if abs(lead - last_lead_report) >= 0.02:
+                                last_lead_report = lead
+                                print(f"turn-in lead {lead:.2f}s "
+                                      f"(measured delay {anticipation.last_delay_s:.2f}s)")
                         ai_steer = flow.device_axis(ai_steer)
                         steer = manual.steer if manual.steer_override else ai_steer
                         if pad is not None and flow.ai_steering_ready and not manual.steer_override:

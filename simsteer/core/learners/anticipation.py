@@ -9,8 +9,9 @@ heavy truck at highway speed.
 
 While engaged, this records the commanded curvature and the curvature
 the vehicle actually drives (yaw rate / speed). Every few seconds it finds
-the delay that best aligns the two, and moves the anticipation so the
-total lead matches that delay. The delay belongs to the vehicle and the
+the delay that best aligns the two, and moves `learned_anticipation_s`,
+an offset on top of the hand-set anticipation, so the total lead matches
+that delay. The hand-set value is never written. The delay belongs to the vehicle and the
 game, not to the lead, so the estimate does not feed on itself.
 
 Only well-excited, steady stretches count: engaged, above
@@ -97,11 +98,13 @@ class AnticipationLearner:
         if best_delay is None or best_corr < MIN_CORRELATION:
             return False
         self.last_delay_s = best_delay
-        target = min(ANTICIPATION_MAX_S, max(ANTICIPATION_MIN_S, best_delay - self.cfg.lookahead_s))
-        current = self.cfg.curvature_anticipation_s
+        manual = self.cfg.curvature_anticipation_s
+        total = min(ANTICIPATION_MAX_S, max(ANTICIPATION_MIN_S, best_delay - self.cfg.lookahead_s))
+        target = total - manual
+        current = self.cfg.learned_anticipation_s
         new = round(current + SMOOTHING * (target - current), 3)
         self.estimates += 1
         if abs(new - current) < 1e-3:
             return False
-        self.cfg.curvature_anticipation_s = new
+        self.cfg.learned_anticipation_s = new
         return True

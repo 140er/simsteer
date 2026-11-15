@@ -91,7 +91,7 @@ model plan curvature k
 | **Axis bias** | Constant left/right trim added to output. | A persistent steady drift to one side. |
 | **Lookahead (s)** | Static actuator delay = openpilot's per-car `steerActuatorDelay`. The controller reads the plan this far ahead so the command lines up with the wheel by the time it lands. | — usually leave at default 0.3 (range 0.10–0.40). |
 | **Anticipation (s)** | Extra lead time on top of lookahead (openpilot uses a fixed +0.2 s). | Truck turns in **too early** → lower it (negative steers later). **Too late** → raise it. |
-| **Learn anticipation** | On by default: while engaged, SimSteer measures the delay from commanded to driven curvature and moves Anticipation so `lookahead + anticipation` matches it, within the knob's range. The console prints each new lead. A learned lead does not invalidate a passed Check. | Turn it **off** to keep a hand-set Anticipation. |
+| **Learn anticipation** | On by default: while engaged (not overridden), SimSteer measures the delay from commanded to driven curvature and learns an offset on top of Anticipation, so `lookahead + anticipation + offset` matches it within Anticipation's range. Your Anticipation value is never changed, and editing it still asks for a new Check; the learned offset does not. The console prints the lead when it moves. | Turn it **off** to drive with your Anticipation alone. |
 | **Wheelbase (m)** | Bicycle-model wheelbase. A constant error here just rolls into the LiveParams fit. | Rarely. |
 
 **Timing intuition**: the controller steers toward the plan's yaw at

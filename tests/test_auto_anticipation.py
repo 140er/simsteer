@@ -7,7 +7,7 @@ import math
 import numpy as np
 import pytest
 
-from simsteer.core.control import ControllerConfig
+from simsteer.core.control import ControllerConfig, effective_anticipation
 from simsteer.core.learners import anticipation as an
 from simsteer.core.learners.anticipation import AnticipationLearner
 
@@ -41,14 +41,16 @@ def test_learns_a_lead_that_matches_the_measured_delay():
     learner = AnticipationLearner(cfg)
     assert drive(learner, 120, delay=0.6, noise=0.0002)
     assert learner.last_delay_s == pytest.approx(0.6, abs=0.05)
-    assert cfg.lookahead_s + cfg.curvature_anticipation_s == pytest.approx(0.6, abs=0.06)
+    assert cfg.lookahead_s + effective_anticipation(cfg) == pytest.approx(0.6, abs=0.06)
+    assert cfg.curvature_anticipation_s == 0.0  # the hand-set value is never written
 
 
 def test_shorter_delay_lowers_the_lead():
     cfg = ControllerConfig(lookahead_s=0.3, curvature_anticipation_s=0.3)
     learner = AnticipationLearner(cfg)
     drive(learner, 120, delay=0.15)
-    assert cfg.curvature_anticipation_s == pytest.approx(-0.15, abs=0.06)
+    assert effective_anticipation(cfg) == pytest.approx(-0.15, abs=0.06)
+    assert cfg.learned_anticipation_s == pytest.approx(-0.45, abs=0.06)
 
 
 @pytest.mark.parametrize("kw", [dict(engaged=False), dict(lane_change=True), dict(speed=5.0),
@@ -57,13 +59,14 @@ def test_unusable_stretches_leave_the_lead_alone(kw):
     cfg = ControllerConfig(lookahead_s=0.3, curvature_anticipation_s=0.1)
     learner = AnticipationLearner(cfg)
     assert not drive(learner, 60, **kw)
-    assert cfg.curvature_anticipation_s == 0.1
+    assert cfg.learned_anticipation_s == 0.0
 
 
 def test_switched_off_keeps_a_hand_set_lead():
-    cfg = ControllerConfig(lookahead_s=0.3, curvature_anticipation_s=0.2, auto_anticipation=False)
+    cfg = ControllerConfig(lookahead_s=0.3, curvature_anticipation_s=0.2, auto_anticipation=False,
+                           learned_anticipation_s=0.1)
     assert not drive(AnticipationLearner(cfg), 60)
-    assert cfg.curvature_anticipation_s == 0.2
+    assert cfg.learned_anticipation_s == 0.1 and effective_anticipation(cfg) == 0.2
 
 
 def test_lead_stays_within_the_knob_range():
@@ -71,7 +74,7 @@ def test_lead_stays_within_the_knob_range():
     learner = AnticipationLearner(cfg)
     for _ in range(10):
         drive(learner, 30, delay=1.1)
-    assert cfg.curvature_anticipation_s <= an.ANTICIPATION_MAX_S
+    assert effective_anticipation(cfg) <= an.ANTICIPATION_MAX_S + 1e-9
 
 
 def test_disengage_starts_a_fresh_window_and_learning_resumes():
@@ -82,7 +85,7 @@ def test_disengage_starts_a_fresh_window_and_learning_resumes():
     assert len(learner._samples) == 0
     estimates = learner.estimates
     assert drive(learner, 40, delay=0.6)
-    assert learner.estimates > estimates and cfg.curvature_anticipation_s > 0
+    assert learner.estimates > estimates and cfg.learned_anticipation_s > 0
 
 
 def test_loop_resets_the_learner_when_output_stops(monkeypatch):

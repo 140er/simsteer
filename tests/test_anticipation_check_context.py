@@ -16,15 +16,16 @@ def context(**controller):
 
 
 def test_a_learned_lead_does_not_revoke_a_passed_check():
-    """While the lead is learned, a Check stays valid as it moves, including
-    certificates saved before the lead could be learned."""
-    assert getattr(ControllerConfig(), "auto_anticipation", False) is True
-    old_certificate = context()  # saved before the learning switch existed
-    assert contexts_match(old_certificate, context(curvature_anticipation_s=0.25, auto_anticipation=True))
-    assert not contexts_match(old_certificate, context(steer_authority=1.2, auto_anticipation=True))
+    """The learned offset moves freely under a passed Check, including
+    certificates saved before it existed."""
+    assert getattr(ControllerConfig(), "learned_anticipation_s", None) == 0.0
+    old_certificate = context()  # saved before learning existed
+    assert contexts_match(old_certificate,
+                          context(auto_anticipation=True, learned_anticipation_s=0.25))
+    assert not contexts_match(old_certificate, context(steer_authority=1.2))
 
 
-def test_a_hand_set_lead_stays_certified():
-    saved = context(auto_anticipation=False)
-    assert contexts_match(saved, context(auto_anticipation=False))
-    assert not contexts_match(saved, context(curvature_anticipation_s=0.1, auto_anticipation=False))
+def test_a_hand_set_lead_stays_certified_while_learning_is_on():
+    saved = context(auto_anticipation=True, learned_anticipation_s=0.1)
+    assert not contexts_match(saved, context(curvature_anticipation_s=0.1, auto_anticipation=True,
+                                             learned_anticipation_s=0.1))
