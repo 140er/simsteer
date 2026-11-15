@@ -43,7 +43,7 @@ from simsteer.app.manual import ManualInputs
 from simsteer.app.nav import ManeuverDir, NavManager
 from simsteer.app.probe import SteeringProbe
 from simsteer.app.settings import Settings
-from simsteer.calib.flow import CalibFlow, Obs, Step, steering_fit_for
+from simsteer.calib.flow import CHECK_EXEMPT_CONTROLLER_KEYS, CalibFlow, Obs, Step, steering_fit_for
 from simsteer.calib.fov_source import profile_reader
 from simsteer.calib.score import CheckPolicy
 from simsteer.core.calibration import Calibration, model_view_calib
@@ -55,6 +55,7 @@ from simsteer.core.control import (
 from simsteer.core.learners.livecalib import CalStatus, CameraBlockedReason, LiveCalib
 from simsteer.core.learners.liveparams import LiveParams
 from simsteer.core.lane_change import ManualLaneChange
+from simsteer.core.learners.anticipation import AnticipationLearner
 from simsteer.core.model import DrivingModel
 from simsteer.core.postprocess import decode
 from simsteer.core.steering import STEERING_TIMEOUT_S, SteeringTarget
@@ -94,6 +95,11 @@ DESIRE_LANE_CHANGE_LEFT = 3
 DESIRE_LANE_CHANGE_RIGHT = 4
 
 KEY_BACKSPACE = 8
+
+
+def certified_controller(cfg) -> dict:
+    """The controller settings a steering Check certifies."""
+    return {k: v for k, v in asdict(cfg).items() if k not in CHECK_EXEMPT_CONTROLLER_KEYS}
 
 MIN_HEALTHY_FPS = 8.0
 # Healthy run time (s) before the capture-detail advisory may show.
@@ -196,6 +202,7 @@ def run(settings: Settings, game: GameProfile | str, *,
                              lags=profile.liveparams.lags,
                              clock=clock.now)
     lat_ctrl = LateralController(ctrl_cfg, live_params)
+    anticipation = AnticipationLearner(ctrl_cfg)
     long_ctrl = LongitudinalController(ctrl_cfg)
     speed_scale = SpeedScale(game_id, ctrl_cfg)
     live_calib = LiveCalib(game=game_id, clock=clock.now)
@@ -238,9 +245,7 @@ def run(settings: Settings, game: GameProfile | str, *,
             steering_fit_for(profile), profile.capabilities.synth_wheel_angle),
         model_identity=getattr(model, "certification_identity", None),
         certification_context=lambda: {
-            # Longitudinal residual learning does not change steering certification.
-            "controller": {k: v for k, v in asdict(ctrl_cfg).items()
-                           if k != "speed_scale_max"}, "device": settings.device,
+            "controller": certified_controller(ctrl_cfg), "device": settings.device,
             "device_id": settings.vjoy_device,
             "binding": getattr(pad, "binding_identity", None),
             **vehicle_context(tel),
@@ -360,6 +365,7 @@ def run(settings: Settings, game: GameProfile | str, *,
         if flow.output_direction.active:
             flow.output_direction.cancel("Output stopped")
         lat_ctrl.reset()
+        anticipation.reset()
         last_control_at = None
         long_ctrl.reset()
         probe.reset()
@@ -569,6 +575,14 @@ def run(settings: Settings, game: GameProfile | str, *,
                             wheel_sign=flow.steering_sign,
                             actual_yaw_rate=actual_yaw if tel.available else None)
                         require_finite("lateral", output=ai_steer)
+                        if anticipation.update(
+                                dt=control_dt, commanded_k=lat_ctrl.last_curvature,
+                                yaw_rate=actual_yaw if tel.available else None, speed=v_real,
+                                engaged=bool(pad and pad.engaged) and flow.ai_steering_ready,
+                                lane_change=lane_change.active or lat_ctrl.last_in_lane_change):
+                            ctrl_cfg.save(game=game_id)
+                            print(f"turn-in lead {ctrl_cfg.lookahead_s + ctrl_cfg.curvature_anticipation_s:.2f}s "
+                                  f"(measured delay {anticipation.last_delay_s:.2f}s)")
                         ai_steer = flow.device_axis(ai_steer)
                         steer = manual.steer if manual.steer_override else ai_steer
                         if pad is not None and flow.ai_steering_ready and not manual.steer_override:

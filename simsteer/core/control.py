@@ -121,6 +121,11 @@ class ControllerConfig:
     # Negative subtracts from lookahead — the function floors total
     # delay at 1 ms so negative values can't break the math.
     curvature_anticipation_s: float = 0.0
+    # Learn curvature_anticipation_s while engaged, so the total lead
+    # matches the measured delay from commanded to driven curvature
+    # (simsteer/core/learners/anticipation.py). Turn off to keep a
+    # hand-set value.
+    auto_anticipation: bool = True
     # Bound the anticipation magnitude to the plan's peak curvature over
     # 1.5 times the effective lookahead. Applied before the jerk limit.
     curvature_anticipation_cap: bool = True

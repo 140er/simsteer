@@ -61,6 +61,15 @@ POSE_HEIGHT_TOLERANCE_M = 0.05
 FULL_CHECK_LOG_INTERVAL_S = 1.0
 
 
+# Controller fields that may change after a passed Check without revoking
+# it: the longitudinal speed-scale ceiling, and the turn-in lead that is
+# learned online within fixed bounds (core/learners/anticipation.py).
+# Ignored on both sides, so certificates saved before a field joined this
+# set still match.
+CHECK_EXEMPT_CONTROLLER_KEYS = frozenset(
+    {"speed_scale_max", "curvature_anticipation_s", "auto_anticipation"})
+
+
 def contexts_match(saved: dict | None, current: dict) -> bool:
     if not isinstance(saved, dict) or not saved:
         return False
@@ -73,6 +82,10 @@ def contexts_match(saved: dict | None, current: dict) -> bool:
         controls = dict(context.get("controls", {}))
         if controls.get("vehicle") is None:
             controls.pop("vehicle", None)
+        controller = controls.get("controller")
+        if isinstance(controller, dict):
+            controls["controller"] = {k: v for k, v in controller.items()
+                                      if k not in CHECK_EXEMPT_CONTROLLER_KEYS}
         return {**context, "controls": controls}
     saved, current = normalized(saved), normalized(current)
     if old_camera.get("simple_warp", True) or camera.get("simple_warp", True):
