@@ -22,3 +22,4 @@ Invoke-Step 'ruff' { & $py -m ruff check --no-cache . }
 Invoke-Step 'pytest' { & $py -m pytest tests -q -p no:cacheprovider }
 Invoke-Step 'simsteer --help' { & $py -m simsteer --help }
 Invoke-Step 'windows imports' { & $py scripts\check_windows_imports.py }
+Invoke-Step 'test-rig --help' { & $py -m tools.testrig --help }
